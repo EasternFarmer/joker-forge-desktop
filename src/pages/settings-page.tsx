@@ -107,6 +107,7 @@ import {
   type ThemeVariable,
 } from "../lib/app/theme-manager";
 import KeybindInput from "@/components/settings/keybind-input";
+import BalatroModSetup from "@/components/settings/balatro-mod-setup";
 import { pushGlobalAlert } from "@/lib/app/global-alerts-bus";
 import { fuzzyMatch } from "@/lib/core/search";
 
@@ -399,6 +400,7 @@ export default function SettingsPage() {
   const [confirmDeletes, setConfirmDeletes] = useState(true);
   const [balatroAppdataPath, setBalatroAppdataPathState] = useState("");
   const [balatroGamePath, setBalatroGamePathState] = useState("");
+  const [isInstallingBalatroMods, setIsInstallingBalatroMods] = useState(false);
   const [splitLocalizationExport, setSplitLocalizationExport] = useState(false);
   const [modExportDestinationMode, setModExportDestinationMode] =
     useState<ExportDestinationMode>("downloads");
@@ -723,6 +725,7 @@ export default function SettingsPage() {
         "Keep Balatro Mods Folder To One Managed Mod",
         "Balatro AppData folder",
         "Balatro game folder",
+        "Steamodded Lovely Mod Setup Install Update",
         "Launch/Relaunch Game On Export",
         "Confirm Deleting A Rule",
         "Confirm Deleting A Rule Block",
@@ -776,6 +779,7 @@ export default function SettingsPage() {
       paths: [
         "Balatro AppData folder",
         "Balatro game folder",
+        "Steamodded Lovely Mod Setup Install Update",
         "Launch/Relaunch Game On Export",
       ],
       theme: ["Theme Studio", "Light", "Dark", "Export", "Import", "Theme"],
@@ -1217,6 +1221,7 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <Input
                         value={balatroAppdataPath}
+                        disabled={isInstallingBalatroMods}
                         onChange={(event) => {
                           const next = event.target.value;
                           setBalatroAppdataPathState(next);
@@ -1231,6 +1236,7 @@ export default function SettingsPage() {
                         size="icon"
                         className="h-9 w-9 cursor-pointer"
                         onClick={handleBrowseBalatroAppdataPath}
+                        disabled={isInstallingBalatroMods}
                       >
                         <FolderOpen className="h-4 w-4" />
                       </Button>
@@ -1246,6 +1252,7 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <Input
                         value={balatroGamePath}
+                        disabled={isInstallingBalatroMods}
                         onChange={(event) => {
                           const next = event.target.value;
                           setBalatroGamePathState(next);
@@ -1260,6 +1267,7 @@ export default function SettingsPage() {
                         size="icon"
                         className="h-9 w-9 cursor-pointer"
                         onClick={handleBrowseBalatroGamePath}
+                        disabled={isInstallingBalatroMods}
                       >
                         <FolderOpen className="h-4 w-4" />
                       </Button>
@@ -1268,6 +1276,24 @@ export default function SettingsPage() {
                       Balatro game folder (contains `Balatro.exe`). Used to launch the game after exporting.
                     </p>
                   </>
+                )}
+
+                {showSetting("Steamodded Lovely Mod Setup Install Update") && (
+                  <BalatroModSetup
+                    appdataPath={balatroAppdataPath}
+                    gamePath={balatroGamePath}
+                    onInstallingChange={setIsInstallingBalatroMods}
+                    onPathsResolved={(paths) => {
+                      if (!balatroAppdataPath.trim() && paths.appdataPath) {
+                        setBalatroAppdataPathState(paths.appdataPath);
+                        setBalatroAppdataPath(paths.appdataPath);
+                      }
+                      if (!balatroGamePath.trim() && paths.gamePath) {
+                        setBalatroGamePathState(paths.gamePath);
+                        setBalatroGamePath(paths.gamePath);
+                      }
+                    }}
+                  />
                 )}
 
                 {showSetting("Launch/Relaunch Game On Export") && (

@@ -1508,7 +1508,7 @@ fn has_balatro_exe(path: &Path) -> bool {
     path.join("Balatro.exe").exists()
 }
 
-fn resolve_appdata_root_from_any_path(raw: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_appdata_root_from_any_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -1567,7 +1567,7 @@ fn resolve_default_balatro_appdata_root() -> Option<PathBuf> {
     None
 }
 
-fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
+pub(crate) fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
     let uppercase = appdata_root.join("Mods");
     let lowercase = appdata_root.join("mods");
     if uppercase.exists() {
@@ -1579,7 +1579,7 @@ fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
     uppercase
 }
 
-fn resolve_game_dir_from_any_path(raw: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_game_dir_from_any_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -1767,7 +1767,7 @@ fn auto_find_balatro_game_dir() -> Option<PathBuf> {
     None
 }
 
-fn resolve_balatro_paths_internal(
+pub(crate) fn resolve_balatro_paths_internal(
     configured_appdata_path: Option<String>,
     configured_game_path: Option<String>,
     legacy_path: Option<String>,
@@ -1825,60 +1825,17 @@ pub fn auto_find_balatro_paths(
     }
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target)
-        .map_err(|e| format!("Failed to create {}: {}", target.display(), e))?;
-
-    for entry in fs::read_dir(source)
-        .map_err(|e| format!("Failed to read directory {}: {}", source.display(), e))?
-    {
-        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let metadata = entry.metadata().map_err(|e| {
-            format!(
-                "Failed to read metadata for {}: {}",
-                source_path.display(),
-                e
-            )
-        })?;
-
-        if metadata.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-        } else if metadata.is_file() {
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-            }
-            fs::copy(&source_path, &target_path).map_err(|e| {
-                format!(
-                    "Failed to copy {} to {}: {}",
-                    source_path.display(),
-                    target_path.display(),
-                    e
-                )
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
 pub fn ensure_balatro_mod_setup(
     appdata_path: Option<String>,
     game_path: Option<String>,
     legacy_path: Option<String>,
-    app: AppHandle,
 ) -> Result<BalatroSetupResult, String> {
     let (resolved_appdata, resolved_game) =
         resolve_balatro_paths_internal(appdata_path, game_path, legacy_path);
 
     let appdata_root =
         resolved_appdata.ok_or_else(|| "Unable to find Balatro AppData folder.".to_string())?;
-    let game_dir =
-        resolved_game.ok_or_else(|| "Unable to find Balatro game folder.".to_string())?;
-
     let mods_dir = resolve_mods_dir_from_appdata(&appdata_root);
     if mods_dir.exists() && !mods_dir.is_dir() {
         return Err(format!(
@@ -1889,35 +1846,11 @@ pub fn ensure_balatro_mod_setup(
     fs::create_dir_all(&mods_dir)
         .map_err(|e| format!("Failed to create Mods folder {}: {}", mods_dir.display(), e))?;
 
-    let smods_target = mods_dir.join("smods");
-    if smods_target.exists() && !smods_target.is_dir() {
-        return Err(format!(
-            "Steamodded target exists but is not a folder: {}",
-            smods_target.display()
-        ));
-    }
-    let smods_manifest = smods_target.join("manifest.json");
-    let smods_src_dir = smods_target.join("src");
-    let should_sync_smods =
-        !smods_target.exists() || !smods_manifest.exists() || !smods_src_dir.is_dir();
-    if should_sync_smods {
-        let smods_source = resolve_bundled_any(
-            &app,
-            &[
-                "other/smods-main",
-                "_up_/public/other/smods-main",
-                "smods-main",
-            ],
-        )
-        .ok_or_else(|| {
-            "Missing bundled Steamodded folder: expected one of `other/smods-main`, `_up_/public/other/smods-main`, or `smods-main`".to_string()
-        })?;
-        copy_dir_recursive(&smods_source, &smods_target)?;
-    }
-
     Ok(BalatroSetupResult {
         appdata_path: appdata_root.to_string_lossy().to_string(),
-        game_path: game_dir.to_string_lossy().to_string(),
+        game_path: resolved_game
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
         mods_path: mods_dir.to_string_lossy().to_string(),
     })
 }

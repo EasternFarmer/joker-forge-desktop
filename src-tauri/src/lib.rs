@@ -1,7 +1,7 @@
 mod cli_codegen_item;
 mod mod_engine;
 
-use mod_engine::{commands, state::AppState};
+use mod_engine::{balatro_setup, commands, state::AppState};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -150,6 +150,8 @@ pub fn run() {
             commands::export_mod_package,
             commands::auto_find_balatro_paths,
             commands::ensure_balatro_mod_setup,
+            balatro_setup::inspect_balatro_mod_setup,
+            balatro_setup::install_latest_balatro_mod_setup,
             commands::download_release_asset,
             commands::install_update_and_restart,
             commands::open_devtools,

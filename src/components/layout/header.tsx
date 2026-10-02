@@ -269,7 +269,7 @@ export function Header({ title }: HeaderProps) {
           legacyPath: configuredAppdataPath,
         });
         setBalatroAppdataPath(setupResult.appdataPath);
-        setBalatroGamePath(setupResult.gamePath);
+        if (setupResult.gamePath) setBalatroGamePath(setupResult.gamePath);
         balatroModsPath = setupResult.modsPath;
       }
 
