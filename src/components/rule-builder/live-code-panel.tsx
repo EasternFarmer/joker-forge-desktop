@@ -16,6 +16,7 @@ import {
   Compartment,
   StateField,
   StateEffect,
+  Transaction,
   type Range,
 } from "@codemirror/state";
 import {
@@ -44,6 +45,7 @@ import {
 } from "@codemirror/autocomplete";
 import { luaSmodsCompletions } from "@/lib/content/lua-completions";
 import type { CodeSegment } from "@/lib/content/code-sections";
+import type { BoundFieldRange, CodeEdit } from "@/lib/content/live-code-sync";
 
 interface LiveCodePanelProps {
   title: string;
@@ -56,10 +58,11 @@ interface LiveCodePanelProps {
   isBlockPreview: boolean;
   onBackToItem: () => void;
   onStartResize: (e: React.MouseEvent) => void;
-  onCodeChange?: (code: string) => void;
+  onCodeChange?: (code: string, changes?: CodeEdit[]) => void;
   onResetCustomCode?: () => void;
   hasCustomCode?: boolean;
   segments?: CodeSegment[];
+  fieldRanges?: BoundFieldRange[];
   selectedSegmentId?: string;
   hoveredSegmentId?: string;
   conditionClauseIndexBySegmentId?: Record<string, number>;
@@ -67,6 +70,12 @@ interface LiveCodePanelProps {
 
 // Theme that inherits the panel background (transparent)
 const editorTheme = EditorView.theme({
+  ".cm-jf-linked-field": {
+    textDecorationLine: "underline",
+    textDecorationStyle: "dotted",
+    textDecorationColor: "hsl(var(--muted-foreground) / 0.5)",
+    textUnderlineOffset: "3px",
+  },
   "&": {
     height: "100%",
     backgroundColor: "transparent !important",
@@ -197,6 +206,19 @@ const segmentHighlightField = StateField.define<DecorationSet>({
       if (effect.is(setSegmentDecorationsEffect)) {
         next = effect.value;
       }
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const setLinkedFieldsEffect = StateEffect.define<DecorationSet>();
+const linkedFieldsField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let next = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (effect.is(setLinkedFieldsEffect)) next = effect.value;
     }
     return next;
   },
@@ -395,6 +417,7 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
   selectedSegmentId,
   hoveredSegmentId,
   conditionClauseIndexBySegmentId = {},
+  fieldRanges = [],
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -776,7 +799,11 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged && !isExternalUpdateRef.current) {
         const newCode = update.state.doc.toString();
-        onCodeChangeRef.current?.(newCode);
+        const changes: CodeEdit[] = [];
+        update.changes.iterChanges((from, to, _fromNew, _toNew, inserted) => {
+          changes.push({ from, to, insert: inserted.toString() });
+        });
+        onCodeChangeRef.current?.(newCode, changes);
       }
     });
 
@@ -877,6 +904,7 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
         EditorState.allowMultipleSelections.of(true),
         readOnlyCompartment.of(EditorState.readOnly.of(!isEditable)),
         segmentHighlightField,
+        linkedFieldsField,
         updateListener,
         EditorView.lineWrapping,
       ],
@@ -906,13 +934,24 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
     const currentCode = view.state.doc.toString();
 
     if (currentCode !== displayCode) {
+      let from = 0;
+      while (from < currentCode.length && from < displayCode.length && currentCode[from] === displayCode[from]) {
+        from += 1;
+      }
+      let oldEnd = currentCode.length;
+      let newEnd = displayCode.length;
+      while (oldEnd > from && newEnd > from && currentCode[oldEnd - 1] === displayCode[newEnd - 1]) {
+        oldEnd -= 1;
+        newEnd -= 1;
+      }
       isExternalUpdateRef.current = true;
       view.dispatch({
         changes: {
-          from: 0,
-          to: currentCode.length,
-          insert: displayCode,
+          from,
+          to: oldEnd,
+          insert: displayCode.slice(from, newEnd),
         },
+        annotations: Transaction.addToHistory.of(false),
       });
       isExternalUpdateRef.current = false;
 
@@ -940,6 +979,18 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
       effects: setSegmentDecorationsEffect.of(buildSegmentHighlightDecorations()),
     });
   }, [buildSegmentHighlightDecorations]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const marks = isEditable ? fieldRanges.filter((range) =>
+      range.from >= 0 && range.to > range.from && range.to <= displayCode.length,
+    ).map((range) => Decoration.mark({
+      class: "cm-jf-linked-field",
+      attributes: { title: "Linked to the builder" },
+    }).range(range.from, range.to)) : [];
+    view.dispatch({ effects: setLinkedFieldsEffect.of(Decoration.set(marks, true)) });
+  }, [displayCode, fieldRanges, isEditable]);
 
   return (
     <aside
@@ -1023,6 +1074,12 @@ const LiveCodePanel: React.FC<LiveCodePanelProps> = ({
             </span>
           </div>
         </div>
+
+        {!isBlockPreview && isEditable && (
+          <p className="px-4 py-1.5 text-[10px] text-muted-foreground border-b border-border/50">
+            Underlined values update here and in the builder.
+          </p>
+        )}
 
         {statusMessage ? (
           <div

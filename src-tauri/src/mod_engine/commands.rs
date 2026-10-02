@@ -557,6 +557,7 @@ pub struct PreviewCodeSegment {
 pub struct CompiledLuaWithSegments {
     pub code: String,
     pub segments: Vec<PreviewCodeSegment>,
+    pub field_bindings: Vec<balatro_codegen::lua_ast::LuaFieldBinding>,
 }
 
 #[tauri::command]
@@ -575,7 +576,7 @@ pub fn compile_item_from_data_with_segments(
         .map(super::export::map_user_variable_inputs)
         .unwrap_or_default();
 
-    let (code, segments) = match item_type.as_str() {
+    let (code, segments, field_bindings) = match item_type.as_str() {
         "joker" => {
             let parsed: JokerDataInput = serde_json::from_value(item_data)
                 .map_err(|e| format!("Invalid joker data: {}", e))?;
@@ -583,7 +584,7 @@ pub fn compile_item_from_data_with_segments(
                 super::export::joker_data_to_def(&parsed, &mod_prefix, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_joker_with_options(&def, &mod_prefix, include_loc_txt);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "consumable" => {
             let parsed: ConsumableDataInput = serde_json::from_value(item_data)
@@ -591,7 +592,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::consumable_data_to_def(&parsed, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_consumable(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "voucher" => {
             let parsed: VoucherDataInput = serde_json::from_value(item_data)
@@ -599,7 +600,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::voucher_data_to_def(&parsed, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_voucher(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "deck" => {
             let parsed: DeckDataInput = serde_json::from_value(item_data)
@@ -607,7 +608,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::deck_data_to_def(&parsed, &mod_prefix, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_deck(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "enhancement" => {
             let parsed: EnhancementDataInput = serde_json::from_value(item_data)
@@ -615,7 +616,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::enhancement_data_to_def(&parsed, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_enhancement(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "seal" => {
             let parsed: SealDataInput = serde_json::from_value(item_data)
@@ -623,7 +624,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::seal_data_to_def(&parsed, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_seal(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "edition" => {
             let parsed: EditionDataInput = serde_json::from_value(item_data)
@@ -631,7 +632,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::edition_data_to_def(&parsed);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_edition(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         _ => return Err(format!("Unsupported item type: {}", item_type)),
     };
@@ -652,7 +653,29 @@ pub fn compile_item_from_data_with_segments(
     Ok(CompiledLuaWithSegments {
         code,
         segments: mapped_segments,
+        field_bindings,
     })
+}
+
+#[cfg(test)]
+mod live_code_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_command_returns_editable_rule_fields_in_ipc_contract() {
+        let input = serde_json::json!({
+            "objectKey": "preview", "name": "Preview", "description": "Test", "cost": 4, "rarity": "common",
+            "rules": [{ "id": "rule", "trigger": "hand_played", "conditionGroups": [{ "operator": "and", "conditions": [{
+                "id": "os", "type": "system_condition", "params": { "system": { "value": "Windows" } }
+            }] }], "effects": [{ "id": "mult", "type": "add_mult", "params": { "value": { "value": "7", "valueType": "number" } } }] }]
+        });
+        let output = compile_item_from_data_with_segments("joker".into(), input, None, None, "mod".into(), true, None).unwrap();
+        let output = serde_json::to_value(output).unwrap();
+        let bindings = output["fieldBindings"].as_array().expect("metadata uses the camelCase IPC field");
+        assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "conditionGroups", 0, "conditions", 0, "params", "system", "value"]) && binding["originalValue"] == "Windows"));
+        assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "effects", 0, "params", "value", "value"]) && binding["originalValue"] == 7 && binding["valueType"] == "number"));
+        assert!(output["code"].as_str().unwrap().contains("love.system.getOS() == 'Windows'"));
+    }
 }
 
 /// Compile and write a batch of jokers to disk in a single IPC call.

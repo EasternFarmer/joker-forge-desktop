@@ -58,6 +58,19 @@ export interface CustomCodeState {
     endLine: number;
     endColumn: number;
   }>;
+  // Literal positions and stable block identities for linked code edits.
+  fieldRanges?: Array<{
+    sourcePath: Array<string | number>;
+    valueType: "string" | "number" | "boolean";
+    originalValue: string | number | boolean;
+    startLine: number;
+    startColumn: number;
+    endLine: number;
+    endColumn: number;
+    from: number;
+    to: number;
+    sourceIds?: Record<number, string>;
+  }>;
 }
 
 export interface PixelLayerData {

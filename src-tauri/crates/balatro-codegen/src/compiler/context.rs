@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::lua_ast::Expr;
+use crate::lua_ast::{Expr, LuaFieldSource};
 use crate::types::{
-    ConfigValue, ConfigVar, DescriptionVariableBinding, ObjectType, UserVarType, UserVariableDef,
+    ConfigValue, ConfigVar, DescriptionVariableBinding, ObjectType, ParamValue, UserVarType, UserVariableDef,
 };
 
 #[derive(Debug, Clone)]
@@ -37,6 +37,10 @@ pub struct CompileContext {
     description_variables: Option<Vec<DescriptionVariableBinding>>,
     description_probabilities: HashMap<String, DescriptionProbability>,
     effect_config_names: HashMap<String, Vec<String>>,
+    preview_rule_index: Option<usize>,
+    preview_node_path: Vec<serde_json::Value>,
+    preview_parameters: HashMap<String, ParamValue>,
+    preview_config_sources: HashMap<String, LuaFieldSource>,
 
     /// Monotonic index for deterministic probability config variable names.
     probability_var_index: usize,
@@ -70,6 +74,10 @@ impl CompileContext {
             description_variables: None,
             description_probabilities: HashMap::new(),
             effect_config_names: HashMap::new(),
+            preview_rule_index: None,
+            preview_node_path: Vec::new(),
+            preview_parameters: HashMap::new(),
+            preview_config_sources: HashMap::new(),
             probability_var_index: 0,
             loop_var_index: 0,
             random_group_index: 0,
@@ -256,6 +264,152 @@ impl CompileContext {
         self.effect_config_names.get(effect_id).map(Vec::as_slice)
     }
 
+    pub(crate) fn begin_preview_rule(&mut self, index: usize) {
+        self.preview_rule_index = Some(index);
+        self.preview_node_path.clear();
+        self.preview_parameters.clear();
+    }
+
+    pub(crate) fn set_preview_node(
+        &mut self,
+        tail: Vec<serde_json::Value>,
+        params: &HashMap<String, ParamValue>,
+    ) {
+        self.preview_node_path = self
+            .preview_rule_index
+            .map(|index| {
+                let mut path = vec![serde_json::json!("rules"), serde_json::json!(index)];
+                path.extend(tail);
+                path
+            })
+            .unwrap_or_default();
+        self.preview_parameters = params.clone();
+    }
+
+    fn preview_parameter_source(&self, key: &str) -> Option<LuaFieldSource> {
+        if self.preview_node_path.is_empty() {
+            return None;
+        }
+        let value = self.preview_parameters.get(key)?;
+        let original_value = match value {
+            ParamValue::Int(value) => serde_json::json!(value),
+            ParamValue::Float(value) => serde_json::json!(value),
+            ParamValue::Bool(value) => serde_json::json!(value),
+            ParamValue::Str(value) => serde_json::json!(value),
+            ParamValue::Typed(value) => {
+                if matches!(
+                    value.value_type.as_str(),
+                    "user_var" | "userVariable" | "game_var" | "gameVariable" | "range" | "range_var"
+                ) {
+                    return None;
+                }
+                value.value.clone()
+            }
+        };
+        if !matches!(
+            original_value,
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::String(_)
+        ) {
+            return None;
+        }
+        let mut source_path = self.preview_node_path.clone();
+        source_path.extend([
+            serde_json::json!("params"),
+            serde_json::json!(key),
+            serde_json::json!("value"),
+        ]);
+        Some(LuaFieldSource {
+            source_path,
+            original_value,
+        })
+    }
+
+    pub(crate) fn bind_preview_config_parameter(&mut self, name: &str, key: &str) {
+        if let Some(source) = self.preview_parameter_source(key) {
+            self.preview_config_sources.insert(name.to_string(), source);
+        }
+    }
+
+    pub(crate) fn bind_preview_group_value(
+        &mut self,
+        name: &str,
+        tail: Vec<serde_json::Value>,
+        value: &ParamValue,
+    ) {
+        let Some(index) = self.preview_rule_index else {
+            return;
+        };
+        let original_value = match value {
+            ParamValue::Int(value) => serde_json::json!(value),
+            ParamValue::Float(value) => serde_json::json!(value),
+            ParamValue::Typed(value)
+                if !matches!(
+                    value.value_type.as_str(),
+                    "user_var" | "userVariable" | "game_var" | "gameVariable" | "range" | "range_var"
+                ) =>
+            {
+                value.value.clone()
+            }
+            _ => return,
+        };
+        if !original_value.is_number()
+            && original_value
+                .as_str()
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_none()
+        {
+            return;
+        }
+        let mut source_path = vec![serde_json::json!("rules"), serde_json::json!(index)];
+        source_path.extend(tail);
+        self.preview_config_sources.insert(
+            name.to_string(),
+            LuaFieldSource {
+                source_path,
+                original_value,
+            },
+        );
+    }
+
+    fn unambiguous_preview_literal(&self, expr: &Expr) -> Option<LuaFieldSource> {
+        let mut sources = self
+            .preview_parameters
+            .keys()
+            .filter(|key| {
+                !matches!(
+                    key.as_str(),
+                    "operator"
+                        | "operation"
+                        | "comparison"
+                        | "selection_method"
+                        | "method"
+                        | "mode"
+                        | "action"
+                        | "part"
+                )
+            })
+            .filter_map(|key| self.preview_parameter_source(key))
+            .filter(|source| match (expr, &source.original_value) {
+                (Expr::Str(value), serde_json::Value::String(original)) => value == original,
+                (Expr::Bool(value), serde_json::Value::Bool(original)) => value == original,
+                _ => false,
+            });
+        let source = sources.next()?;
+        if sources.next().is_some() {
+            None
+        } else {
+            Some(source)
+        }
+    }
+
+    pub(crate) fn bind_preview_expr(&self, expr: &mut Expr) {
+        crate::lua_ast::bind_scalar_literals(expr, &|expr| self.unambiguous_preview_literal(expr));
+    }
+
+    pub(crate) fn bind_preview_stmt(&self, stmt: &mut crate::lua_ast::Stmt) {
+        crate::lua_ast::bind_statement_literals(stmt, &|expr| self.unambiguous_preview_literal(expr));
+    }
+
     /// The full SMODS key for this object (e.g.: `j_modprefix_myjoker`).
     pub fn smods_key(&self) -> String {
         let prefix = match self.object_type {
@@ -287,9 +441,13 @@ impl CompileContext {
 
         // Config variables from effects
         for var in &self.config_vars {
+            let value = match self.preview_config_sources.get(&var.name) {
+                Some(source) => lua_field_binding(var.value.to_lua_expr(), source.clone()),
+                None => var.value.to_lua_expr(),
+            };
             entries.push(TableEntry::KeyValue(
                 var.name.clone(),
-                var.value.to_lua_expr(),
+                value,
             ));
         }
 

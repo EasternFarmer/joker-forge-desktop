@@ -57,6 +57,17 @@ export interface PreviewCodeSegment {
 export interface CompiledLuaWithSegments {
   code: string;
   segments: PreviewCodeSegment[];
+  fieldBindings?: PreviewFieldBinding[];
+}
+
+export interface PreviewFieldBinding {
+  sourcePath: Array<string | number>;
+  valueType: "string" | "number" | "boolean";
+  originalValue: string | number | boolean;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
 }
 
 export type PreviewCompileItemType =

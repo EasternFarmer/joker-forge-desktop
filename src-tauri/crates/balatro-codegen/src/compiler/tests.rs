@@ -1,6 +1,178 @@
 use super::*;
 use std::collections::HashMap;
 
+fn preview_test_joker(rules: serde_json::Value) -> JokerDef {
+    serde_json::from_value(serde_json::json!({
+        "key": "preview_test", "name": "Preview Test", "description": ["Test"],
+        "cost": 4, "rarity": "common", "blueprint_compat": true, "eternal_compat": true,
+        "perishable_compat": true, "unlocked": true, "discovered": true,
+        "atlas": "CustomJokers", "pos": { "x": 0, "y": 0 }, "rules": rules
+    }))
+    .unwrap()
+}
+
+fn field_binding_text<'a>(code: &'a str, binding: &LuaFieldBinding) -> &'a str {
+    assert_eq!(binding.start_line, binding.end_line);
+    let line = code.lines().nth(binding.start_line - 1).unwrap();
+    &line[binding.start_column - 1..binding.end_column - 1]
+}
+
+#[test]
+fn live_preview_bindings_target_each_condition_and_effect_source() {
+    for system in ["Windows", "Linux", "OS X"] {
+        let joker = preview_test_joker(serde_json::json!([{
+            "id": "rule-os", "trigger": "hand_played", "condition_groups": [{ "conditions": [
+                { "id": "condition-os", "condition_type": "system_condition", "params": { "system": system } }
+            ] }],
+            "effects": [{ "id": "effect-mult", "effect_type": "add_mult", "params": { "value": 7, "customMessage": "Windows" } }]
+        }]));
+        let chunk = compile_joker(&joker, "mod");
+        let (code, segments, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
+        let system_path = serde_json::json!([
+            "rules",
+            0,
+            "conditionGroups",
+            0,
+            "conditions",
+            0,
+            "params",
+            "system",
+            "value"
+        ]);
+        let system_binding = bindings
+            .iter()
+            .find(|binding| serde_json::json!(binding.source_path) == system_path)
+            .expect("OS field must be editable");
+        assert_eq!(system_binding.original_value, serde_json::json!(system));
+        assert_eq!(
+            field_binding_text(&code, system_binding),
+            format!("'{system}'")
+        );
+        let value_path = serde_json::json!(["rules", 0, "effects", 0, "params", "value", "value"]);
+        let value_binding = bindings
+            .iter()
+            .find(|binding| serde_json::json!(binding.source_path) == value_path)
+            .expect("numeric config must be editable");
+        assert_eq!(field_binding_text(&code, value_binding), "7");
+        assert!(bindings.iter().any(|binding| binding.source_path
+            == vec![
+                serde_json::json!("rules"),
+                serde_json::json!(0),
+                serde_json::json!("effects"),
+                serde_json::json!(0),
+                serde_json::json!("params"),
+                serde_json::json!("customMessage"),
+                serde_json::json!("value")
+            ]));
+        assert!(!segments.is_empty());
+    }
+}
+
+#[test]
+fn live_preview_bindings_cover_condition_config_chances_and_loop_counts() {
+    let joker = preview_test_joker(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played", "condition_groups": [{ "conditions": [
+            { "id": "money", "condition_type": "player_money", "params": { "value": 12, "operator": "greater_than" } }
+        ] }],
+        "random_groups": [{ "id": "chance", "chance_numerator": 1, "chance_denominator": 8,
+            "effects": [{ "id": "xmult", "effect_type": "apply_x_mult", "params": { "value": 5 } }] }],
+        "loop_groups": [{ "id": "loop", "count": 3,
+            "effects": [{ "id": "mult", "effect_type": "add_mult", "params": { "value": 2 } }] }]
+    }]));
+    let chunk = compile_joker(&joker, "mod");
+    let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
+    for (path, expected) in [
+        (
+            serde_json::json!([
+                "rules",
+                0,
+                "conditionGroups",
+                0,
+                "conditions",
+                0,
+                "params",
+                "value",
+                "value"
+            ]),
+            "12",
+        ),
+        (
+            serde_json::json!(["rules", 0, "randomGroups", 0, "chance_numerator", "value"]),
+            "1",
+        ),
+        (
+            serde_json::json!(["rules", 0, "randomGroups", 0, "chance_denominator", "value"]),
+            "8",
+        ),
+        (
+            serde_json::json!(["rules", 0, "loops", 0, "repetitions", "value"]),
+            "3",
+        ),
+        (
+            serde_json::json!(["rules", 0, "loops", 0, "effects", 0, "params", "value", "value"]),
+            "2",
+        ),
+    ] {
+        let binding = bindings
+            .iter()
+            .find(|binding| serde_json::json!(binding.source_path) == path)
+            .expect("generated config should retain its source");
+        assert_eq!(field_binding_text(&code, binding), expected);
+    }
+    assert!(!bindings
+        .iter()
+        .any(|binding| binding.source_path.contains(&serde_json::json!("operator"))));
+}
+
+#[test]
+fn live_preview_omits_ambiguous_literals_and_keeps_unrelated_fields_separate() {
+    let joker = preview_test_joker(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played", "condition_groups": [{ "conditions": [
+            { "id": "ambiguous", "condition_type": "system_condition", "params": { "system": "Windows", "unrelated": "Windows" } },
+            { "id": "exact", "condition_type": "system_condition", "params": { "system": "Windows" } }
+        ] }],
+        "effects": [{ "id": "mult", "effect_type": "add_mult", "params": { "value": 4 } }]
+    }]));
+    let chunk = compile_joker(&joker, "mod");
+    let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
+    let os_bindings: Vec<_> = bindings
+        .iter()
+        .filter(|binding| binding.original_value == serde_json::json!("Windows"))
+        .collect();
+    assert_eq!(os_bindings.len(), 1);
+    assert_eq!(os_bindings[0].source_path[5], serde_json::json!(1));
+    assert_eq!(code.matches("love.system.getOS() == 'Windows'").count(), 2);
+}
+
+#[test]
+fn live_preview_normalizes_typed_numeric_string_fields() {
+    let joker = preview_test_joker(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played", "effects": [{
+            "id": "mult", "effect_type": "add_mult", "params": { "value": { "value": "7", "valueType": "number" } }
+        }]
+    }]));
+    let chunk = compile_joker(&joker, "mod");
+    let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
+    let binding = bindings
+        .iter()
+        .find(|binding| {
+            binding.source_path
+                == vec![
+                    serde_json::json!("rules"),
+                    serde_json::json!(0),
+                    serde_json::json!("effects"),
+                    serde_json::json!(0),
+                    serde_json::json!("params"),
+                    serde_json::json!("value"),
+                    serde_json::json!("value"),
+                ]
+        })
+        .unwrap();
+    assert_eq!(binding.value_type, "number");
+    assert_eq!(binding.original_value, serde_json::json!(7));
+    assert_eq!(field_binding_text(&code, binding), "7");
+}
+
 fn ordered_description_code(ctx: &CompileContext) -> String {
     let loc_vars = build_shared_loc_vars(ctx, &[]).expect("ordered bindings should emit loc_vars");
     Emitter::new().emit_expr_to_string(&loc_vars)

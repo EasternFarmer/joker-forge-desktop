@@ -48,7 +48,7 @@ pub fn compile_effect(
     trigger: &str,
 ) -> Option<EffectOutput> {
     let config_start = ctx.config_vars().len();
-    let result = match effect.effect_type.as_str() {
+    let mut result = match effect.effect_type.as_str() {
         // --------------- Scoring ---------------
         "add_chips" => scoring::add_chips(effect, ctx),
         "add_mult" => scoring::add_mult(effect, ctx),
@@ -195,6 +195,9 @@ pub fn compile_effect(
     };
 
     ctx.record_effect_config_names(&effect.id, config_start);
+    for (_, value) in &mut result.return_fields { ctx.bind_preview_expr(value); }
+    for stmt in &mut result.pre_return { ctx.bind_preview_stmt(stmt); }
+    if let Some(message) = &mut result.message { ctx.bind_preview_expr(message); }
     Some(result)
 }
 

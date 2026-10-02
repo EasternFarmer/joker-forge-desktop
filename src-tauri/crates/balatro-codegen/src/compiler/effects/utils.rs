@@ -69,6 +69,7 @@ pub fn value_to_lua_str(
 ) -> String {
     let count = ctx.next_effect_count(var_base);
     let var_name = ctx.unique_var_name(var_base, count);
+    ctx.bind_preview_config_parameter(&var_name, param_key);
 
     match effect.params.get(param_key) {
         Some(ParamValue::Int(n)) => {

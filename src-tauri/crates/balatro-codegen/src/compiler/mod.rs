@@ -271,7 +271,11 @@ pub(crate) enum PassiveHookSpec {
 pub(crate) fn compile_rules(rules: &[RuleDef], ctx: &mut CompileContext) -> Vec<RuleOutput> {
     rules
         .iter()
-        .map(|rule| compile_single_rule(rule, ctx))
+        .enumerate()
+        .map(|(index, rule)| {
+            ctx.begin_preview_rule(index);
+            compile_single_rule(rule, ctx)
+        })
         .collect()
 }
 
@@ -299,7 +303,8 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     let mut passive_outputs = Vec::new();
     let mut passive_hooks = Vec::new();
     if is_passive {
-        for effect in &rule.effects {
+        for (index, effect) in rule.effects.iter().enumerate() {
+            ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             let config_start = ctx.config_vars().len();
             if let Some(po) = effects::passive::compile_passive(effect, ctx) {
                 passive_outputs.push(po);
@@ -315,7 +320,8 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     let mut effect_outputs = Vec::new();
     let mut blind_rewards = Vec::new();
     if !is_passive {
-        for effect in &rule.effects {
+        for (index, effect) in rule.effects.iter().enumerate() {
+            ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             if effect.effect_type == "blind_reward"
                 && (trigger == "round_end" || trigger == "boss_defeated")
             {
@@ -335,14 +341,14 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     }
 
     // Compile random groups
-    for rg in &rule.random_groups {
-        let rg_effects = compile_random_group(&rule.id, rg, ctx, &trigger);
+    for (index, rg) in rule.random_groups.iter().enumerate() {
+        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger);
         effect_outputs.extend(rg_effects);
     }
 
     // Compile loop groups
-    for lg in &rule.loop_groups {
-        let lg_effects = compile_loop_group(&rule.id, lg, ctx, &trigger);
+    for (index, lg) in rule.loop_groups.iter().enumerate() {
+        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger);
         effect_outputs.extend(lg_effects);
     }
 
@@ -378,6 +384,7 @@ fn effect_segment_id(rule_id: &str, effect: &EffectDef) -> Option<String> {
 
 fn compile_random_group(
     rule_id: &str,
+    group_index: usize,
     rg: &RandomGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
@@ -391,7 +398,8 @@ fn compile_random_group(
     });
     // Compile the effects within the random group
     let mut inner_outputs = Vec::new();
-    for effect in &rg.effects {
+    for (index, effect) in rg.effects.iter().enumerate() {
+        ctx.set_preview_node(vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
@@ -426,6 +434,8 @@ fn compile_random_group(
     // Register probability config variables
     ctx.add_config_int(&numerator_var, numerator);
     ctx.add_config_int(&odds_var, denom);
+    ctx.bind_preview_group_value(&numerator_var, vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("chance_numerator"), serde_json::json!("value")], &rg.chance_numerator);
+    ctx.bind_preview_group_value(&odds_var, vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("chance_denominator"), serde_json::json!("value")], &rg.chance_denominator);
     ctx.register_description_probability(&rg.id, context::DescriptionProbability {
         config_names: Some((numerator_var, odds_var)),
         numerator,
@@ -447,12 +457,14 @@ fn compile_random_group(
 
 fn compile_loop_group(
     rule_id: &str,
+    group_index: usize,
     lg: &LoopGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
 ) -> Vec<effects::EffectOutput> {
     let mut inner_outputs = Vec::new();
-    for effect in &lg.effects {
+    for (index, effect) in lg.effects.iter().enumerate() {
+        ctx.set_preview_node(vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
@@ -472,6 +484,7 @@ fn compile_loop_group(
     let loop_var_name = format!("loop_count_{}", loop_index);
     let loop_count = lg.count.as_i64().unwrap_or(1).max(1);
     ctx.add_config_int(&loop_var_name, loop_count);
+    ctx.bind_preview_group_value(&loop_var_name, vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("repetitions"), serde_json::json!("value")], &lg.count);
 
     let loop_stmt = Stmt::ForRange {
         var: "i".to_string(),

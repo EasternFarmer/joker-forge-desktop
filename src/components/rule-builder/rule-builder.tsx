@@ -51,6 +51,7 @@ import HistoryPanel from "./history-panel";
 import SoundsPanel from "./sounds-panel";
 import {
   compileSingleItemLuaWithSegments,
+  type CompiledLuaWithSegments,
   type PreviewCompileItemType,
 } from "@/lib/export/rust-codegen-export";
 import {
@@ -59,6 +60,14 @@ import {
   type CodeSegment,
 } from "@/lib/content/code-sections";
 import type { CustomCodeState } from "@/lib/core/types";
+import {
+  toRanges as toFieldRanges,
+  updateBoundRanges,
+  readBoundFieldEdits,
+  rebaseLinkedCode,
+  type BoundFieldRange,
+  type CodeEdit,
+} from "@/lib/content/live-code-sync";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -180,6 +189,113 @@ const toSnippetParams = (
 
 const cloneRulesSnapshot = (source: Rule[]): Rule[] => {
   return JSON.parse(JSON.stringify(source)) as Rule[];
+};
+
+type LinkedFieldRange = BoundFieldRange & { sourceIds?: Record<number, string> };
+
+const attachFieldIdentities = (
+  ranges: BoundFieldRange[],
+  sourceRules: Rule[],
+): LinkedFieldRange[] => ranges.map((range) => {
+  const sourceIds: Record<number, string> = {};
+  let current: unknown = { rules: sourceRules };
+  range.sourcePath.forEach((part, index) => {
+    if (typeof part === "number" && Array.isArray(current)) {
+      current = current[part];
+      const id = (current as { id?: unknown } | undefined)?.id;
+      if (typeof id === "string" && id) sourceIds[index] = id;
+    } else if (current && typeof current === "object") {
+      current = (current as Record<string, unknown>)[String(part)];
+    } else {
+      current = undefined;
+    }
+  });
+  return { ...range, sourceIds };
+});
+
+const resolveLinkedRulePath = (
+  range: LinkedFieldRange,
+  sourceRules: Rule[],
+  currentRules: Rule[],
+): Array<string | number> | null => {
+  if (range.sourcePath[0] !== "rules") return null;
+  let source: unknown = { rules: sourceRules };
+  let current: unknown = { rules: currentRules };
+  const resolved: Array<string | number> = [];
+  for (let index = 0; index < range.sourcePath.length; index += 1) {
+    const part = range.sourcePath[index];
+    if (typeof part === "number") {
+      if (!Array.isArray(current)) return null;
+      const original = Array.isArray(source) ? source[part] : undefined;
+      const id = range.sourceIds?.[index] ?? (original as { id?: string } | undefined)?.id;
+      if (!id) return null;
+      const currentIndex = current.findIndex((entry) => entry?.id === id);
+      if (currentIndex < 0) return null;
+      resolved.push(currentIndex);
+      current = current[currentIndex];
+      source = original;
+    } else {
+      if (["__proto__", "prototype", "constructor"].includes(part)) return null;
+      if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
+        return null;
+      }
+      resolved.push(part);
+      current = (current as Record<string, unknown>)[part];
+      source = source && typeof source === "object"
+        ? (source as Record<string, unknown>)[part]
+        : undefined;
+    }
+  }
+  return resolved;
+};
+
+const readPathValue = (root: unknown, path: Array<string | number>): unknown =>
+  path.reduce<unknown>((value, part) => value && typeof value === "object"
+    ? (value as Record<string, unknown>)[String(part)]
+    : undefined, root);
+
+const replacePathValue = (
+  root: unknown,
+  path: Array<string | number>,
+  value: unknown,
+): unknown => {
+  if (path.length === 0) return value;
+  const [part, ...rest] = path;
+  if (Array.isArray(root) && typeof part === "number") {
+    const result = root.slice();
+    result[part] = replacePathValue(root[part], rest, value);
+    return result;
+  }
+  if (root && typeof root === "object" && typeof part === "string") {
+    const current = root as Record<string, unknown>;
+    return { ...current, [part]: replacePathValue(current[part], rest, value) };
+  }
+  return root;
+};
+
+const isLinkedFieldValueAllowed = (
+  path: Array<string | number>,
+  rules: Rule[],
+  value: string | number | boolean,
+): boolean => {
+  const paramsIndex = path.lastIndexOf("params");
+  if (paramsIndex < 0 || typeof path[paramsIndex + 1] !== "string") return true;
+  const owner = readPathValue({ rules }, path.slice(0, paramsIndex)) as Condition | Effect | undefined;
+  if (!owner?.type) return false;
+  const definition = getConditionTypeById(owner.type) ?? getEffectTypeById(owner.type);
+  const parameter = definition?.params.find((entry) => entry.id === path[paramsIndex + 1]);
+  if (!parameter) return false;
+  if (parameter.type === "number" || parameter.type === "range") {
+    return typeof value === "number" && Number.isFinite(value)
+      && (parameter.min === undefined || value >= parameter.min)
+      && (parameter.max === undefined || value <= parameter.max);
+  }
+  if (parameter.type === "text") return typeof value === "string";
+  if (parameter.type === "checkbox") return typeof value === "boolean";
+  if (parameter.type === "select" && Array.isArray(parameter.options)) {
+    return parameter.options.some((option) => Object.is(option.value, value));
+  }
+  return true;
 };
 
 const resolveParameterDefaultValue = (
@@ -407,6 +523,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const getEffectType = getEffectTypeById;
 
   const [rules, setRules] = useState<Rule[]>([]);
+  const rulesRef = useRef<Rule[]>(rules);
+  rulesRef.current = rules;
   const [selectedItem, setSelectedItem] = useState<SelectedItem>(null);
   const [panState, setPanState] = useState({ x: 0, y: 0, scale: 1 });
   const [gridSnapping, setGridSnapping] = useState<boolean>(
@@ -439,6 +557,9 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     string | undefined
   >();
   const [liveCodeIsLoading, setLiveCodeIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
+  const builderMountedRef = useRef(true);
   const [liveCodePreviewTarget, setLiveCodePreviewTarget] =
     useState<LiveCodeBlockPreviewTarget | null>(null);
   const [liveCodeWidthPercent, setLiveCodeWidthPercent] = useState<number>(50);
@@ -478,13 +599,23 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const lastSegmentsRef = useRef<CodeSegment[]>(
     item.customCode?.segments ?? [],
   );
+  const lastGeneratedSegmentsRef = useRef<CodeSegment[]>(item.customCode?.segments ?? []);
+  const linkedFieldRangesRef = useRef<LinkedFieldRange[]>(item.customCode?.fieldRanges ?? []);
+  const fieldSourceRulesRef = useRef<Rule[]>(existingRules);
+  const editorCodeRef = useRef<string>(item.customCode?.fullCode ?? "");
+  const editorRevisionRef = useRef(0);
+  const pendingFieldValuesRef = useRef(new Map<string, unknown>());
+  const editedFieldKeysRef = useRef(new Set<string>());
+  const [editorSyncRevision, setEditorSyncRevision] = useState(0);
   const prevRulesSnapshotRef = useRef<string>("");
   const customCodeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
   const customCodeRef = useRef(customCode);
+  const onUpdateItemRef = useRef(onUpdateItem);
   const pendingEditorCodeRef = useRef<string | null>(null);
   customCodeRef.current = customCode;
+  onUpdateItemRef.current = onUpdateItem;
   const globalUserVariables = useMemo(
     () => collectGlobalVariables(data).map((entry) => entry.variable),
     [data],
@@ -646,9 +777,113 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     }
   }, []);
 
-  // Handle user edits in the code editor (debounced auto-save)
+  const synchronizeLinkedRules = useCallback((code: string): Rule[] => {
+    if (isReadOnly) return rulesRef.current;
+    let nextRules = rulesRef.current;
+    for (const edit of readBoundFieldEdits(code, linkedFieldRangesRef.current)) {
+      const range = linkedFieldRangesRef.current.find((candidate) =>
+        JSON.stringify(candidate.sourcePath) === JSON.stringify(edit.sourcePath));
+      if (!range) continue;
+      const fieldKey = JSON.stringify([range.sourcePath, range.sourceIds]);
+      if (!editedFieldKeysRef.current.has(fieldKey)) continue;
+      const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, nextRules);
+      if (!path || !isLinkedFieldValueAllowed(path, nextRules, edit.value)) continue;
+      const currentValue = readPathValue({ rules: nextRules }, path);
+      if (Object.is(currentValue, edit.value)) continue;
+      if (pendingFieldValuesRef.current.has(fieldKey)
+        && !Object.is(currentValue, pendingFieldValuesRef.current.get(fieldKey))) continue;
+      nextRules = (replacePathValue({ rules: nextRules }, path, edit.value) as { rules: Rule[] }).rules;
+    }
+    if (nextRules !== rulesRef.current) {
+      rulesRef.current = nextRules;
+      setRules(nextRules);
+    }
+    return nextRules;
+  }, [isReadOnly]);
+
+  const persistEditorCode = useCallback((code: string) => {
+    if (isReadOnly) return;
+    const baselineCode = lastGeneratedCleanRef.current;
+    const hasChanges = code.trim() !== baselineCode.trim();
+    const newCustomCode: CustomCodeState | undefined = hasChanges
+      ? {
+          fullCode: code,
+          lastGeneratedCode: baselineCode,
+          segments: lastGeneratedSegmentsRef.current,
+          fieldRanges: linkedFieldRangesRef.current,
+        }
+      : undefined;
+    if (JSON.stringify(customCodeRef.current) === JSON.stringify(newCustomCode)) return;
+    customCodeRef.current = newCustomCode;
+    setCustomCode(newCustomCode);
+    onUpdateItemRef.current({ customCode: newCustomCode });
+  }, [isReadOnly]);
+
+  const flushPendingCodeEdit = useCallback((): Rule[] => {
+    if (customCodeDebounceRef.current) {
+      clearTimeout(customCodeDebounceRef.current);
+      customCodeDebounceRef.current = null;
+    }
+    const code = pendingEditorCodeRef.current;
+    if (code === null || isReadOnly) return rulesRef.current;
+    const nextRules = synchronizeLinkedRules(code);
+    persistEditorCode(code);
+    pendingEditorCodeRef.current = null;
+    pendingFieldValuesRef.current.clear();
+    editedFieldKeysRef.current.clear();
+    setEditorSyncRevision((revision) => revision + 1);
+    return nextRules;
+  }, [isReadOnly, persistEditorCode, synchronizeLinkedRules]);
+
+  // Keep code edits immediately visible, then apply complete values together.
   const handleCodeChange = useCallback(
-    (newCode: string) => {
+    (newCode: string, changes?: CodeEdit[]) => {
+      if (isReadOnly) return;
+      if (pendingEditorCodeRef.current === null) {
+        pendingFieldValuesRef.current.clear();
+        editedFieldKeysRef.current.clear();
+        for (const range of linkedFieldRangesRef.current) {
+          const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, rulesRef.current);
+          if (path) pendingFieldValuesRef.current.set(
+            JSON.stringify([range.sourcePath, range.sourceIds]),
+            readPathValue({ rules: rulesRef.current }, path),
+          );
+        }
+      }
+      const oldCode = editorCodeRef.current;
+      const oldRanges = linkedFieldRangesRef.current;
+      const nextRanges = updateBoundRanges(
+        oldCode,
+        newCode,
+        oldRanges,
+        changes,
+      ) as LinkedFieldRange[];
+      const literalTextsByField = (code: string, ranges: LinkedFieldRange[]) => {
+        const fields = new Map<string, string[]>();
+        for (const range of ranges) {
+          const fieldKey = JSON.stringify([range.sourcePath, range.sourceIds]);
+          const texts = fields.get(fieldKey) ?? [];
+          texts.push(code.slice(range.from, range.to));
+          fields.set(fieldKey, texts);
+        }
+        return fields;
+      };
+      const beforeFields = literalTextsByField(oldCode, oldRanges);
+      const afterFields = literalTextsByField(newCode, nextRanges);
+      for (const fieldKey of new Set([...beforeFields.keys(), ...afterFields.keys()])) {
+        if (JSON.stringify(beforeFields.get(fieldKey)) !== JSON.stringify(afterFields.get(fieldKey))) {
+          editedFieldKeysRef.current.add(fieldKey);
+          const range = nextRanges.find((candidate) =>
+            JSON.stringify([candidate.sourcePath, candidate.sourceIds]) === fieldKey);
+          if (range) {
+            const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, rulesRef.current);
+            if (path) pendingFieldValuesRef.current.set(fieldKey, readPathValue({ rules: rulesRef.current }, path));
+          }
+        }
+      }
+      linkedFieldRangesRef.current = nextRanges;
+      editorCodeRef.current = newCode;
+      editorRevisionRef.current += 1;
       pendingEditorCodeRef.current = newCode;
 
       // Keep the displayed snippet in sync so the external-update effect
@@ -659,25 +894,9 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         clearTimeout(customCodeDebounceRef.current);
       }
 
-      customCodeDebounceRef.current = setTimeout(() => {
-        const baselineCode = lastGeneratedCleanRef.current || liveCodeSnippet;
-        const hasChanges =
-          newCode.trim() !== baselineCode.trim();
-
-        const newCustomCode: CustomCodeState | undefined = hasChanges
-          ? {
-              fullCode: newCode,
-              lastGeneratedCode: baselineCode,
-              segments: lastSegmentsRef.current,
-            }
-          : undefined;
-
-        setCustomCode(newCustomCode);
-        onUpdateItem({ customCode: newCustomCode });
-        pendingEditorCodeRef.current = null;
-      }, 300);
+      customCodeDebounceRef.current = setTimeout(flushPendingCodeEdit, 300);
     },
-    [liveCodeSnippet, onUpdateItem],
+    [flushPendingCodeEdit, isReadOnly],
   );
 
   // Reset all custom code back to generated
@@ -686,19 +905,200 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       clearTimeout(customCodeDebounceRef.current);
     }
     setCustomCode(undefined);
+    customCodeRef.current = undefined;
     pendingEditorCodeRef.current = null;
+    pendingFieldValuesRef.current.clear();
+    editedFieldKeysRef.current.clear();
+    editorRevisionRef.current += 1;
     onUpdateItem({ customCode: undefined });
     if (lastGeneratedCleanRef.current) {
+      editorCodeRef.current = lastGeneratedCleanRef.current;
       setLiveCodeSnippet(lastGeneratedCleanRef.current);
     }
+    linkedFieldRangesRef.current = [];
+    setEditorSyncRevision((revision) => revision + 1);
   }, [onUpdateItem]);
 
-  const handleSaveAndClose = useCallback(() => {
-    if (!isReadOnly) {
-      onSave(rules);
+  const reconcileGeneratedCode = useCallback((freshCompiled: CompiledLuaWithSegments, sourceRules: Rule[]) => {
+    const normalized = (freshCompiled.code || "").toLowerCase();
+    const isNotImplemented = normalized.includes("not yet implemented");
+
+    // Determine which sourceRules changed since the last generation
+    const currentRulesSnapshot = JSON.stringify(sourceRules);
+    const changedRuleIds = new Set<string>();
+    if (
+      prevRulesSnapshotRef.current &&
+      prevRulesSnapshotRef.current !== currentRulesSnapshot
+    ) {
+      try {
+        const prevRules = JSON.parse(
+          prevRulesSnapshotRef.current,
+        ) as Rule[];
+        const prevMap = new Map(
+          prevRules.map((r) => [r.id, JSON.stringify(r)]),
+        );
+        const currMap = new Map(
+          sourceRules.map((r) => [r.id, JSON.stringify(r)]),
+        );
+
+        // Rules that were modified or added
+        for (const [id, serialized] of currMap) {
+          if (!prevMap.has(id) || prevMap.get(id) !== serialized) {
+            changedRuleIds.add(id);
+          }
+        }
+        // Rules that were deleted
+        for (const id of prevMap.keys()) {
+          if (!currMap.has(id)) {
+            changedRuleIds.add(id);
+          }
+        }
+      } catch {
+        // If snapshot parsing fails, treat all sourceRules as changed
+        sourceRules.forEach((r) => changedRuleIds.add(r.id));
+      }
     }
-    onClose();
-  }, [isReadOnly, onSave, onClose, rules]);
+    prevRulesSnapshotRef.current = currentRulesSnapshot;
+
+    const freshClean = freshCompiled.code;
+    const freshSegments = freshCompiled.segments;
+    const freshFieldBindings = freshCompiled.fieldBindings ?? [];
+
+    let displayCode = freshClean || "-- no snippet output";
+    let displayFieldRanges: BoundFieldRange[] = toFieldRanges(freshClean, freshFieldBindings);
+
+    const pendingEditorCode = pendingEditorCodeRef.current;
+    const savedCustomCode = customCodeRef.current?.fullCode;
+    const editableCurrentCode = pendingEditorCode ?? savedCustomCode;
+
+    // If user has custom code (persisted or pending in-editor), merge with the new generation
+    if (editableCurrentCode) {
+      const oldSegments =
+        customCodeRef.current?.segments ?? lastSegmentsRef.current;
+
+      // On first load (no previous generation yet), use saved
+      // lastGeneratedCode from the custom code state for comparison.
+      // If the new generation is identical to what was last generated,
+      // just display the user's saved code directly.
+      const prevClean =
+        lastGeneratedCleanRef.current ||
+        customCodeRef.current?.lastGeneratedCode ||
+        freshClean;
+
+      const oldFieldRanges = linkedFieldRangesRef.current.flatMap((range) => {
+        const sourcePath = resolveLinkedRulePath(range, fieldSourceRulesRef.current, sourceRules);
+        return sourcePath ? [{ ...range, sourcePath }] : [];
+      });
+      const rebased = rebaseLinkedCode(
+        editableCurrentCode,
+        prevClean,
+        freshClean,
+        oldFieldRanges,
+        freshFieldBindings,
+      );
+      displayCode = rebased.code;
+      displayFieldRanges = rebased.ranges;
+
+      if (prevClean === freshClean) {
+        // Nothing changed in generation, show user's code as-is
+        displayCode = rebased.code;
+      } else if (oldSegments.length > 0) {
+        try {
+          const mergedCode = mergeWithGeneratedSegments(
+            displayCode,
+            prevClean,
+            lastGeneratedSegmentsRef.current.length > 0 ? lastGeneratedSegmentsRef.current : oldSegments,
+            freshClean,
+            freshSegments,
+            changedRuleIds,
+          );
+          displayFieldRanges = updateBoundRanges(displayCode, mergedCode, displayFieldRanges);
+          displayCode = mergedCode;
+        } catch {
+          // Preserve the user's code when a structural merge is unavailable.
+          displayCode = rebased.code;
+        }
+      } else {
+        // No section info available, show user's saved code
+        displayCode = rebased.code;
+      }
+    }
+
+    const displaySegments = remapSegmentsToCode(
+      displayCode,
+      freshClean,
+      freshSegments,
+    );
+
+    lastGeneratedCleanRef.current = freshClean;
+    lastGeneratedSegmentsRef.current = freshSegments;
+    lastSegmentsRef.current = displaySegments;
+    linkedFieldRangesRef.current = attachFieldIdentities(
+      displayFieldRanges.filter((range) => isLinkedFieldValueAllowed(range.sourcePath, sourceRules, range.originalValue)),
+      sourceRules,
+    );
+    fieldSourceRulesRef.current = cloneRulesSnapshot(sourceRules);
+    editorCodeRef.current = displayCode;
+    if (editableCurrentCode) persistEditorCode(displayCode);
+
+    setLiveCodeSnippet(displayCode);
+    setLiveCodeStatusMessage(
+      isNotImplemented
+        ? "This item has not been fully coded in yet for live generation."
+        : undefined,
+    );
+    setLiveCodeIsError(false);
+  }, [persistEditorCode]);
+
+  const handleSaveAndClose = useCallback(async () => {
+    if (isReadOnly) {
+      onClose();
+      return;
+    }
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setIsSaving(true);
+    try {
+      let latestRules = flushPendingCodeEdit();
+      while (customCodeRef.current || pendingEditorCodeRef.current !== null) {
+        latestRules = flushPendingCodeEdit();
+        const revision = editorRevisionRef.current;
+        const snapshot = JSON.stringify(latestRules);
+        const freshCompiled = await compileSingleItemLuaWithSegments(
+          { ...itemWithoutCustomCode, rules: latestRules },
+          previewItemType,
+          data.metadata.prefix,
+          { includeLocTxt: true, globalUserVariables },
+        );
+        if (!builderMountedRef.current) return;
+        if (revision !== editorRevisionRef.current || snapshot !== JSON.stringify(rulesRef.current)) continue;
+        reconcileGeneratedCode(freshCompiled, latestRules);
+        break;
+      }
+      onSave(latestRules);
+      onClose();
+    } catch (error) {
+      if (!builderMountedRef.current) return;
+      setLiveCodeIsError(true);
+      setLiveCodeStatusMessage("Unable to save the latest code. Your edits are still here.");
+      setLiveCodeErrorDetails(formatLiveCodeErrorDetails(error));
+      if (!panels.liveCode?.isVisible) togglePanel("liveCode");
+    } finally {
+      savingRef.current = false;
+      if (builderMountedRef.current) setIsSaving(false);
+    }
+  }, [isReadOnly, onSave, onClose, flushPendingCodeEdit, itemWithoutCustomCode, previewItemType,
+    data.metadata.prefix, globalUserVariables, reconcileGeneratedCode, formatLiveCodeErrorDetails,
+    panels.liveCode?.isVisible, togglePanel]);
+
+  useEffect(() => {
+    builderMountedRef.current = true;
+    return () => {
+      builderMountedRef.current = false;
+      if (customCodeDebounceRef.current) clearTimeout(customCodeDebounceRef.current);
+      editorRevisionRef.current += 1;
+    };
+  }, []);
 
   const handleSelectItem = useCallback((item: NonNullable<SelectedItem>) => {
     setSelectedItem(item);
@@ -983,6 +1383,21 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         normalizeRuleForBuilder(rule, itemType, reforged),
       );
       const initialSnapshot = cloneRulesSnapshot(normalizedRules);
+      if (customCodeDebounceRef.current) clearTimeout(customCodeDebounceRef.current);
+      pendingEditorCodeRef.current = null;
+      pendingFieldValuesRef.current.clear();
+      editedFieldKeysRef.current.clear();
+      customCodeRef.current = item.customCode;
+      setCustomCode(item.customCode);
+      lastGeneratedCleanRef.current = item.customCode?.lastGeneratedCode ?? "";
+      lastGeneratedSegmentsRef.current = item.customCode?.segments ?? [];
+      lastSegmentsRef.current = item.customCode?.segments ?? [];
+      linkedFieldRangesRef.current = item.customCode?.fieldRanges ?? [];
+      fieldSourceRulesRef.current = initialSnapshot;
+      editorCodeRef.current = item.customCode?.fullCode ?? "";
+      editorRevisionRef.current += 1;
+      prevRulesSnapshotRef.current = "";
+      rulesRef.current = initialSnapshot;
       historyPastRef.current = [];
       historyFutureRef.current = [];
       historyPrevRulesRef.current = initialSnapshot;
@@ -1017,7 +1432,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       setSelectionRect(null);
       setIsDragSelecting(false);
     }
-  }, [isOpen, existingRules]);
+  }, [isOpen, item.id]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -3838,13 +4253,15 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   }, [builderWidthPercent, clampPanelIntoViewport, liveCodeIsVisible]);
 
   useEffect(() => {
-    if (!isOpen || !liveCodeIsVisible) {
+    if (!isOpen || (!liveCodeIsVisible && !customCode && pendingEditorCodeRef.current === null)) {
       return;
     }
 
     let cancelled = false;
 
     const run = async () => {
+      const editorRevision = editorRevisionRef.current;
+      const sourceRulesSnapshot = JSON.stringify(rules);
       setLiveCodeIsLoading(true);
       setLiveCodeIsError(false);
       setLiveCodeStatusMessage(undefined);
@@ -3984,126 +4401,18 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
           { includeLocTxt: true, globalUserVariables },
         );
 
-        if (cancelled) {
+        if (
+          cancelled ||
+          editorRevision !== editorRevisionRef.current ||
+          pendingEditorCodeRef.current !== null ||
+          sourceRulesSnapshot !== JSON.stringify(rulesRef.current)
+        ) {
           return;
         }
 
-        const normalized = (freshCompiled.code || "").toLowerCase();
-        const isNotImplemented = normalized.includes("not yet implemented");
-
-        // Determine which rules changed since the last generation
-        const currentRulesSnapshot = JSON.stringify(rules);
-        const changedRuleIds = new Set<string>();
-        if (
-          prevRulesSnapshotRef.current &&
-          prevRulesSnapshotRef.current !== currentRulesSnapshot
-        ) {
-          try {
-            const prevRules = JSON.parse(
-              prevRulesSnapshotRef.current,
-            ) as Rule[];
-            const prevMap = new Map(
-              prevRules.map((r) => [r.id, JSON.stringify(r)]),
-            );
-            const currMap = new Map(
-              rules.map((r) => [r.id, JSON.stringify(r)]),
-            );
-
-            // Rules that were modified or added
-            for (const [id, serialized] of currMap) {
-              if (!prevMap.has(id) || prevMap.get(id) !== serialized) {
-                changedRuleIds.add(id);
-              }
-            }
-            // Rules that were deleted
-            for (const id of prevMap.keys()) {
-              if (!currMap.has(id)) {
-                changedRuleIds.add(id);
-              }
-            }
-          } catch {
-            // If snapshot parsing fails, treat all rules as changed
-            rules.forEach((r) => changedRuleIds.add(r.id));
-          }
-        }
-        prevRulesSnapshotRef.current = currentRulesSnapshot;
-
-        const freshClean = freshCompiled.code;
-        const freshSegments = freshCompiled.segments;
-
-        let displayCode = freshClean || "-- no snippet output";
-
-        const pendingEditorCode = pendingEditorCodeRef.current;
-        const savedCustomCode = customCodeRef.current?.fullCode;
-        const editableCurrentCode = pendingEditorCode ?? savedCustomCode;
-
-        // If user has custom code (persisted or pending in-editor), merge with the new generation
-        if (editableCurrentCode) {
-          const oldSegments =
-            customCodeRef.current?.segments ?? lastSegmentsRef.current;
-
-          // On first load (no previous generation yet), use saved
-          // lastGeneratedCode from the custom code state for comparison.
-          // If the new generation is identical to what was last generated,
-          // just display the user's saved code directly.
-          const prevClean =
-            lastGeneratedCleanRef.current ||
-            customCodeRef.current?.lastGeneratedCode ||
-            freshClean;
-
-          if (prevClean === freshClean) {
-            // Nothing changed in generation, show user's code as-is
-            displayCode = editableCurrentCode;
-          } else if (oldSegments.length > 0) {
-            try {
-              displayCode = mergeWithGeneratedSegments(
-                editableCurrentCode,
-                prevClean,
-                oldSegments,
-                freshClean,
-                freshSegments,
-                changedRuleIds,
-              );
-
-              // Persist the merged result
-              const mergedCustom: CustomCodeState = {
-                fullCode: displayCode,
-                lastGeneratedCode: freshClean,
-                segments: remapSegmentsToCode(
-                  displayCode,
-                  freshClean,
-                  freshSegments,
-                ),
-              };
-              setCustomCode(mergedCustom);
-              onUpdateItem({ customCode: mergedCustom });
-            } catch {
-              displayCode = freshClean;
-            }
-          } else {
-            // No section info available, show user's saved code
-            displayCode = editableCurrentCode;
-          }
-        }
-
-        const displaySegments = remapSegmentsToCode(
-          displayCode,
-          freshClean,
-          freshSegments,
-        );
-
-        lastGeneratedCleanRef.current = freshClean;
-        lastSegmentsRef.current = displaySegments;
-
-        setLiveCodeSnippet(displayCode);
-        setLiveCodeStatusMessage(
-          isNotImplemented
-            ? "This item has not been fully coded in yet for live generation."
-            : undefined,
-        );
-        setLiveCodeIsError(false);
+        reconcileGeneratedCode(freshCompiled, rules);
       } catch (error) {
-        if (cancelled) {
+        if (cancelled || (!liveCodePreviewTarget && editorRevision !== editorRevisionRef.current)) {
           return;
         }
         setLiveCodeSnippet("-- failed to generate snippet");
@@ -4137,6 +4446,10 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     liveCodeIsVisible,
     liveCodePreviewTarget,
     rules,
+    editorSyncRevision,
+    persistEditorCode,
+    reconcileGeneratedCode,
+    !!customCode,
   ]);
 
   const viewportBounds = builderViewportRef.current?.getBoundingClientRect();
@@ -4482,6 +4795,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                   variant={isReadOnly ? "outline" : "default"}
                   size="sm"
                   onClick={handleSaveAndClose}
+                  disabled={isSaving}
                   icon={
                     isReadOnly ? (
                       <X className="h-4 w-4" />
@@ -4864,6 +5178,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                   onResetCustomCode={handleResetCustomCode}
                   hasCustomCode={!!customCode}
                   segments={lastSegmentsRef.current}
+                  fieldRanges={linkedFieldRangesRef.current}
                   selectedSegmentId={
                     ruleBuilderSettings.enableLiveCodeHighlighting
                       ? selectedSegmentId

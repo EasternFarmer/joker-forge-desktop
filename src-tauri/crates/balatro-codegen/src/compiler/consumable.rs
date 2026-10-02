@@ -300,6 +300,7 @@ fn stmt_references_used_card(stmt: &Stmt) -> bool {
 
 fn expr_references_used_card(expr: &Expr) -> bool {
     match expr {
+        Expr::FieldBinding(inner, _) => expr_references_used_card(inner),
         Expr::Raw(s) => s.contains("used_card"),
         Expr::Ident(s) => s == "used_card",
         Expr::Field(base, key) => key == "used_card" || expr_references_used_card(base),
