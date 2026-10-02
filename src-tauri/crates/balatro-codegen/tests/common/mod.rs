@@ -27,6 +27,7 @@ pub fn base_joker() -> JokerDef {
         appearance: None,
         unlock: None,
         user_variables: vec![],
+        description_variables: None,
         force_eternal: false,
         force_perishable: false,
         force_rental: false,
@@ -55,6 +56,7 @@ pub fn base_consumable() -> ConsumableDef {
         soul_pos: None,
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
     }
 }
 
@@ -75,6 +77,7 @@ pub fn base_voucher() -> VoucherDef {
         soul_pos: None,
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
         draw_shader_sprite: None,
     }
 }
@@ -88,6 +91,7 @@ pub fn base_deck() -> DeckDef {
         pos: AtlasPos { x: 0, y: 0 },
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
         unlocked: Some(true),
         discovered: Some(true),
         no_collection: Some(false),
@@ -108,6 +112,7 @@ pub fn base_enhancement() -> EnhancementDef {
         pos: AtlasPos { x: 0, y: 0 },
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
         any_suit: Some(false),
         replace_base_card: Some(false),
         no_rank: Some(false),
@@ -129,6 +134,7 @@ pub fn base_seal() -> SealDef {
         pos: AtlasPos { x: 0, y: 0 },
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
         badge_colour: Some("FF0000".to_string()),
         unlocked: Some(true),
         discovered: Some(true),
@@ -146,6 +152,7 @@ pub fn base_edition() -> EditionDef {
         description: vec!["Test description".to_string()],
         rules: vec![],
         user_variables: vec![],
+        description_variables: None,
         shader: None,
         in_shop: Some(true),
         weight: Some(1.0),

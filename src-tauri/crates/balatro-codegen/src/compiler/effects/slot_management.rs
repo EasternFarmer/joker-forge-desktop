@@ -93,10 +93,12 @@ pub fn edit_joker_slots_passive(
 
     let value_str = match effect.params.get("value") {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_int(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_num(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
@@ -214,10 +216,12 @@ pub fn edit_joker_size_passive(
 
     let value_str = match effect.params.get("value") {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_int(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_num(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
@@ -323,10 +327,12 @@ pub fn edit_consumable_slots_passive(
 
     let value_str = match effect.params.get("value") {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_int(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_num(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
@@ -528,10 +534,12 @@ pub fn edit_item_size_passive_typed(
 
     let value_str = match effect.params.get("value") {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_int(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_num(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
@@ -694,10 +702,12 @@ pub fn edit_round_counter_passive_typed(
 
     let value_str = match effect.params.get("value") {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_int(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, "value");
             ctx.add_config_num(&var_name, *n);
             format!("{}.{}", ctx.ability_path(), var_name)
         }

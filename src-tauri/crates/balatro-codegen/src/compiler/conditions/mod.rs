@@ -117,11 +117,12 @@ pub fn compile_condition(
     };
 
     // Apply negation
-    let expr = if condition.negate {
+    let mut expr = if condition.negate {
         lua_not(expr)
     } else {
         expr
     };
+    ctx.bind_preview_expr(&mut expr);
 
     Some(expr)
 }
@@ -143,8 +144,9 @@ pub fn compile_condition_chain(
 
     let compiled_groups: Vec<(Expr, LogicOp)> = groups
         .iter()
-        .filter_map(|group| {
-            compile_condition_group(group, object_type, ctx)
+        .enumerate()
+        .filter_map(|(index, group)| {
+            compile_condition_group(index, group, object_type, ctx)
                 .map(|expr| (expr, group.logic_operator))
         })
         .collect();
@@ -168,6 +170,7 @@ pub fn compile_condition_chain(
 
 /// Compile a single condition group.
 fn compile_condition_group(
+    group_index: usize,
     group: &ConditionGroupDef,
     object_type: ObjectType,
     ctx: &mut CompileContext,
@@ -177,7 +180,8 @@ fn compile_condition_group(
     }
 
     let mut compiled: Vec<(Expr, Option<LogicOp>)> = Vec::new();
-    for condition in &group.conditions {
+    for (index, condition) in group.conditions.iter().enumerate() {
+        ctx.set_preview_node(vec![serde_json::json!("conditionGroups"), serde_json::json!(group_index), serde_json::json!("conditions"), serde_json::json!(index)], &condition.params);
         if let Some(expr) = compile_condition(condition, object_type, ctx) {
             compiled.push((expr, condition.operator));
         }

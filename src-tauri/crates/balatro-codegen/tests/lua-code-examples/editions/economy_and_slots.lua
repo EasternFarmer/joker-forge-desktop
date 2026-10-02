@@ -37,14 +37,14 @@ SMODS.Edition {
     calculate = function(self, card, context)
         if context.pre_joker or context.main_scoring and context.cardarea == G.play then
             do
-                G.GAME.interest_cap = G.GAME.interest_cap + card.ability.extra.interest_cap0
+                G.GAME.interest_cap = G.GAME.interest_cap + card.edition.extra.interest_cap0
                 return {
                     message = 'Interest Cap Changed',
                     colour = G.C.MONEY,
                     extra = {
                         func = function()
-                            G.consumeables.config.card_limit = G.consumeables.config.card_limit + card.ability.extra.consumable_slots0
-                            card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {message = "+"..tostring(card.ability.extra.consumable_slots0)..' Consumable Slot', colour = G.C.GREEN})
+                            G.consumeables.config.card_limit = G.consumeables.config.card_limit + card.edition.extra.consumable_slots0
+                            card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {message = "+"..tostring(card.edition.extra.consumable_slots0)..' Consumable Slot', colour = G.C.GREEN})
                             return true
                         end,
                         colour = G.C.GREEN

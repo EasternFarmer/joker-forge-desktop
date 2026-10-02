@@ -169,6 +169,8 @@ export function Header({ title }: HeaderProps) {
         return "Settings";
       case "/acknowledgements":
         return "Acknowledgements";
+      case "/keys":
+        return "Keys Reference";
       default:
         return "Joker Forge";
     }
@@ -267,7 +269,7 @@ export function Header({ title }: HeaderProps) {
           legacyPath: configuredAppdataPath,
         });
         setBalatroAppdataPath(setupResult.appdataPath);
-        setBalatroGamePath(setupResult.gamePath);
+        if (setupResult.gamePath) setBalatroGamePath(setupResult.gamePath);
         balatroModsPath = setupResult.modsPath;
       }
 

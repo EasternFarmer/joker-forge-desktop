@@ -13,6 +13,7 @@ pub fn compile_consumable(consumable: &ConsumableDef, mod_prefix: &str) -> Chunk
         false,
     );
     ctx.set_user_vars(consumable.user_variables.clone());
+    ctx.set_description_variables(consumable.description_variables.clone());
 
     let rule_outputs = compile_rules(&consumable.rules, &mut ctx);
     let table = build_consumable_table(consumable, &ctx, &rule_outputs);
@@ -299,6 +300,7 @@ fn stmt_references_used_card(stmt: &Stmt) -> bool {
 
 fn expr_references_used_card(expr: &Expr) -> bool {
     match expr {
+        Expr::FieldBinding(inner, _) => expr_references_used_card(inner),
         Expr::Raw(s) => s.contains("used_card"),
         Expr::Ident(s) => s == "used_card",
         Expr::Field(base, key) => key == "used_card" || expr_references_used_card(base),

@@ -12,6 +12,7 @@ pub fn compile_deck(deck: &DeckDef, mod_prefix: &str) -> Chunk {
         false,
     );
     ctx.set_user_vars(deck.user_variables.clone());
+    ctx.set_description_variables(deck.description_variables.clone());
 
     let rule_outputs = compile_rules(&deck.rules, &mut ctx);
     let table = build_deck_table(deck, &ctx, &rule_outputs);

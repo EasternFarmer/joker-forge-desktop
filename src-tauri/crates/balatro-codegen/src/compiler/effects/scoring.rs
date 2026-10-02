@@ -98,6 +98,7 @@ fn scoring_effect(
     let (value_expr, config_var) = resolve_scoring_value(value, &var_name, ctx);
 
     if let Some(cv) = config_var {
+        ctx.bind_preview_config_parameter(&var_name, "value");
         ctx.add_config_var(cv);
     }
 

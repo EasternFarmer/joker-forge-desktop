@@ -20,6 +20,20 @@ import {
   ensureLocalizableWithLanguage,
   sanitizeLocalizationEntries,
 } from "@/lib/core/localization";
+import { buildDescriptionVariableTokens } from "@/lib/rules/description-variable-registry";
+
+// The editor, card preview and exported loc_vars must use the same slot order.
+const withDescriptionVariables = (item: unknown) => {
+  const context = (
+    item && typeof item === "object" ? item : {}
+  ) as Parameters<typeof buildDescriptionVariableTokens>[0];
+  return {
+    ...context,
+    descriptionVariables: buildDescriptionVariableTokens(context).map(
+      (token) => token.binding,
+    ),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Public option / result types
@@ -43,6 +57,17 @@ export interface PreviewCodeSegment {
 export interface CompiledLuaWithSegments {
   code: string;
   segments: PreviewCodeSegment[];
+  fieldBindings?: PreviewFieldBinding[];
+}
+
+export interface PreviewFieldBinding {
+  sourcePath: Array<string | number>;
+  valueType: "string" | "number" | "boolean";
+  originalValue: string | number | boolean;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
 }
 
 export type PreviewCompileItemType =
@@ -377,7 +402,7 @@ export const compileSingleItemLua = async (
 ): Promise<string> => {
   return invoke<string>("compile_item_from_data", {
     itemType,
-    itemData: item,
+    itemData: withDescriptionVariables(item),
     pos: null,
     soulPos: null,
     modPrefix,
@@ -394,7 +419,7 @@ export const compileSingleItemLuaWithSegments = async (
 ): Promise<CompiledLuaWithSegments> => {
   return invoke<CompiledLuaWithSegments>("compile_item_from_data_with_segments", {
     itemType,
-    itemData: item,
+    itemData: withDescriptionVariables(item),
     pos: null,
     soulPos: null,
     modPrefix,
@@ -536,7 +561,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(joker, locale);
         return {
           jokerData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -551,7 +576,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           consumableData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -566,7 +591,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           voucherData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -581,7 +606,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           deckData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -595,7 +620,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           enhancementData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -609,7 +634,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           sealData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };
@@ -623,7 +648,7 @@ export const exportModRust = async (
         const normalized = ensureLocalizableWithLanguage(item, locale);
         return {
           editionData: {
-            ...normalized,
+            ...withDescriptionVariables(normalized),
             localizations: sanitizeLocalizationEntries(normalized.localizations),
           },
         };

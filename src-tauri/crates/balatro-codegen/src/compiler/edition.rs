@@ -37,6 +37,7 @@ pub fn compile_edition(edition: &EditionDef, mod_prefix: &str) -> Chunk {
         false,
     );
     ctx.set_user_vars(edition.user_variables.clone());
+    ctx.set_description_variables(edition.description_variables.clone());
 
     let rule_outputs = compile_rules(&edition.rules, &mut ctx);
     let table = build_edition_table(edition, &ctx, &rule_outputs, mod_prefix);

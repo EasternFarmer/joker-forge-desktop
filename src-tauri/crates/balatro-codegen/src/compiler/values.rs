@@ -248,6 +248,7 @@ pub fn resolve_config_value(
 
     match effect_params.get(param_key) {
         Some(ParamValue::Int(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, param_key);
             ctx.add_config_int(&var_name, *n);
             let path = format!("{}.{}", ctx.ability_path(), var_name);
             ResolvedValue {
@@ -256,6 +257,7 @@ pub fn resolve_config_value(
             }
         }
         Some(ParamValue::Float(n)) => {
+            ctx.bind_preview_config_parameter(&var_name, param_key);
             ctx.add_config_num(&var_name, *n);
             let path = format!("{}.{}", ctx.ability_path(), var_name);
             ResolvedValue {
@@ -267,8 +269,10 @@ pub fn resolve_config_value(
             // Try numeric parse first
             if let Ok(n) = s.parse::<f64>() {
                 if n.fract() == 0.0 {
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_int(&var_name, n as i64);
                 } else {
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_num(&var_name, n);
                 }
                 let path = format!("{}.{}", ctx.ability_path(), var_name);
@@ -350,8 +354,10 @@ pub fn resolve_config_value(
                 // Try numeric
                 if let Some(n) = t.value.as_f64() {
                     if n.fract() == 0.0 {
+                        ctx.bind_preview_config_parameter(&var_name, param_key);
                         ctx.add_config_int(&var_name, n as i64);
                     } else {
+                        ctx.bind_preview_config_parameter(&var_name, param_key);
                         ctx.add_config_num(&var_name, n);
                     }
                     let path = format!("{}.{}", ctx.ability_path(), var_name);
@@ -363,8 +369,10 @@ pub fn resolve_config_value(
                 if let Some(s) = t.value.as_str() {
                     if let Ok(n) = s.parse::<f64>() {
                         if n.fract() == 0.0 {
+                            ctx.bind_preview_config_parameter(&var_name, param_key);
                             ctx.add_config_int(&var_name, n as i64);
                         } else {
+                            ctx.bind_preview_config_parameter(&var_name, param_key);
                             ctx.add_config_num(&var_name, n);
                         }
                         let path = format!("{}.{}", ctx.ability_path(), var_name);
@@ -430,12 +438,14 @@ pub fn resolve_condition_value(
         ParamValue::Int(n) => {
             let count = ctx.next_effect_count(&var_base);
             let var_name = ctx.unique_var_name(&var_base, count);
+            ctx.bind_preview_config_parameter(&var_name, param_key);
             ctx.add_config_int(&var_name, *n);
             Some(ability_path_expr(ctx.object_type, &var_name))
         }
         ParamValue::Float(n) => {
             let count = ctx.next_effect_count(&var_base);
             let var_name = ctx.unique_var_name(&var_base, count);
+            ctx.bind_preview_config_parameter(&var_name, param_key);
             ctx.add_config_num(&var_name, *n);
             Some(ability_path_expr(ctx.object_type, &var_name))
         }
@@ -447,8 +457,10 @@ pub fn resolve_condition_value(
                 let count = ctx.next_effect_count(&var_base);
                 let var_name = ctx.unique_var_name(&var_base, count);
                 if n.fract() == 0.0 {
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_int(&var_name, n as i64);
                 } else {
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_num(&var_name, n);
                 }
                 Some(ability_path_expr(ctx.object_type, &var_name))
@@ -476,12 +488,14 @@ pub fn resolve_condition_value(
                 if let Some(n) = t.value.as_i64() {
                     let count = ctx.next_effect_count(&var_base);
                     let var_name = ctx.unique_var_name(&var_base, count);
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_int(&var_name, n);
                     return Some(ability_path_expr(ctx.object_type, &var_name));
                 }
                 if let Some(n) = t.value.as_f64() {
                     let count = ctx.next_effect_count(&var_base);
                     let var_name = ctx.unique_var_name(&var_base, count);
+                    ctx.bind_preview_config_parameter(&var_name, param_key);
                     ctx.add_config_num(&var_name, n);
                     return Some(ability_path_expr(ctx.object_type, &var_name));
                 }

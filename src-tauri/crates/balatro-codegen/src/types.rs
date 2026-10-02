@@ -1,6 +1,39 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Ordered bindings for the numbered placeholders used by the description editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DescriptionVariableBinding {
+    Literal {
+        value: serde_json::Value,
+    },
+    User {
+        name: String,
+    },
+    Config {
+        name: String,
+        #[serde(default)]
+        effect_id: Option<String>,
+        #[serde(default)]
+        fallback: Option<ParamValue>,
+    },
+    Probability {
+        group_id: String,
+        part: ProbabilityPart,
+    },
+    Game {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbabilityPart {
+    Numerator,
+    Denominator,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level mod configuration
 // ---------------------------------------------------------------------------
@@ -56,6 +89,7 @@ impl ObjectType {
             // Deck config variables live on the back definition config, not card ability.
             ObjectType::Deck => "self.config.extra",
             ObjectType::Seal => "card.ability.seal.extra",
+            ObjectType::Edition => "card.edition.extra",
             _ => "card.ability.extra",
         }
     }
@@ -106,6 +140,8 @@ pub struct JokerDef {
     pub unlock: Option<UnlockDef>,
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
+    #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub force_eternal: bool,
     #[serde(default)]
@@ -181,6 +217,8 @@ pub struct ConsumableDef {
     pub rules: Vec<RuleDef>,
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
+    #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +255,8 @@ pub struct EnhancementDef {
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
     #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
+    #[serde(default)]
     pub any_suit: Option<bool>,
     #[serde(default)]
     pub replace_base_card: Option<bool>,
@@ -251,6 +291,8 @@ pub struct SealDef {
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
     #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
+    #[serde(default)]
     pub badge_colour: Option<String>,
     #[serde(default)]
     pub unlocked: Option<bool>,
@@ -282,6 +324,8 @@ pub struct EditionDef {
     pub rules: Vec<RuleDef>,
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
+    #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub shader: Option<String>,
     #[serde(default)]
@@ -360,6 +404,8 @@ pub struct VoucherDef {
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
     #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
+    #[serde(default)]
     pub draw_shader_sprite: Option<String>,
 }
 
@@ -377,6 +423,8 @@ pub struct DeckDef {
     pub rules: Vec<RuleDef>,
     #[serde(default)]
     pub user_variables: Vec<UserVariableDef>,
+    #[serde(default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub unlocked: Option<bool>,
     #[serde(default)]

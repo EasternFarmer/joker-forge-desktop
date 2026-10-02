@@ -7,7 +7,7 @@
 //! updating Rust, not both the TypeScript mapper and the Rust codegen.
 
 use balatro_codegen::types::{
-    AppearanceDef, AtlasPos, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef,
+    AppearanceDef, AtlasPos, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef, DescriptionVariableBinding,
     DeckDef, DisplaySize, EditionDef, EffectDef, EnhancementDef, JokerDef, LogicOp, LoopGroupDef,
     ParamValue, RandomGroupDef, RarityDef, RuleDef, SealDef, TypedValue, UnlockDef, UserVarType,
     UserVariableDef, VoucherDef,
@@ -16,6 +16,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Input types, match the TypeScript `JokerData` / `Rule` shapes exactly
@@ -72,6 +73,8 @@ pub struct JokerDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub force_eternal: bool,
     #[serde(default)]
@@ -125,6 +128,8 @@ pub struct ConsumableDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub atlas: Option<String>,
 }
@@ -141,6 +146,8 @@ pub struct EnhancementDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub any_suit: Option<bool>,
     #[serde(default)]
@@ -175,6 +182,8 @@ pub struct SealDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub badge_colour: Option<String>,
     #[serde(default)]
@@ -205,6 +214,8 @@ pub struct EditionDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub shader: Option<Value>,
     #[serde(default)]
@@ -261,6 +272,8 @@ pub struct VoucherDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub draw_shader_sprite: Option<Value>,
     #[serde(default)]
@@ -279,6 +292,8 @@ pub struct DeckDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub unlocked: Option<bool>,
     #[serde(default)]
@@ -600,6 +615,7 @@ pub fn joker_data_to_def(
         appearance,
         unlock,
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         force_eternal: input.force_eternal,
         force_perishable: input.force_perishable,
         force_rental: input.force_rental,
@@ -643,6 +659,7 @@ pub fn consumable_data_to_def(
         soul_pos: soul_pos.map(|sp| AtlasPos { x: sp.x, y: sp.y }),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
     }
 }
 
@@ -658,6 +675,7 @@ pub fn enhancement_data_to_def(input: &EnhancementDataInput, pos: AtlasPosInput)
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         any_suit: input.any_suit,
         replace_base_card: input.replace_base_card,
         no_rank: input.no_rank,
@@ -682,6 +700,7 @@ pub fn seal_data_to_def(input: &SealDataInput, pos: AtlasPosInput) -> SealDef {
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         badge_colour: input.badge_colour.clone(),
         unlocked: input.unlocked,
         discovered: input.discovered,
@@ -702,6 +721,7 @@ pub fn edition_data_to_def(input: &EditionDataInput) -> EditionDef {
         description: split_description(&input.description),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         shader: option_value_to_string(input.shader.as_ref()),
         in_shop: input.in_shop,
         weight: input.weight,
@@ -752,6 +772,7 @@ pub fn voucher_data_to_def(
         soul_pos: soul_pos.map(|sp| AtlasPos { x: sp.x, y: sp.y }),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         draw_shader_sprite: option_value_to_string(input.draw_shader_sprite.as_ref()),
     }
 }
@@ -777,6 +798,7 @@ pub fn deck_data_to_def(input: &DeckDataInput, mod_prefix: &str, pos: AtlasPosIn
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         unlocked: input.unlocked,
         discovered: input.discovered,
         no_collection: input.no_collection,
@@ -1932,17 +1954,17 @@ pub fn build_sounds_lua(sounds: &[SoundDataInput]) -> String {
         if key.is_empty() {
             continue;
         }
-        let path = sound.sound_string.trim();
-        if path.is_empty() {
+        let Some(path) = Path::new(sound.sound_string.trim())
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
             continue;
-        }
+        };
         let mut block = vec![
             "SMODS.Sound({".to_string(),
             format!("    key = '{}',", escape_lua_string(key)),
-            format!(
-                "    path = '{}',",
-                escape_lua_string(&format!("sounds/{}", path))
-            ),
+            // SMODS resolves this path relative to the mod's assets/sounds directory.
+            format!("    path = '{}',", escape_lua_string(path)),
             format!("    pitch = {},", sound.pitch.unwrap_or(1.0)),
             format!("    volume = {},", sound.volume.unwrap_or(1.0)),
         ];
@@ -2003,6 +2025,69 @@ pub fn build_mod_json(metadata: &ModMetadataInput) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn make_sound(key: &str, filename: &str) -> SoundDataInput {
+        SoundDataInput {
+            key: key.to_string(),
+            sound_string: filename.to_string(),
+            audio_bytes: Some(vec![1, 2, 3]),
+            volume: None,
+            pitch: None,
+            replace: None,
+        }
+    }
+
+    #[test]
+    fn build_sounds_lua_resolves_upload_in_smods_assets_directory() {
+        // Imported filenames may include a directory, but export packages only the basename.
+        for filename in ["test.ogg", "sounds/test.ogg", " assets/sounds/test.ogg "] {
+            let lua = build_sounds_lua(&[make_sound("test", filename)]);
+            let registered_path = lua
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("path = '")
+                        .and_then(|path| path.strip_suffix("',"))
+                })
+                .expect("sound registration must include a path");
+
+            // This is the location that SMODS.Sound.inject reads when the sound is played.
+            let smods_path = Path::new("mod/assets/sounds").join(registered_path);
+            assert_eq!(smods_path, Path::new("mod/assets/sounds/test.ogg"));
+        }
+    }
+
+    #[test]
+    fn build_sounds_lua_preserves_registration_key_and_playback_settings() {
+        let mut sound = make_sound(" test ", "test.ogg");
+        sound.pitch = Some(1.25);
+        sound.volume = Some(0.5);
+        sound.replace = Some(" card1 ".to_string());
+
+        let lua = build_sounds_lua(&[sound]);
+
+        assert!(lua.contains("key = 'test',"));
+        // Keep SMODS's default key prefixing enabled for project sounds.
+        assert!(!lua.contains("prefix_config"));
+        assert!(lua.contains("pitch = 1.25,"));
+        assert!(lua.contains("volume = 0.5,"));
+        assert!(lua.contains("replace = 'card1',"));
+    }
+
+    #[test]
+    fn build_sounds_lua_skips_unconfigured_sounds() {
+        let lua = build_sounds_lua(&[
+            make_sound("", "test.ogg"),
+            make_sound("blank", " "),
+            make_sound("ready", "ready.ogg"),
+        ]);
+
+        assert_eq!(lua.matches("SMODS.Sound({").count(), 1);
+        assert!(lua.contains("key = 'ready',"));
+        assert!(lua.contains("path = 'ready.ogg',"));
+        assert!(lua.contains("pitch = 1,"));
+        assert!(lua.contains("volume = 1,"));
+    }
+
     fn make_global_var(name: &str, is_persistent: bool) -> UserVariableInput {
         UserVariableInput {
             name: name.to_string(),
@@ -2043,6 +2128,7 @@ mod tests {
                 scale_h: None,
                 rules: vec![],
                 user_variables: vars,
+                description_variables: None,
                 force_eternal: false,
                 force_perishable: false,
                 force_rental: false,
@@ -2073,6 +2159,26 @@ mod tests {
 
         assert_eq!(parsed.value, serde_json::json!(7));
         assert_eq!(parsed.value_type.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn ordered_description_bindings_survive_frontend_mapping() {
+        let input: JokerDataInput = serde_json::from_value(serde_json::json!({
+            "objectKey": "chance", "name": "Chance", "description": "#1# in #2#", "cost": 4, "rarity": "common",
+            "descriptionVariables": [
+                { "kind": "probability", "group_id": "chance-group", "part": "numerator" },
+                { "kind": "probability", "group_id": "chance-group", "part": "denominator" },
+                { "kind": "literal", "value": 2 },
+                { "kind": "literal", "value": 2 }
+            ]
+        })).unwrap();
+        let def = joker_data_to_def(&input, "mod", AtlasPosInput { x: 0, y: 0 }, None);
+        let bindings = def.description_variables.expect("bindings must reach the generator");
+        assert_eq!(bindings.len(), 4);
+        assert!(matches!(&bindings[0], DescriptionVariableBinding::Probability { group_id, part: balatro_codegen::types::ProbabilityPart::Numerator } if group_id == "chance-group"));
+        assert!(matches!(&bindings[1], DescriptionVariableBinding::Probability { group_id, part: balatro_codegen::types::ProbabilityPart::Denominator } if group_id == "chance-group"));
+        assert!(matches!(&bindings[2], DescriptionVariableBinding::Literal { value } if value == &serde_json::json!(2)));
+        assert!(matches!(&bindings[3], DescriptionVariableBinding::Literal { value } if value == &serde_json::json!(2)));
     }
 
     #[test]
@@ -2153,6 +2259,7 @@ mod tests {
             localizations: vec![],
             rules: vec![],
             user_variables: vec![],
+            description_variables: None,
             unlocked: Some(true),
             discovered: Some(true),
             no_collection: None,

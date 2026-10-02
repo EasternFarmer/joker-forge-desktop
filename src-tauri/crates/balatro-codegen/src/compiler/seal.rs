@@ -14,6 +14,7 @@ pub fn compile_seal(seal: &SealDef, mod_prefix: &str) -> Chunk {
         false,
     );
     ctx.set_user_vars(seal.user_variables.clone());
+    ctx.set_description_variables(seal.description_variables.clone());
 
     let rule_outputs = compile_rules(&seal.rules, &mut ctx);
     let table = build_seal_table(seal, &ctx, &rule_outputs);

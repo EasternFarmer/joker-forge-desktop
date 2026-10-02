@@ -48,6 +48,7 @@ pub fn compile_joker_with_options(
         joker.blueprint_compat,
     );
     ctx.set_user_vars(joker.user_variables.clone());
+    ctx.set_description_variables(joker.description_variables.clone());
 
     // Pre-pass: compile all effects to accumulate config variables
     let rule_outputs = compile_rules(&joker.rules, &mut ctx);
@@ -270,7 +271,11 @@ pub(crate) enum PassiveHookSpec {
 pub(crate) fn compile_rules(rules: &[RuleDef], ctx: &mut CompileContext) -> Vec<RuleOutput> {
     rules
         .iter()
-        .map(|rule| compile_single_rule(rule, ctx))
+        .enumerate()
+        .map(|(index, rule)| {
+            ctx.begin_preview_rule(index);
+            compile_single_rule(rule, ctx)
+        })
         .collect()
 }
 
@@ -298,13 +303,16 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     let mut passive_outputs = Vec::new();
     let mut passive_hooks = Vec::new();
     if is_passive {
-        for effect in &rule.effects {
+        for (index, effect) in rule.effects.iter().enumerate() {
+            ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
+            let config_start = ctx.config_vars().len();
             if let Some(po) = effects::passive::compile_passive(effect, ctx) {
                 passive_outputs.push(po);
             }
             if let Some(hook) = passive_hook_from_effect(effect, ctx) {
                 passive_hooks.push(hook);
             }
+            ctx.record_effect_config_names(&effect.id, config_start);
         }
     }
 
@@ -312,7 +320,8 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     let mut effect_outputs = Vec::new();
     let mut blind_rewards = Vec::new();
     if !is_passive {
-        for effect in &rule.effects {
+        for (index, effect) in rule.effects.iter().enumerate() {
+            ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             if effect.effect_type == "blind_reward"
                 && (trigger == "round_end" || trigger == "boss_defeated")
             {
@@ -332,14 +341,14 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     }
 
     // Compile random groups
-    for rg in &rule.random_groups {
-        let rg_effects = compile_random_group(&rule.id, rg, ctx, &trigger);
+    for (index, rg) in rule.random_groups.iter().enumerate() {
+        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger);
         effect_outputs.extend(rg_effects);
     }
 
     // Compile loop groups
-    for lg in &rule.loop_groups {
-        let lg_effects = compile_loop_group(&rule.id, lg, ctx, &trigger);
+    for (index, lg) in rule.loop_groups.iter().enumerate() {
+        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger);
         effect_outputs.extend(lg_effects);
     }
 
@@ -375,13 +384,22 @@ fn effect_segment_id(rule_id: &str, effect: &EffectDef) -> Option<String> {
 
 fn compile_random_group(
     rule_id: &str,
+    group_index: usize,
     rg: &RandomGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
 ) -> Vec<effects::EffectOutput> {
+    let numerator = rg.chance_numerator.as_i64().unwrap_or(1);
+    let denom = rg.chance_denominator.as_i64().unwrap_or(2);
+    ctx.register_description_probability(&rg.id, context::DescriptionProbability {
+        config_names: None,
+        numerator,
+        denominator: denom,
+    });
     // Compile the effects within the random group
     let mut inner_outputs = Vec::new();
-    for effect in &rg.effects {
+    for (index, effect) in rg.effects.iter().enumerate() {
+        ctx.set_preview_node(vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
@@ -414,10 +432,15 @@ fn compile_random_group(
     );
 
     // Register probability config variables
-    let numerator = rg.chance_numerator.as_i64().unwrap_or(1);
-    let denom = rg.chance_denominator.as_i64().unwrap_or(2);
     ctx.add_config_int(&numerator_var, numerator);
     ctx.add_config_int(&odds_var, denom);
+    ctx.bind_preview_group_value(&numerator_var, vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("chance_numerator"), serde_json::json!("value")], &rg.chance_numerator);
+    ctx.bind_preview_group_value(&odds_var, vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("chance_denominator"), serde_json::json!("value")], &rg.chance_denominator);
+    ctx.register_description_probability(&rg.id, context::DescriptionProbability {
+        config_names: Some((numerator_var, odds_var)),
+        numerator,
+        denominator: denom,
+    });
 
     let wrapped = effects::EffectOutput {
         return_fields: vec![],
@@ -434,12 +457,14 @@ fn compile_random_group(
 
 fn compile_loop_group(
     rule_id: &str,
+    group_index: usize,
     lg: &LoopGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
 ) -> Vec<effects::EffectOutput> {
     let mut inner_outputs = Vec::new();
-    for effect in &lg.effects {
+    for (index, effect) in lg.effects.iter().enumerate() {
+        ctx.set_preview_node(vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
@@ -459,6 +484,7 @@ fn compile_loop_group(
     let loop_var_name = format!("loop_count_{}", loop_index);
     let loop_count = lg.count.as_i64().unwrap_or(1).max(1);
     ctx.add_config_int(&loop_var_name, loop_count);
+    ctx.bind_preview_group_value(&loop_var_name, vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("repetitions"), serde_json::json!("value")], &lg.count);
 
     let loop_stmt = Stmt::ForRange {
         var: "i".to_string(),
@@ -809,6 +835,292 @@ fn build_passive_functions(
     (add_fn, remove_fn)
 }
 
+/// Build guarded access to a fixed Lua path used while rendering a tooltip.
+fn guarded_description_path(path: &str) -> Expr {
+    let parts: Vec<&str> = path.split('.').collect();
+    lua_and_chain(
+        (1..=parts.len())
+            .map(|end| lua_raw_expr(parts[..end].join(".")))
+            .collect(),
+    )
+}
+
+fn description_scoped_value(ctx: &CompileContext, name: &str, fallback: Expr) -> Expr {
+    let live = lua_and(
+        guarded_description_path(ctx.ability_path()),
+        lua_index(lua_raw_expr(ctx.ability_path()), lua_str(name)),
+    );
+    let default = lua_and(
+        guarded_description_path("self.config.extra"),
+        lua_index(lua_raw_expr("self.config.extra"), lua_str(name)),
+    );
+    lua_or(lua_or(live, default), fallback)
+}
+
+/// Tooltip evaluation has no calculate `context`; only catalog IDs are allowed here.
+fn description_game_value(id: &str) -> Expr {
+    let code = match id {
+        "hand_size" | "cards_in_hand" => "G.hand and G.hand.cards and #G.hand.cards",
+        "current_hand_size" => "G.hand and G.hand.config and G.hand.config.card_limit",
+        "joker_count" => "G.jokers and G.jokers.cards and #G.jokers.cards",
+        "hands_remaining" | "remaining_hands" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left",
+        "discards_remaining" | "remaining_discards" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left",
+        "deck_size" | "cards_in_deck" => "G.deck and G.deck.cards and #G.deck.cards",
+        "cards_in_discard" => "G.discard and G.discard.cards and #G.discard.cards",
+        "full_deck_size" | "total_playing_cards" => "G.playing_cards and #G.playing_cards",
+        "cards_removed_from_deck" => "G.GAME and G.GAME.starting_deck_size and (G.GAME.starting_deck_size - #(G.playing_cards or {}))",
+        "current_money" | "player_money" | "dollars" => "G.GAME and G.GAME.dollars",
+        "current_ante" | "ante_level" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante",
+        "blind_chips" | "blind_chip_req" => "G.GAME and G.GAME.blind and G.GAME.blind.chips",
+        "blind_mult" => "G.GAME and G.GAME.blind and G.GAME.blind.mult",
+        "consumable_count" => "G.consumeables and G.consumeables.cards and #G.consumeables.cards",
+        "interest" => "G.GAME and G.GAME.interest_amount",
+        "hands_played_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_played",
+        "discards_used_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_used",
+        "blinds_skipped" => "G.GAME and G.GAME.skips",
+        "base_hands_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.hands",
+        "base_discards_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.discards",
+        "hand_level" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].level",
+        "times_hand_played" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].played",
+        "scored_card_count" | "played_card_count" => "G.play and G.play.cards and #G.play.cards",
+        "poker_hand_count" => "(function() local count = 0; for _, hand in pairs((G.GAME and G.GAME.hands) or {}) do if hand.visible then count = count + 1 end end return count end)()",
+        _ => return lua_int(0),
+    };
+    lua_raw_expr(format!("((G and ({code})) or 0)"))
+}
+
+fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
+    match value {
+        ParamValue::Int(n) => lua_int(*n),
+        ParamValue::Float(n) => lua_num(*n),
+        ParamValue::Bool(value) => lua_bool(*value),
+        ParamValue::Str(value) => {
+            if ctx.has_user_var(value) {
+                return description_user_value(ctx, value).0;
+            }
+            if let Some(game) = values::parse_game_var(value) {
+                return lua_mul(
+                    lua_add(
+                        description_game_value(&game.var_id),
+                        lua_num(game.starts_from),
+                    ),
+                    lua_num(game.multiplier),
+                );
+            }
+            lua_str(value)
+        }
+        ParamValue::Typed(value) => {
+            if values::is_user_variable_type(&value.value_type) {
+                return description_user_value(ctx, value.value.as_str().unwrap_or("")).0;
+            }
+            description_param_value(
+                &match &value.value {
+                    serde_json::Value::Number(n) => ParamValue::Float(n.as_f64().unwrap_or(0.0)),
+                    serde_json::Value::Bool(value) => ParamValue::Bool(*value),
+                    serde_json::Value::String(value) => ParamValue::Str(value.clone()),
+                    _ => ParamValue::Int(0),
+                },
+                ctx,
+            )
+        }
+    }
+}
+
+fn description_literal_value(value: &serde_json::Value) -> Expr {
+    match value {
+        serde_json::Value::Number(n) => lua_num(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::Bool(value) => lua_bool(*value),
+        serde_json::Value::String(value) => lua_str(value),
+        serde_json::Value::Null => lua_int(0),
+        _ => lua_str(value.to_string()),
+    }
+}
+
+fn description_user_value(ctx: &CompileContext, name: &str) -> (Expr, Option<Expr>) {
+    let Some(variable) = ctx
+        .user_vars()
+        .iter()
+        .find(|variable| variable.name == name)
+    else {
+        return (lua_int(0), None);
+    };
+    // Initial values are literals even when their text happens to resemble another variable.
+    let initial = match &variable.initial_value {
+        ParamValue::Str(value) => lua_str(value),
+        ParamValue::Typed(value) => description_literal_value(&value.value),
+        value => description_param_value(value, ctx),
+    };
+    let current = if variable.is_global {
+        let path = if variable.is_persistent {
+            "JF_GLOBALS"
+        } else {
+            "G.GAME.jf_global_vars"
+        };
+        lua_or(
+            lua_and(
+                guarded_description_path(path),
+                lua_index(lua_raw_expr(path), lua_str(name)),
+            ),
+            initial,
+        )
+    } else {
+        description_scoped_value(ctx, name, initial)
+    };
+    let round = guarded_description_path("G.GAME.current_round");
+    let card_variable = lua_index(
+        lua_raw_expr("G.GAME.current_round"),
+        lua_str(format!("{name}_card")),
+    );
+    match variable.var_type {
+        UserVarType::Suit | UserVarType::Rank => {
+            let field = if variable.var_type == UserVarType::Suit {
+                "suit"
+            } else {
+                "rank"
+            };
+            let value = lua_or(
+                lua_and_chain(vec![
+                    round,
+                    card_variable.clone(),
+                    lua_field(card_variable, field),
+                ]),
+                current,
+            );
+            let localize_set = if variable.var_type == UserVarType::Suit {
+                "suits_singular"
+            } else {
+                "ranks"
+            };
+            let colour = if variable.var_type == UserVarType::Suit {
+                Some(lua_index(lua_raw_expr("G.C.SUITS"), value.clone()))
+            } else {
+                None
+            };
+            (
+                lua_call("localize", vec![value, lua_str(localize_set)]),
+                colour,
+            )
+        }
+        UserVarType::PokerHand => {
+            let hand = lua_index(
+                lua_raw_expr("G.GAME.current_round"),
+                lua_str(format!("{name}_hand")),
+            );
+            let value = lua_or(lua_and(round, hand), current);
+            (
+                lua_call("localize", vec![value, lua_str("poker_hands")]),
+                None,
+            )
+        }
+        _ => (current, None),
+    }
+}
+
+fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<TableEntry>) {
+    let mut body = Vec::new();
+    let mut vars = Vec::new();
+    let mut colours = Vec::new();
+    let mut probabilities = std::collections::HashMap::<String, (String, String)>::new();
+    for (index, binding) in ctx
+        .description_variables()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let value = match binding {
+            DescriptionVariableBinding::Literal { value } => description_literal_value(value),
+            DescriptionVariableBinding::User { name } => {
+                let (value, colour) = description_user_value(ctx, name);
+                if let Some(colour) = colour {
+                    colours.push(TableEntry::Value(colour));
+                }
+                value
+            }
+            DescriptionVariableBinding::Config {
+                name,
+                effect_id,
+                fallback,
+            } => {
+                let fallback = fallback
+                    .as_ref()
+                    .map(|value| description_param_value(value, ctx))
+                    .unwrap_or_else(|| lua_int(0));
+                let config_name = match effect_id {
+                    Some(id) => ctx.effect_config_names(id).and_then(|names| {
+                        names
+                            .iter()
+                            .find(|actual| {
+                                actual.trim_end_matches(|c: char| c.is_ascii_digit())
+                                    == name.trim_end_matches(|c: char| c.is_ascii_digit())
+                            })
+                            .or_else(|| names.first())
+                    }),
+                    None => ctx
+                        .config_vars()
+                        .iter()
+                        .find(|var| var.name == *name)
+                        .map(|var| &var.name),
+                };
+                config_name
+                    .map(|name| description_scoped_value(ctx, name, fallback.clone()))
+                    .unwrap_or(fallback)
+            }
+            DescriptionVariableBinding::Game { id } => description_game_value(id),
+            DescriptionVariableBinding::Probability { group_id, part } => {
+                let (numerator, denominator) =
+                    probabilities.entry(group_id.clone()).or_insert_with(|| {
+                        let numerator_name = format!("description_numerator{index}");
+                        let denominator_name = format!("description_denominator{index}");
+                        let probability = ctx.description_probability(group_id);
+                        let mut numerator = lua_int(probability.map(|p| p.numerator).unwrap_or(1));
+                        let mut denominator =
+                            lua_int(probability.map(|p| p.denominator).unwrap_or(2));
+                        if let Some((num, den)) = probability.and_then(|p| p.config_names.as_ref())
+                        {
+                            numerator = description_scoped_value(ctx, num, numerator);
+                            denominator = description_scoped_value(ctx, den, denominator);
+                        }
+                        body.push(lua_raw_stmt(format!(
+                            "local {numerator_name}, {denominator_name}"
+                        )));
+                        body.push(Stmt::MultiAssign(
+                            vec![lua_ident(&numerator_name), lua_ident(&denominator_name)],
+                            vec![lua_call(
+                                "SMODS.get_probability_vars",
+                                vec![
+                                    lua_ident("card"),
+                                    numerator,
+                                    denominator,
+                                    lua_str(ctx.smods_key()),
+                                ],
+                            )],
+                        ));
+                        (numerator_name, denominator_name)
+                    });
+                lua_ident(
+                    match part {
+                        ProbabilityPart::Numerator => numerator,
+                        ProbabilityPart::Denominator => denominator,
+                    }
+                    .clone(),
+                )
+            }
+        };
+        vars.push(TableEntry::Value(value));
+    }
+    let mut entries = vec![TableEntry::KeyValue(
+        "vars".to_string(),
+        lua_table_raw(vars),
+    )];
+    if !colours.is_empty() {
+        entries.push(TableEntry::KeyValue(
+            "colours".to_string(),
+            lua_table_raw(colours),
+        ));
+    }
+    (body, entries)
+}
+
 /// Build the `loc_vars` function for localization variables.
 fn build_loc_vars(
     joker: &JokerDef,
@@ -823,7 +1135,7 @@ fn build_loc_vars(
         .any(|uv| !uv.is_global || referenced_user_vars.contains(&uv.name));
     let has_info_queue = !joker.info_queues.is_empty();
 
-    if vars.is_empty() && !has_user_vars && !has_info_queue {
+    if vars.is_empty() && !has_user_vars && !has_info_queue && ctx.description_variables().is_none() {
         return None;
     }
 
@@ -851,6 +1163,13 @@ fn build_loc_vars(
             "local info_queue_{} = {}; if info_queue_{} then info_queue[#info_queue + 1] = info_queue_{} else error(\"JOKERFORGE: Invalid key in infoQueues: '{}'.\") end",
             index, object_path, index, index, key
         )));
+    }
+
+    if ctx.description_variables().is_some() {
+        let (statements, entries) = build_ordered_description_vars(ctx);
+        body.extend(statements);
+        body.push(lua_return(lua_table_raw(entries)));
+        return Some(Expr::Function { params: vec!["self".into(), "info_queue".into(), "card".into()], body });
     }
 
     let mut var_refs: Vec<TableEntry> = Vec::new();
@@ -1699,6 +2018,11 @@ pub(crate) fn build_shared_loc_vars(
     ctx: &CompileContext,
     _rule_outputs: &[RuleOutput],
 ) -> Option<Expr> {
+    if ctx.description_variables().is_some() {
+        let (mut body, entries) = build_ordered_description_vars(ctx);
+        body.push(lua_return(lua_table_raw(entries)));
+        return Some(Expr::Function { params: vec!["self".into(), "info_queue".into(), "card".into()], body });
+    }
     let vars = ctx.config_vars();
     let has_user_vars = ctx.user_vars().iter().any(|uv| !uv.is_global);
 

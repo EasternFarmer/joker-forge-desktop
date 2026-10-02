@@ -14,6 +14,7 @@ import VouchersPage from "@/pages/vouchers-page";
 import MetadataPage from "@/pages/metadata-page";
 import SettingsPage from "@/pages/settings-page";
 import AcknowledgementsPage from "@/pages/acknowledgements-page";
+import KeysReferencePage from "@/pages/keys-reference-page";
 import VanillaReforgedJokersPage from "@/pages/vanilla-reforged/vanilla-reforged-jokers-page";
 import VanillaReforgedConsumablesPage from "@/pages/vanilla-reforged/vanilla-reforged-consumables-page";
 import VanillaReforgedBoostersPage from "@/pages/vanilla-reforged/vanilla-reforged-boosters-page";
@@ -61,6 +62,7 @@ function App() {
               <Route path="/editions" element={<EditionsPage />} />
               <Route path="/metadata" element={<MetadataPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/keys" element={<KeysReferencePage />} />
               <Route
                 path="/acknowledgements"
                 element={<AcknowledgementsPage />}

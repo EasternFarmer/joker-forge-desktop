@@ -557,6 +557,7 @@ pub struct PreviewCodeSegment {
 pub struct CompiledLuaWithSegments {
     pub code: String,
     pub segments: Vec<PreviewCodeSegment>,
+    pub field_bindings: Vec<balatro_codegen::lua_ast::LuaFieldBinding>,
 }
 
 #[tauri::command]
@@ -575,7 +576,7 @@ pub fn compile_item_from_data_with_segments(
         .map(super::export::map_user_variable_inputs)
         .unwrap_or_default();
 
-    let (code, segments) = match item_type.as_str() {
+    let (code, segments, field_bindings) = match item_type.as_str() {
         "joker" => {
             let parsed: JokerDataInput = serde_json::from_value(item_data)
                 .map_err(|e| format!("Invalid joker data: {}", e))?;
@@ -583,7 +584,7 @@ pub fn compile_item_from_data_with_segments(
                 super::export::joker_data_to_def(&parsed, &mod_prefix, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_joker_with_options(&def, &mod_prefix, include_loc_txt);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "consumable" => {
             let parsed: ConsumableDataInput = serde_json::from_value(item_data)
@@ -591,7 +592,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::consumable_data_to_def(&parsed, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_consumable(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "voucher" => {
             let parsed: VoucherDataInput = serde_json::from_value(item_data)
@@ -599,7 +600,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::voucher_data_to_def(&parsed, base_pos, soul_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_voucher(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "deck" => {
             let parsed: DeckDataInput = serde_json::from_value(item_data)
@@ -607,7 +608,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::deck_data_to_def(&parsed, &mod_prefix, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_deck(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "enhancement" => {
             let parsed: EnhancementDataInput = serde_json::from_value(item_data)
@@ -615,7 +616,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::enhancement_data_to_def(&parsed, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_enhancement(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "seal" => {
             let parsed: SealDataInput = serde_json::from_value(item_data)
@@ -623,7 +624,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::seal_data_to_def(&parsed, base_pos);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_seal(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         "edition" => {
             let parsed: EditionDataInput = serde_json::from_value(item_data)
@@ -631,7 +632,7 @@ pub fn compile_item_from_data_with_segments(
             let mut def = super::export::edition_data_to_def(&parsed);
             merge_global_user_vars(&mut def.user_variables, &mapped_globals);
             let chunk = compile_edition(&def, &mod_prefix);
-            LuaEmitter::new().emit_chunk_with_segments(&chunk)
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
         _ => return Err(format!("Unsupported item type: {}", item_type)),
     };
@@ -652,7 +653,29 @@ pub fn compile_item_from_data_with_segments(
     Ok(CompiledLuaWithSegments {
         code,
         segments: mapped_segments,
+        field_bindings,
     })
+}
+
+#[cfg(test)]
+mod live_code_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_command_returns_editable_rule_fields_in_ipc_contract() {
+        let input = serde_json::json!({
+            "objectKey": "preview", "name": "Preview", "description": "Test", "cost": 4, "rarity": "common",
+            "rules": [{ "id": "rule", "trigger": "hand_played", "conditionGroups": [{ "operator": "and", "conditions": [{
+                "id": "os", "type": "system_condition", "params": { "system": { "value": "Windows" } }
+            }] }], "effects": [{ "id": "mult", "type": "add_mult", "params": { "value": { "value": "7", "valueType": "number" } } }] }]
+        });
+        let output = compile_item_from_data_with_segments("joker".into(), input, None, None, "mod".into(), true, None).unwrap();
+        let output = serde_json::to_value(output).unwrap();
+        let bindings = output["fieldBindings"].as_array().expect("metadata uses the camelCase IPC field");
+        assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "conditionGroups", 0, "conditions", 0, "params", "system", "value"]) && binding["originalValue"] == "Windows"));
+        assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "effects", 0, "params", "value", "value"]) && binding["originalValue"] == 7 && binding["valueType"] == "number"));
+        assert!(output["code"].as_str().unwrap().contains("love.system.getOS() == 'Windows'"));
+    }
 }
 
 /// Compile and write a batch of jokers to disk in a single IPC call.
@@ -731,6 +754,44 @@ fn prepare_sounds_for_export(sounds: &mut [SoundDataInput]) -> Result<(), String
             .into_owned();
     }
     Ok(())
+}
+
+fn write_sounds(root: &Path, sounds: &[SoundDataInput]) -> Result<usize, String> {
+    if sounds.is_empty() {
+        return Ok(0);
+    }
+
+    let sounds_lua = format_lua_source(&super::export::build_sounds_lua(sounds));
+    let sounds_lua_path = root.join("sounds.lua");
+    fs::write(&sounds_lua_path, sounds_lua.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", sounds_lua_path.display(), e))?;
+    let mut file_count = 1;
+
+    // SMODS.Sound resolves each registered path relative to assets/sounds.
+    let sounds_dir = root.join("assets").join("sounds");
+    fs::create_dir_all(&sounds_dir)
+        .map_err(|e| format!("Failed to create {}: {}", sounds_dir.display(), e))?;
+    for sound in sounds {
+        let file_name = sound.sound_string.trim();
+        if file_name.is_empty() {
+            continue;
+        }
+        let sanitized_file_name = Path::new(file_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("Invalid sound file name: {}", file_name))?;
+        if let Some(bytes) = &sound.audio_bytes {
+            if bytes.is_empty() {
+                continue;
+            }
+            let path = sounds_dir.join(sanitized_file_name);
+            fs::write(&path, bytes)
+                .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            file_count += 1;
+        }
+    }
+
+    Ok(file_count)
 }
 
 fn transcode_mp3_to_ogg(mp3_bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -968,36 +1029,7 @@ pub fn export_mod_package(
         file_count += 1;
     }
 
-    if !sounds.is_empty() {
-        let sounds_lua = format_lua_source(&super::export::build_sounds_lua(&sounds));
-        let sounds_lua_path = root.join("sounds.lua");
-        fs::write(&sounds_lua_path, sounds_lua.as_bytes())
-            .map_err(|e| format!("Failed to write {}: {}", sounds_lua_path.display(), e))?;
-        file_count += 1;
-
-        let sounds_dir = root.join("sounds");
-        fs::create_dir_all(&sounds_dir)
-            .map_err(|e| format!("Failed to create {}: {}", sounds_dir.display(), e))?;
-        for sound in &sounds {
-            let file_name = sound.sound_string.trim();
-            if file_name.is_empty() {
-                continue;
-            }
-            let sanitized_file_name = Path::new(file_name)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("Invalid sound file name: {}", file_name))?;
-            if let Some(bytes) = &sound.audio_bytes {
-                if bytes.is_empty() {
-                    continue;
-                }
-                let path = sounds_dir.join(sanitized_file_name);
-                fs::write(&path, bytes)
-                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-                file_count += 1;
-            }
-        }
-    }
+    file_count += write_sounds(root, &sounds)?;
 
     // Write atlas PNGs
     let write_atlas = |scale: &str, name: &str, bytes: Vec<u8>| -> Result<(), String> {
@@ -1476,7 +1508,7 @@ fn has_balatro_exe(path: &Path) -> bool {
     path.join("Balatro.exe").exists()
 }
 
-fn resolve_appdata_root_from_any_path(raw: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_appdata_root_from_any_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -1535,7 +1567,7 @@ fn resolve_default_balatro_appdata_root() -> Option<PathBuf> {
     None
 }
 
-fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
+pub(crate) fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
     let uppercase = appdata_root.join("Mods");
     let lowercase = appdata_root.join("mods");
     if uppercase.exists() {
@@ -1547,7 +1579,7 @@ fn resolve_mods_dir_from_appdata(appdata_root: &Path) -> PathBuf {
     uppercase
 }
 
-fn resolve_game_dir_from_any_path(raw: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_game_dir_from_any_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -1735,7 +1767,7 @@ fn auto_find_balatro_game_dir() -> Option<PathBuf> {
     None
 }
 
-fn resolve_balatro_paths_internal(
+pub(crate) fn resolve_balatro_paths_internal(
     configured_appdata_path: Option<String>,
     configured_game_path: Option<String>,
     legacy_path: Option<String>,
@@ -1793,87 +1825,17 @@ pub fn auto_find_balatro_paths(
     }
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target)
-        .map_err(|e| format!("Failed to create {}: {}", target.display(), e))?;
-
-    for entry in fs::read_dir(source)
-        .map_err(|e| format!("Failed to read directory {}: {}", source.display(), e))?
-    {
-        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let metadata = entry.metadata().map_err(|e| {
-            format!(
-                "Failed to read metadata for {}: {}",
-                source_path.display(),
-                e
-            )
-        })?;
-
-        if metadata.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-        } else if metadata.is_file() {
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-            }
-            fs::copy(&source_path, &target_path).map_err(|e| {
-                format!(
-                    "Failed to copy {} to {}: {}",
-                    source_path.display(),
-                    target_path.display(),
-                    e
-                )
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
 pub fn ensure_balatro_mod_setup(
     appdata_path: Option<String>,
     game_path: Option<String>,
     legacy_path: Option<String>,
-    app: AppHandle,
 ) -> Result<BalatroSetupResult, String> {
     let (resolved_appdata, resolved_game) =
         resolve_balatro_paths_internal(appdata_path, game_path, legacy_path);
 
     let appdata_root =
         resolved_appdata.ok_or_else(|| "Unable to find Balatro AppData folder.".to_string())?;
-    let game_dir =
-        resolved_game.ok_or_else(|| "Unable to find Balatro game folder.".to_string())?;
-
-    let version_dll_target = game_dir.join("version.dll");
-    if let Some(parent) = version_dll_target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-    }
-    if !version_dll_target.exists() {
-        let version_dll_source = resolve_bundled_any(
-            &app,
-            &[
-                "other/version.dll",
-                "_up_/public/other/version.dll",
-                "version.dll",
-            ],
-        )
-        .ok_or_else(|| {
-            "Missing bundled Lovely file: expected one of `other/version.dll`, `_up_/public/other/version.dll`, or `version.dll`".to_string()
-        })?;
-        fs::copy(&version_dll_source, &version_dll_target).map_err(|e| {
-            format!(
-                "Failed to install Lovely (copy {} to {}): {}",
-                version_dll_source.display(),
-                version_dll_target.display(),
-                e
-            )
-        })?;
-    }
-
     let mods_dir = resolve_mods_dir_from_appdata(&appdata_root);
     if mods_dir.exists() && !mods_dir.is_dir() {
         return Err(format!(
@@ -1884,35 +1846,11 @@ pub fn ensure_balatro_mod_setup(
     fs::create_dir_all(&mods_dir)
         .map_err(|e| format!("Failed to create Mods folder {}: {}", mods_dir.display(), e))?;
 
-    let smods_target = mods_dir.join("smods");
-    if smods_target.exists() && !smods_target.is_dir() {
-        return Err(format!(
-            "Steamodded target exists but is not a folder: {}",
-            smods_target.display()
-        ));
-    }
-    let smods_manifest = smods_target.join("manifest.json");
-    let smods_src_dir = smods_target.join("src");
-    let should_sync_smods =
-        !smods_target.exists() || !smods_manifest.exists() || !smods_src_dir.is_dir();
-    if should_sync_smods {
-        let smods_source = resolve_bundled_any(
-            &app,
-            &[
-                "other/smods-main",
-                "_up_/public/other/smods-main",
-                "smods-main",
-            ],
-        )
-        .ok_or_else(|| {
-            "Missing bundled Steamodded folder: expected one of `other/smods-main`, `_up_/public/other/smods-main`, or `smods-main`".to_string()
-        })?;
-        copy_dir_recursive(&smods_source, &smods_target)?;
-    }
-
     Ok(BalatroSetupResult {
         appdata_path: appdata_root.to_string_lossy().to_string(),
-        game_path: game_dir.to_string_lossy().to_string(),
+        game_path: resolved_game
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
         mods_path: mods_dir.to_string_lossy().to_string(),
     })
 }
@@ -2096,4 +2034,81 @@ pub fn launch_or_relaunch_balatro(game_path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch Balatro.exe: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod sound_export_tests {
+    use super::*;
+
+    struct TestModDir(PathBuf);
+
+    impl TestModDir {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "joker-forge-sound-export-{}-{}",
+                std::process::id(),
+                nonce
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for TestModDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn exported_custom_sound_can_be_loaded_from_its_registered_smods_path() {
+        let root = TestModDir::new();
+        let audio = include_bytes!("../../../public/other/smods-main/assets/sounds/xchips.ogg");
+        let mut sounds: Vec<SoundDataInput> = ["test.ogg", " uploads/nested/imported.ogg "]
+            .iter()
+            .enumerate()
+            .map(|(index, filename)| SoundDataInput {
+                key: format!("test_{index}"),
+                sound_string: filename.to_string(),
+                audio_bytes: Some(audio.to_vec()),
+                volume: None,
+                pitch: None,
+                replace: None,
+            })
+            .collect();
+
+        prepare_sounds_for_export(&mut sounds).unwrap();
+        assert_eq!(write_sounds(&root.0, &sounds).unwrap(), 3);
+
+        let lua = fs::read_to_string(root.0.join("sounds.lua")).unwrap();
+        let registered_paths: Vec<&str> = lua
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("path = '")
+                    .and_then(|path| path.strip_suffix("',"))
+            })
+            .collect();
+        assert_eq!(registered_paths.len(), sounds.len());
+        for path in registered_paths {
+            // Resolve exactly as SMODS.Sound.inject does before calling newDecoder.
+            let bytes = fs::read(root.0.join("assets").join("sounds").join(path))
+                .expect("every registered sound must have a packaged audio file");
+            assert_eq!(bytes, audio);
+            let mut decoder = vorbis_rs::VorbisDecoder::new(Cursor::new(bytes)).unwrap();
+            assert!(decoder.decode_audio_block().unwrap().is_some());
+        }
+        assert!(!root.0.join("sounds").exists());
+    }
+
+    #[test]
+    fn exporting_without_sounds_writes_no_sound_files() {
+        let root = TestModDir::new();
+        assert_eq!(write_sounds(&root.0, &[]).unwrap(), 0);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
+    }
 }

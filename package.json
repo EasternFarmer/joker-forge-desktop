@@ -1,7 +1,7 @@
 {
   "name": "joker-forge-desktop",
   "private": true,
-  "version": "2.0.0-beta",
+  "version": "2.0.0-beta-nightly.local",
   "type": "module",
   "scripts": {
     "dev": "vite",

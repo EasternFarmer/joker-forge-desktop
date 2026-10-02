@@ -34,7 +34,7 @@ SMODS.Edition {
         if context.pre_joker or context.main_scoring and context.cardarea == G.play then
             do
                 return {
-                    chips = card.ability.extra.chips0
+                    chips = card.edition.extra.chips0
                 }
             end
         end

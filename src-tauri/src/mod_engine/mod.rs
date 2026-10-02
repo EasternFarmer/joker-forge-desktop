@@ -1,3 +1,4 @@
+pub mod balatro_setup;
 pub mod catalog;
 pub mod commands;
 pub mod compiler;

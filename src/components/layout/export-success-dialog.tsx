@@ -1,4 +1,5 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Copy,
   FolderOpen,
@@ -18,7 +19,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { getBalatroGamePath } from "@/lib/services/storage";
+import {
+  getBalatroAppdataPath,
+  getBalatroGamePath,
+  setBalatroAppdataPath,
+  setBalatroGamePath,
+} from "@/lib/services/storage";
+import BalatroModSetup from "@/components/settings/balatro-mod-setup";
+import type { BalatroModSetupStatus } from "@/lib/balatro/balatro-mod-setup";
 
 interface ExportSuccessDialogProps {
   open: boolean;
@@ -33,10 +41,18 @@ export function ExportSuccessDialog({
   modFolderPath,
   fileCount,
 }: ExportSuccessDialogProps) {
+  const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
   const [openFolderError, setOpenFolderError] = useState<string | null>(null);
   const [openBalatroError, setOpenBalatroError] = useState<string | null>(null);
   const [canOpenBalatro, setCanOpenBalatro] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<BalatroModSetupStatus | null>(null);
+  const [isInstallingSetup, setIsInstallingSetup] = useState(false);
+
+  const handlePathsResolved = useCallback((paths: { appdataPath: string | null; gamePath: string | null }) => {
+    if (paths.appdataPath) setBalatroAppdataPath(paths.appdataPath);
+    if (paths.gamePath) setBalatroGamePath(paths.gamePath);
+  }, []);
 
   const confettiPieces = useMemo(
     () =>
@@ -62,6 +78,8 @@ export function ExportSuccessDialog({
       setOpenFolderError(null);
       setOpenBalatroError(null);
       setCanOpenBalatro(false);
+      setSetupStatus(null);
+      setIsInstallingSetup(false);
     }
   }, [open]);
 
@@ -69,7 +87,7 @@ export function ExportSuccessDialog({
     let active = true;
     const checkBalatro = async () => {
       if (!open) return;
-      const gamePath = getBalatroGamePath().trim();
+      const gamePath = setupStatus?.gamePath || getBalatroGamePath().trim();
       if (!gamePath) {
         if (active) setCanOpenBalatro(false);
         return;
@@ -88,7 +106,7 @@ export function ExportSuccessDialog({
     return () => {
       active = false;
     };
-  }, [open]);
+  }, [open, setupStatus?.gamePath]);
 
   const handleCopyPath = async () => {
     try {
@@ -151,9 +169,9 @@ export function ExportSuccessDialog({
             ))}
           </div>
         }
-        className="overflow-hidden border border-border/60 bg-card p-0 sm:max-w-2xl"
+        className="flex max-h-[90vh] flex-col overflow-hidden border border-border/60 bg-card p-0 sm:max-w-2xl"
       >
-        <div className="relative p-6 pb-2">
+        <div className="relative shrink-0 p-6 pb-2">
           <DialogHeader className="text-left space-y-2">
             <div className="flex items-center gap-2">
               <CheckCircle className="h-5 w-5 text-primary" weight="duotone" />
@@ -162,12 +180,26 @@ export function ExportSuccessDialog({
               </DialogTitle>
             </div>
             <DialogDescription className="text-sm text-muted-foreground">
-              Folder export complete. Your mod is ready to test.
+              Folder export complete. Your mod files are ready.
             </DialogDescription>
           </DialogHeader>
         </div>
 
-        <div className="space-y-5 px-6 py-5">
+        <div className="min-h-0 space-y-5 overflow-y-auto px-6 py-5">
+          {open && (
+            <BalatroModSetup
+              appdataPath={getBalatroAppdataPath()}
+              gamePath={getBalatroGamePath()}
+              warningOnly
+              onPathsResolved={handlePathsResolved}
+              onStatusChange={setSetupStatus}
+              onInstallingChange={setIsInstallingSetup}
+              onOpenSettings={() => {
+                onOpenChange(false);
+                navigate("/settings");
+              }}
+            />
+          )}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/90">
               <FolderOpen className="h-3.5 w-3.5 text-primary" />
@@ -236,7 +268,7 @@ export function ExportSuccessDialog({
         {openFolderError ? <div className="px-6 pb-1 text-xs text-destructive">{openFolderError}</div> : null}
         {openBalatroError ? <div className="px-6 pb-2 text-xs text-destructive">{openBalatroError}</div> : null}
 
-        <DialogFooter className="flex w-full flex-col gap-2 border-t border-border/40 bg-muted/10 p-4 sm:flex-row sm:flex-wrap">
+        <DialogFooter className="flex w-full shrink-0 flex-col gap-2 border-t border-border/40 bg-muted/10 p-4 sm:flex-row sm:flex-wrap">
           <Button
             variant="outline"
             className="w-full cursor-pointer sm:flex-1"
@@ -261,6 +293,7 @@ export function ExportSuccessDialog({
               className="w-full cursor-pointer sm:basis-full"
               type="button"
               onClick={handleOpenBalatro}
+              disabled={isInstallingSetup}
             >
               <Play className="mr-2 h-4 w-4" />
               Launch Balatro

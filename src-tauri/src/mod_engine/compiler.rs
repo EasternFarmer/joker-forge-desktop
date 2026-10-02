@@ -111,6 +111,7 @@ impl BalatroCompiler {
             appearance: None,
             unlock: None,
             user_variables: map_user_variables(&state.metadata.user_variables),
+            description_variables: None,
             force_eternal: state.metadata.force_eternal,
             force_perishable: state.metadata.force_perishable,
             force_rental: state.metadata.force_rental,

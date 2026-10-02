@@ -1,4 +1,6 @@
 use std::fmt::{self, Write as _};
+use serde::Serialize;
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // AST node types
@@ -59,6 +61,8 @@ pub enum Stmt {
 /// Lua expression.
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// An editable source value; renders exactly as its inner expression.
+    FieldBinding(Box<Expr>, LuaFieldSource),
     Nil,
     Bool(bool),
     Int(i64),
@@ -120,6 +124,118 @@ pub struct LuaSegment {
     pub start_column: usize,
     pub end_line: usize,
     pub end_column: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LuaFieldSource {
+    pub source_path: Vec<Value>,
+    pub original_value: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LuaFieldBinding {
+    pub source_path: Vec<Value>,
+    pub value_type: String,
+    pub original_value: Value,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+pub fn lua_field_binding(expr: Expr, source: LuaFieldSource) -> Expr {
+    Expr::FieldBinding(Box::new(expr), source)
+}
+
+/// Mark scalar leaves using sources scoped to one compiler node.
+pub fn bind_scalar_literals(
+    expr: &mut Expr,
+    source_for: &impl Fn(&Expr) -> Option<LuaFieldSource>,
+) {
+    if matches!(
+        expr,
+        Expr::Str(_) | Expr::Bool(_) | Expr::Int(_) | Expr::Number(_)
+    ) {
+        if let Some(source) = source_for(expr) {
+            *expr = lua_field_binding(expr.clone(), source);
+        }
+        return;
+    }
+    match expr {
+        Expr::FieldBinding(_, _) => {}
+        Expr::Field(object, _) | Expr::UnaryOp(_, object) => {
+            bind_scalar_literals(object, source_for)
+        }
+        Expr::Index(object, index) | Expr::BinOp(object, _, index) => {
+            bind_scalar_literals(object, source_for);
+            bind_scalar_literals(index, source_for);
+        }
+        Expr::Call(function, args) | Expr::MethodCall(function, _, args) => {
+            bind_scalar_literals(function, source_for);
+            for arg in args {
+                bind_scalar_literals(arg, source_for);
+            }
+        }
+        Expr::Table(entries) | Expr::TableCall(_, entries) => {
+            for entry in entries {
+                match entry {
+                    TableEntry::KeyValue(_, value) | TableEntry::Value(value) => {
+                        bind_scalar_literals(value, source_for)
+                    }
+                    TableEntry::IndexValue(_, value) => bind_scalar_literals(value, source_for),
+                    _ => {}
+                }
+            }
+        }
+        Expr::Function { body, .. } => {
+            for stmt in body {
+                bind_statement_literals(stmt, source_for);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn bind_statement_literals(
+    stmt: &mut Stmt,
+    source_for: &impl Fn(&Expr) -> Option<LuaFieldSource>,
+) {
+    match stmt {
+        Stmt::Local(_, Some(value)) | Stmt::Return(Some(value)) | Stmt::ExprStmt(value) => {
+            bind_scalar_literals(value, source_for)
+        }
+        Stmt::Assign(_, value) => bind_scalar_literals(value, source_for),
+        Stmt::MultiAssign(_, values) => {
+            for value in values {
+                bind_scalar_literals(value, source_for);
+            }
+        }
+        Stmt::If {
+            branches,
+            else_body,
+        } => {
+            for (condition, statements) in branches {
+                bind_scalar_literals(condition, source_for);
+                for statement in statements {
+                    bind_statement_literals(statement, source_for);
+                }
+            }
+            if let Some(statements) = else_body {
+                for statement in statements {
+                    bind_statement_literals(statement, source_for);
+                }
+            }
+        }
+        // Loop bounds and constructor indices often contain generated constants;
+        // counts are bound separately in config.extra using their precise source.
+        Stmt::ForRange { body, .. } | Stmt::ForIn { body, .. } | Stmt::DoBlock(body) => {
+            for statement in body {
+                bind_statement_literals(statement, source_for);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +508,7 @@ pub struct Emitter {
     indent_str: String,
     buf: String,
     segments: Vec<LuaSegment>,
+    field_bindings: Vec<LuaFieldBinding>,
     segment_stack: Vec<(String, usize, usize)>,
 }
 
@@ -402,6 +519,7 @@ impl Emitter {
             indent_str: "    ".to_string(),
             buf: String::with_capacity(4096),
             segments: Vec::new(),
+            field_bindings: Vec::new(),
             segment_stack: Vec::new(),
         }
     }
@@ -412,6 +530,7 @@ impl Emitter {
             indent_str: "    ".to_string(),
             buf: String::with_capacity(4096),
             segments: Vec::new(),
+            field_bindings: Vec::new(),
             segment_stack: Vec::new(),
         }
     }
@@ -435,6 +554,13 @@ impl Emitter {
             self.emit_stmt(stmt);
         }
         (self.buf, self.segments)
+    }
+
+    pub fn emit_chunk_with_field_bindings(mut self, chunk: &Chunk) -> (String, Vec<LuaSegment>, Vec<LuaFieldBinding>) {
+        for stmt in &chunk.stmts {
+            self.emit_stmt(stmt);
+        }
+        (self.buf, self.segments, self.field_bindings)
     }
 
     pub fn emit_expr_to_string(mut self, expr: &Expr) -> String {
@@ -618,6 +744,24 @@ impl Emitter {
 
     fn emit_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::FieldBinding(expr, source) => {
+                let (start_line, start_column) = self.current_line_col();
+                self.emit_expr(expr);
+                let (end_line, end_column) = self.current_line_col();
+                let (value_type, original_value) = match expr.as_ref() {
+                    Expr::Str(value) => ("string", serde_json::json!(value)),
+                    Expr::Bool(value) => ("boolean", serde_json::json!(value)),
+                    Expr::Int(value) => ("number", serde_json::json!(value)),
+                    Expr::Number(value) => ("number", serde_json::json!(value)),
+                    _ => ("number", source.original_value.clone()),
+                };
+                self.field_bindings.push(LuaFieldBinding {
+                    source_path: source.source_path.clone(),
+                    value_type: value_type.to_string(),
+                    original_value,
+                    start_line, start_column, end_line, end_column,
+                });
+            }
             Expr::Nil => self.buf.push_str("nil"),
             Expr::Bool(b) => self.buf.push_str(if *b { "true" } else { "false" }),
             Expr::Int(n) => {
@@ -877,7 +1021,7 @@ impl Emitter {
                 line += 1;
                 col = 1;
             } else {
-                col += 1;
+                col += ch.len_utf16();
             }
         }
         (line, col)
@@ -976,6 +1120,7 @@ impl UnaryOp {
 
 fn expr_needs_parens(expr: &Expr, parent_op: BinOp, _is_left: bool) -> bool {
     match expr {
+        Expr::FieldBinding(expr, _) => expr_needs_parens(expr, parent_op, _is_left),
         Expr::BinOp(_, child_op, _) => child_op.precedence() < parent_op.precedence(),
         _ => false,
     }
@@ -1012,16 +1157,15 @@ fn needs_bracket_key(key: &str) -> bool {
 }
 
 fn is_simple_entry(entry: &TableEntry) -> bool {
+    fn simple(expr: &Expr) -> bool {
+        match expr {
+            Expr::FieldBinding(inner, _) => simple(inner),
+            Expr::Int(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Ident(_) | Expr::Nil => true,
+            _ => false,
+        }
+    }
     match entry {
-        TableEntry::KeyValue(_, val) | TableEntry::Value(val) => matches!(
-            val,
-            Expr::Int(_)
-                | Expr::Number(_)
-                | Expr::Bool(_)
-                | Expr::Str(_)
-                | Expr::Ident(_)
-                | Expr::Nil
-        ),
+        TableEntry::KeyValue(_, val) | TableEntry::Value(val) => simple(val),
         TableEntry::IndexValue(_, _)
         | TableEntry::Comment(_)
         | TableEntry::SegmentStart(_)
@@ -1151,6 +1295,25 @@ impl fmt::Display for Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editable_literal_spans_use_utf16_and_emitted_scalar_values() {
+        let value = "Linux\n'";
+        let chunk = Chunk { stmts: vec![lua_expr_stmt(lua_call("print", vec![
+            lua_str("😀"),
+            lua_field_binding(lua_str(value), LuaFieldSource { source_path: vec![serde_json::json!("text")], original_value: serde_json::json!(value) }),
+            lua_field_binding(lua_int(7), LuaFieldSource { source_path: vec![serde_json::json!("number")], original_value: serde_json::json!("7") }),
+        ]))] };
+        let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
+        let text_offset = code.find("'Linux").unwrap();
+        assert_eq!(bindings[0].start_column, code[..text_offset].encode_utf16().count() + 1);
+        let rendered = lua_str(value).to_string();
+        assert_eq!(bindings[0].end_column, bindings[0].start_column + rendered.encode_utf16().count());
+        assert_eq!(bindings[0].original_value, serde_json::json!(value));
+        assert_eq!(bindings[1].original_value, serde_json::json!(7));
+        assert_eq!(bindings[1].value_type, "number");
+        assert_eq!(code, Emitter::new().emit_chunk(&chunk));
+    }
 
     #[test]
     fn test_simple_return() {
