@@ -1,1 +1,1 @@
-export const RELEASE_CHANNEL: "stable" | "nightly" = "stable";
+export const RELEASE_CHANNEL: "stable" | "nightly" = "nightly";

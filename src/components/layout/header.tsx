@@ -169,6 +169,8 @@ export function Header({ title }: HeaderProps) {
         return "Settings";
       case "/acknowledgements":
         return "Acknowledgements";
+      case "/keys":
+        return "Keys Reference";
       default:
         return "Joker Forge";
     }

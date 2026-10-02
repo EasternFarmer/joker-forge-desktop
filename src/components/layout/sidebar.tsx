@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   House,
+  Key,
   FileText,
   Smiley,
   Cards,
@@ -39,6 +40,10 @@ const PROJECT_MAIN = [
     href: "/metadata",
     color: "text-foreground",
   },
+];
+
+const RESOURCES = [
+  { label: "Keys Reference", icon: Key, href: "/keys", color: "text-yellow-500" },
 ];
 
 const COLLAPSIBLE_GROUPS = [
@@ -364,6 +369,35 @@ export function Sidebar({
                 );
               })}
             </div>
+          </div>
+          <div className="space-y-2 border-t border-sidebar-border pt-4">
+            <p className="px-3 text-xs font-semibold uppercase tracking-wider text-sidebar-foreground/50">
+              Resources
+            </p>
+            {RESOURCES.map((item) => (
+              <motion.div key={item.href} variants={itemVariants}>
+                <Button
+                  variant="ghost"
+                  asChild
+                  className={cn(
+                    "w-full justify-start text-sidebar-foreground/80 hover:text-sidebar-foreground hover:bg-sidebar-accent/60 h-10 px-3",
+                    location.pathname === item.href &&
+                      "bg-sidebar-accent text-sidebar-foreground",
+                  )}
+                >
+                  <Link
+                    to={item.href}
+                    aria-current={location.pathname === item.href ? "page" : undefined}
+                  >
+                    <item.icon
+                      className={cn("mr-3 h-5 w-5", item.color)}
+                      weight="duotone"
+                    />
+                    {item.label}
+                  </Link>
+                </Button>
+              </motion.div>
+            ))}
           </div>
         </motion.div>
       </div>

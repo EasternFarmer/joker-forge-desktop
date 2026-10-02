@@ -357,13 +357,13 @@ const VANILLA_RARITIES_DATA = [
   { value: "legendary", label: "Legendary" },
 ];
 
-const VANILLA_CONSUMABLE_SETS = [
+export const VANILLA_CONSUMABLE_SETS = [
   { value: "Tarot", label: "Tarot", key: "tarot" },
   { value: "Planet", label: "Planet", key: "planet" },
   { value: "Spectral", label: "Spectral", key: "spectral" },
 ];
 
-const VANILLA_VOUCHERS = [
+export const VANILLA_VOUCHERS = [
   { key: "v_overstock_norm", value: "v_overstock_norm", label: "Overstock" },
   {
     key: "v_overstock_plus",
@@ -418,7 +418,7 @@ const VANILLA_VOUCHERS = [
   { key: "v_palette", value: "v_palette", label: "Palette" },
 ];
 
-const VANILLA_DECKS = [
+export const VANILLA_DECKS = [
   { key: "Red Deck", value: "Red Deck", label: "Red Deck" },
   { key: "Blue Deck", value: "Blue Deck", label: "Blue Deck" },
   { key: "Yellow Deck", value: "Yellow Deck", label: "Yellow Deck" },
@@ -435,7 +435,7 @@ const VANILLA_DECKS = [
   { key: "Erratic Deck", value: "Erratic Deck", label: "Erratic Deck" },
 ];
 
-const VANILLA_SEALS = [
+export const VANILLA_SEALS = [
   { key: "Gold", value: "Gold", label: "Gold" },
   { key: "Red", value: "Red", label: "Red" },
   { key: "Blue", value: "Blue", label: "Blue" },
@@ -856,7 +856,7 @@ export const getDeckByKey = (
 // ENHANCEMENTS SECTION
 // =============================================================================
 
-const VANILLA_ENHANCEMENTS = [
+export const VANILLA_ENHANCEMENTS = [
   { key: "m_gold", value: "m_gold", label: "Gold" },
   { key: "m_steel", value: "m_steel", label: "Steel" },
   { key: "m_glass", value: "m_glass", label: "Glass" },
@@ -972,7 +972,7 @@ export const SOUNDS = () => DataRegistry.getSounds();
 export const SOUNDS_KEYS = () => SOUNDS().map((sound) => sound.key);
 export const SOUNDS_LABELS = () => SOUNDS().map((sound) => sound.label);
 
-const VANILLA_SOUNDS = [
+export const VANILLA_SOUNDS = [
   { key: "ambientFire1", label: "AmbientFire" },
   { key: "ambientFire2", label: "AmbientFire 2" },
   { key: "ambientFire3", label: "AmbientFire 3" },
