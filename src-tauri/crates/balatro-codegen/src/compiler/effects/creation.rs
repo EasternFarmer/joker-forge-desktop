@@ -276,26 +276,92 @@ pub fn create_playing_cards(effect: &EffectDef, ctx: &mut CompileContext) -> Eff
 }
 
 /// Create Tag effect: creates a random or specific tag.
-pub fn create_tag(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
+pub fn create_tag(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     let mode = get_str_param(effect, "tag_type").unwrap_or("random");
     let specific = get_str_param(effect, "specific_tag").unwrap_or("tag_double");
+    let index = ctx.next_effect_count("create_tag");
+    let created = format!("created_tag{index}");
+    let key_name = format!("tag_key{index}");
+    let key = lua_ident(&key_name);
+    let registered = |key: Expr| lua_index(lua_raw_expr("G.P_TAGS"), key);
+    let add = |key: Expr| {
+        vec![
+            lua_expr_stmt(lua_call("add_tag", vec![lua_call("Tag", vec![key])])),
+            lua_assign(lua_ident(&created), lua_bool(true)),
+        ]
+    };
+    let mut pre_return = vec![lua_local(&created, lua_bool(false))];
 
-    let stmt = if mode == "random" {
-        lua_raw_stmt(
-            "local selected_tag = pseudorandom_element(G.P_TAGS, pseudoseed('create_tag')).key; local tag = Tag(selected_tag); tag:set_ability(); add_tag(tag)",
-        )
-    } else {
-        lua_raw_stmt(format!(
-            "local tag = Tag('{}'); tag:set_ability(); add_tag(tag)",
-            specific
-        ))
+    match mode {
+        "random" => {
+            let pool_name = format!("tag_pool{index}");
+            pre_return.push(lua_local(
+                &pool_name,
+                lua_call(
+                    "SMODS.get_clean_pool",
+                    vec![lua_str("Tag"), lua_nil(), lua_nil(), lua_str("create_tag")],
+                ),
+            ));
+            pre_return.push(lua_if(
+                lua_gt(lua_len(lua_ident(&pool_name)), lua_int(0)),
+                vec![
+                    lua_local(
+                        &key_name,
+                        lua_call(
+                            "pseudorandom_element",
+                            vec![
+                                lua_ident(&pool_name),
+                                lua_call("pseudoseed", vec![lua_str("create_tag")]),
+                            ],
+                        ),
+                    ),
+                    lua_if(lua_and(key.clone(), registered(key.clone())), add(key)),
+                ],
+            ));
+        }
+        "keyvar" => {
+            let variable = get_str_param(effect, "variable").unwrap_or("");
+            if ctx.has_user_var(variable) {
+                pre_return.push(lua_local(&key_name, ctx.user_var_expr(variable)));
+                pre_return.push(lua_if(
+                    lua_eq(lua_call("type", vec![key.clone()]), lua_str("string")),
+                    vec![
+                        lua_if(
+                            lua_and(
+                                lua_not(registered(key.clone())),
+                                lua_neq(
+                                    lua_call(
+                                        "string.sub",
+                                        vec![key.clone(), lua_int(1), lua_int(4)],
+                                    ),
+                                    lua_str("tag_"),
+                                ),
+                            ),
+                            vec![lua_assign(
+                                key.clone(),
+                                Expr::BinOp(
+                                    Box::new(lua_str("tag_")),
+                                    BinOp::Concat,
+                                    Box::new(key.clone()),
+                                ),
+                            )],
+                        ),
+                        lua_if(registered(key.clone()), add(key)),
+                    ],
+                ));
+            }
+        }
+        _ => {
+            let key = lua_str(normalize_tag_key(specific));
+            pre_return.push(lua_if(registered(key.clone()), add(key)));
+        }
     };
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![stmt],
+        pre_return,
         config_vars: vec![],
-        message: Some(lua_str("Created Tag!")),
+        message: Some(lua_and(lua_ident(created), lua_str("Created Tag!"))),
         colour: Some(lua_raw_expr("G.C.GREEN")),
 
         segment_id: None,
@@ -654,6 +720,17 @@ fn normalize_joker_key(key: &str) -> String {
         key.to_string()
     } else {
         format!("j_{}", key)
+    }
+}
+
+fn normalize_tag_key(key: &str) -> String {
+    let key = key.trim();
+    match key {
+        "uncommon" | "rare" | "negative" | "foil" | "holo" | "polychrome" | "investment"
+        | "voucher" | "boss" | "standard" | "charm" | "meteor" | "buffoon" | "handy"
+        | "garbage" | "ethereal" | "coupon" | "double" | "juggle" | "d_six" | "top_up" | "skip"
+        | "orbital" | "economy" => format!("tag_{key}"),
+        _ => key.to_owned(),
     }
 }
 

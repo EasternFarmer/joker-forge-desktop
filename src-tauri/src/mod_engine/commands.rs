@@ -662,6 +662,59 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn frontend_tag_selection_uses_registered_keys_in_preview_and_export() {
+        for item_type in ["joker", "deck", "consumable", "voucher", "enhancement"] {
+            let input = serde_json::json!({
+                "objectKey": "tag_test", "name": "Tag Test", "description": "Create a Negative Tag",
+                "cost": 4, "rarity": "common", "set": "Tarot",
+                "rules": [{ "id": "tag_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "create_negative", "type": "create_tag", "params": {
+                        "tag_type": { "value": "specific", "valueType": "string" },
+                        "specific_tag": { "value": "negative", "valueType": "string" }
+                    }
+                }] }]
+            });
+            let preview = compile_item_from_data_with_segments(
+                item_type.into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for code in [&preview.code, &exported] {
+                assert!(code.contains("'tag_negative'"), "{item_type}: {code}");
+                assert!(!code.contains("Tag('negative')"));
+                assert!(!code.contains("tag:set_ability()"));
+            }
+            assert!(preview.segments.iter().any(|segment| segment.id == "effect:tag_rule:create_negative"));
+        }
+    }
+
+    #[test]
+    fn frontend_tag_key_variable_reads_the_current_object_scope() {
+        for (item_type, variable_path) in [
+            ("joker", "card.ability.extra.chosen_tag"),
+            ("deck", "self.config.extra.chosen_tag"),
+            ("consumable", "card.ability.extra.chosen_tag"),
+        ] {
+            let input = serde_json::json!({
+                "objectKey": "tag_variable", "name": "Tag Variable", "description": "Create the chosen tag",
+                "cost": 4, "rarity": "common", "set": "Tarot",
+                "userVariables": [{ "name": "chosen_tag", "type": "key", "initialKey": "tag_negative" }],
+                "rules": [{ "id": "tag_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "from_variable", "type": "create_tag", "params": {
+                        "tag_type": { "value": "keyvar" }, "variable": { "value": "chosen_tag" }
+                    }
+                }] }]
+            });
+            let code = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            assert!(code.contains(variable_path), "{item_type}: {code}");
+            assert!(!code.contains("'tag_double'"));
+        }
+    }
+
+    #[test]
     fn preview_command_returns_editable_rule_fields_in_ipc_contract() {
         let input = serde_json::json!({
             "objectKey": "preview", "name": "Preview", "description": "Test", "cost": 4, "rarity": "common",

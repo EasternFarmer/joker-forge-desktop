@@ -576,6 +576,103 @@ fn destroy_joker_uses_selection_method_specific_key_param() {
 }
 
 #[test]
+fn create_tag_normalizes_every_vanilla_picker_value_and_accepts_wrapped_params() {
+    for tag in [
+        "uncommon", "rare", "negative", "foil", "holo", "polychrome", "investment",
+        "voucher", "boss", "standard", "charm", "meteor", "buffoon", "handy", "garbage",
+        "ethereal", "coupon", "double", "juggle", "d_six", "top_up", "skip", "orbital", "economy",
+    ] {
+        for selected in [
+            ParamValue::Str(tag.into()),
+            ParamValue::Typed(TypedValue { value: serde_json::json!(tag), value_type: "text".into() }),
+            ParamValue::Str(format!("tag_{tag}")),
+        ] {
+            let code = effect_code("create_tag", &[
+                ("tag_type", ParamValue::Str("specific".into())),
+                ("specific_tag", selected),
+            ]);
+            assert!(code.contains(&format!("if G.P_TAGS['tag_{tag}'] then")), "{code}");
+            assert!(code.contains(&format!("add_tag(Tag('tag_{tag}'))")), "{code}");
+            assert!(!code.contains("tag_tag_"), "{code}");
+            assert!(!code.contains("set_ability"), "Tag constructor must initialize abilities once: {code}");
+            assert!(code.contains("message = created_tag0 and 'Created Tag!'"), "{code}");
+        }
+    }
+}
+
+#[test]
+fn create_tag_preserves_custom_keys_and_escapes_lua_literals() {
+    for (selected, expected) in [
+        ("  negative  ", "tag_negative"),
+        ("tag_other_mod_bonus", "tag_other_mod_bonus"),
+        ("custom_registered_key", "custom_registered_key"),
+        ("tag_mod_quote'\\line\nnext", "tag_mod_quote\\'\\\\line\\nnext"),
+    ] {
+        let code = effect_code("create_tag", &[
+            ("tag_type", ParamValue::Str("specific".into())),
+            ("specific_tag", ParamValue::Str(selected.into())),
+        ]);
+        assert!(code.contains(&format!("add_tag(Tag('{expected}'))")), "{code}");
+        assert!(code.contains(&format!("if G.P_TAGS['{expected}'] then")), "{code}");
+    }
+}
+
+#[test]
+fn create_tag_random_uses_eligible_keys_and_handles_an_empty_pool() {
+    let code = effect_code("create_tag", &[("tag_type", ParamValue::Str("random".into()))]);
+    assert!(code.contains("SMODS.get_clean_pool('Tag', nil, nil, 'create_tag')"), "{code}");
+    assert!(code.contains("if #tag_pool0 > 0 then"), "{code}");
+    assert!(code.contains("pseudorandom_element(tag_pool0, pseudoseed('create_tag'))"), "{code}");
+    assert!(code.contains("if tag_key0 and G.P_TAGS[tag_key0] then"), "{code}");
+    assert!(!code.contains("pseudorandom_element(G.P_TAGS"));
+    assert!(!code.contains(").key"));
+    assert!(!code.contains("set_ability"));
+}
+
+#[test]
+fn create_tag_key_variables_use_live_values_and_skip_invalid_references() {
+    let params = [
+        ("tag_type", ParamValue::Str("keyvar".into())),
+        ("variable", ParamValue::Str("chosen_tag".into())),
+    ];
+    for (is_global, is_persistent, expected) in [
+        (false, false, "card.ability.extra.chosen_tag"),
+        (true, false, "(G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars.chosen_tag)"),
+        (true, true, "JF_GLOBALS.chosen_tag"),
+    ] {
+        let code = effect_code_with_user_vars("create_tag", &params, vec![UserVariableDef {
+            name: "chosen_tag".into(), var_type: UserVarType::Key,
+            initial_value: ParamValue::Str("negative".into()), is_global, is_persistent,
+        }]);
+        assert!(code.contains(&format!("local tag_key0 = {expected}")), "{code}");
+        assert!(code.contains("if type(tag_key0) == 'string' then"), "{code}");
+        assert!(code.contains("if not G.P_TAGS[tag_key0] and string.sub(tag_key0, 1, 4) ~= 'tag_' then"), "{code}");
+        assert!(code.contains("tag_key0 = 'tag_' .. tag_key0"), "{code}");
+        assert!(code.contains("if G.P_TAGS[tag_key0] then"), "{code}");
+        assert!(!code.contains("tag_double"), "{code}");
+    }
+    let missing = effect_code("create_tag", &params);
+    assert!(!missing.contains("add_tag("));
+    assert!(!missing.contains("tag_double"));
+    assert!(missing.contains("local created_tag0 = false"));
+}
+
+#[test]
+fn repeated_create_tag_effects_keep_separate_success_messages() {
+    let joker = preview_test_joker(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played", "effects": [
+            { "effect_type": "create_tag", "params": { "tag_type": "specific", "specific_tag": "negative" } },
+            { "effect_type": "create_tag", "params": { "tag_type": "random" } }
+        ]
+    }]));
+    let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+    assert!(code.contains("local created_tag0 = false"));
+    assert!(code.contains("local created_tag1 = false"));
+    assert!(code.contains("message = created_tag0 and 'Created Tag!'"));
+    assert!(code.contains("message = created_tag1 and 'Created Tag!'"));
+}
+
+#[test]
 fn rule_chain_places_conditional_before_unconditional_fallback() {
     let fallback = make_rule_output("r_fallback", "hand_played", None, "FALLBACK");
     let conditional = make_rule_output(
