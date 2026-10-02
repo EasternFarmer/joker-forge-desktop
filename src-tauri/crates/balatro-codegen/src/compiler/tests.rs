@@ -673,6 +673,208 @@ fn repeated_create_tag_effects_keep_separate_success_messages() {
 }
 
 #[test]
+fn create_playing_card_applies_every_static_property_from_raw_and_typed_params() {
+    for typed in [false, true] {
+        let params: Vec<(&str, ParamValue)> = [
+            ("location", "hand"), ("rank", "8"), ("suit", "Hearts"),
+            ("enhancement", "m_lucky"), ("seal", "Blue"), ("edition", "foil"),
+        ].into_iter().map(|(key, value)| (key, if typed {
+            ParamValue::Typed(TypedValue { value: serde_json::json!(value), value_type: "text".into() })
+        } else { ParamValue::Str(value.into()) })).collect();
+        let code = effect_code("create_playing_card", &params);
+        for property in [
+            "set = 'Base'", "area = G.hand", "rank = '8'", "suit = 'Hearts'",
+            "enhancement = 'm_lucky'", "seal = 'Blue'", "edition = 'e_foil'", "no_edition = true",
+        ] { assert!(code.contains(property), "missing {property}: {code}"); }
+        assert_eq!(code.matches("SMODS.add_card(").count(), 1, "{code}");
+        assert!(!code.contains(":emplace("), "SMODS.add_card must place the card once: {code}");
+        assert_eq!(code.matches("playing_card_added = true").count(), 1, "{code}");
+        assert!(code.contains("SMODS.calculate_context("), "{code}");
+    }
+    for rank in ["J", "Q", "K", "A"] {
+        let code = effect_code("create_playing_card", &[("rank", ParamValue::Str(rank.into()))]);
+        assert!(code.contains(&format!("rank = '{rank}'")), "{code}");
+    }
+}
+
+#[test]
+fn create_playing_card_none_and_default_location_do_not_generate_invalid_metadata() {
+    for location in [
+        ParamValue::Str("deck".into()), ParamValue::Str("[\"deck\"]".into()),
+        ParamValue::Typed(TypedValue { value: serde_json::json!(["deck"]), value_type: "select".into() }),
+    ] {
+        let code = effect_code("create_playing_card", &[
+            ("location", location), ("rank", ParamValue::Str("random".into())),
+            ("suit", ParamValue::Str("random".into())), ("enhancement", ParamValue::Str("none".into())),
+            ("seal", ParamValue::Str("none".into())), ("edition", ParamValue::Str("none".into())),
+        ]);
+        assert!(code.contains("area = G.deck"), "{code}");
+        assert!(code.contains("no_edition = true"), "{code}");
+        for property in ["rank =", "suit =", "enhancement =", "seal =", "edition = '"] {
+            assert!(!code.contains(property), "None/random must not use literal sentinels: {code}");
+        }
+        assert!(!code.contains(":emplace("), "{code}");
+    }
+}
+
+#[test]
+fn create_playing_card_normalizes_legacy_modifiers_and_preserves_custom_keys() {
+    let code = effect_code("create_playing_card", &[
+        ("enhancement", ParamValue::Str("bonus".into())), ("seal", ParamValue::Str("blue".into())),
+        ("edition", ParamValue::Str("sparkle".into())),
+    ]);
+    for property in ["enhancement = 'm_bonus'", "seal = 'Blue'", "edition = 'e_mod_sparkle'"] {
+        assert!(code.contains(property), "{code}");
+    }
+    let custom = effect_code("create_playing_card", &[
+        ("enhancement", ParamValue::Str("m_other_custom".into())),
+        ("seal", ParamValue::Str("other_quote'\\seal\nnext".into())),
+        ("edition", ParamValue::Str("e_other_custom".into())),
+    ]);
+    for property in ["enhancement = 'm_other_custom'", "seal = 'other_quote\\'\\\\seal\\nnext'", "edition = 'e_other_custom'"] {
+        assert!(custom.contains(property), "{custom}");
+    }
+}
+
+#[test]
+fn create_playing_cards_random_modifiers_are_polled_without_sentinel_keys() {
+    for effect in ["create_playing_card", "create_playing_cards"] {
+        let code = effect_code(effect, &[
+            ("rank", ParamValue::Str("random".into())), ("suit", ParamValue::Str("none".into())),
+            ("enhancement", ParamValue::Str("random".into())), ("seal", ParamValue::Str("random".into())),
+            ("edition", ParamValue::Str("random".into())), ("count", ParamValue::Int(3)),
+        ]);
+        for poller in ["SMODS.poll_enhancement(", "SMODS.poll_seal(", "SMODS.poll_edition("] {
+            assert!(code.contains(poller), "missing {poller}: {code}");
+        }
+        assert!(code.contains("guaranteed = true"), "{code}");
+        assert!(code.contains("no_edition = true"), "{code}");
+        for property in ["rank = 'random'", "suit = 'none'", "enhancement = 'random'", "seal = 'random'", "edition = 'random'"] {
+            assert!(!code.contains(property), "{code}");
+        }
+        assert_eq!(code.matches("SMODS.add_card(").count(), 1, "{code}");
+        assert!(!code.contains(":emplace("), "{code}");
+        if effect == "create_playing_cards" {
+            for poller in ["SMODS.poll_enhancement(", "SMODS.poll_seal(", "SMODS.poll_edition("] {
+                assert!(index_of(&code, "= 1, card.ability.extra.create_cards_count0 do") < index_of(&code, poller), "Random modifiers must be rerolled for each created card: {code}");
+            }
+        }
+    }
+}
+
+#[test]
+fn create_playing_card_uses_live_suit_rank_and_scoped_key_variables() {
+    for value_type in [Some("userVariable"), Some("user_var"), None] {
+        for (enhancement, seal, edition) in [
+            ("m_bonus", "Blue", "e_foil"),
+            ("none", "none", "none"),
+            ("e_foil", "missing_seal", "m_bonus"),
+        ] {
+            let params: Vec<(&str, ParamValue)> = [
+                ("suit", "chosen_suit"), ("rank", "chosen_rank"),
+                ("enhancement", "chosen_enhancement"), ("seal", "chosen_seal"), ("edition", "chosen_edition"),
+            ].into_iter().map(|(key, value)| (key, match value_type {
+                Some(value_type) => ParamValue::Typed(TypedValue { value: serde_json::json!(value), value_type: value_type.into() }),
+                None => ParamValue::Str(value.into()),
+            })).collect();
+            let vars = vec![
+                UserVariableDef { name: "chosen_suit".into(), var_type: UserVarType::Suit, initial_value: ParamValue::Str("Spades".into()), is_global: false, is_persistent: false },
+                UserVariableDef { name: "chosen_rank".into(), var_type: UserVarType::Rank, initial_value: ParamValue::Str("Ace".into()), is_global: false, is_persistent: false },
+                UserVariableDef { name: "chosen_enhancement".into(), var_type: UserVarType::Key, initial_value: ParamValue::Str(enhancement.into()), is_global: false, is_persistent: false },
+                UserVariableDef { name: "chosen_seal".into(), var_type: UserVarType::Key, initial_value: ParamValue::Str(seal.into()), is_global: true, is_persistent: false },
+                UserVariableDef { name: "chosen_edition".into(), var_type: UserVarType::Key, initial_value: ParamValue::Str(edition.into()), is_global: true, is_persistent: true },
+            ];
+            let code = effect_code_with_user_vars("create_playing_card", &params, vars);
+            for live_value in [
+                "G.GAME.current_round.chosen_suit_card.suit", "G.GAME.current_round.chosen_rank_card.rank",
+                "card.ability.extra.chosen_enhancement", "G.GAME.jf_global_vars.chosen_seal", "JF_GLOBALS.chosen_edition",
+            ] { assert!(code.contains(live_value), "missing {live_value}: {code}"); }
+            for quoted_name in ["'chosen_suit'", "'chosen_rank'", "'chosen_enhancement'", "'chosen_seal'", "'chosen_edition'"] {
+                assert!(!code.contains(quoted_name), "Variable names must not become card properties: {code}");
+            }
+            assert!(!code.contains("chosen_rank_card.id"), "SMODS.create_card takes a rank name/card key: {code}");
+            for (property, registry, object_kind) in [
+                ("enhancement", "G.P_CENTERS[", Some("'Enhanced'")),
+                ("seal", "G.P_SEALS[", None),
+                ("edition", "G.P_CENTERS[", Some("'Edition'")),
+            ] {
+                let assignment = code.lines().find(|line| line.trim_start().starts_with(&format!("{property} = ")))
+                    .unwrap_or_else(|| panic!("Missing {property} property in {code}"));
+                assert!(assignment.contains("type(") && assignment.contains("'string'") && assignment.contains(registry),
+                    "None, non-string, and unregistered keys must not reach the creation API: {assignment}");
+                if let Some(object_kind) = object_kind {
+                    assert!(assignment.contains(".set") && assignment.contains(object_kind),
+                        "A registered key for another object kind must not reach {property}: {assignment}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn create_playing_cards_resolves_pool_encodings_inside_the_count_loop() {
+    for typed in [false, true] {
+        let pool = |value: serde_json::Value| if typed {
+            ParamValue::Typed(TypedValue { value, value_type: "checkbox".into() })
+        } else { ParamValue::Str(value.to_string()) };
+        let code = effect_code("create_playing_cards", &[
+            ("count", if typed { ParamValue::Typed(TypedValue { value: serde_json::json!("3"), value_type: "number".into() }) } else { ParamValue::Int(3) }),
+            ("rank", ParamValue::Str("pool".into())),
+            ("rank_pool", pool(serde_json::json!(["2", "J", "A"]))),
+            ("suit", ParamValue::Str("pool".into())), ("suit_pool", pool(serde_json::json!(["Hearts", "Clubs"]))),
+        ]);
+        assert!(code.contains("area = G.hand"), "Plural effect must add to hand: {code}");
+        assert!(code.contains("= 1, card.ability.extra.create_cards_count0 do"), "{code}");
+        assert!(index_of(&code, "= 1, card.ability.extra.create_cards_count0 do") < index_of(&code, "SMODS.add_card("), "Creation options must be fresh for each card: {code}");
+        assert!(code.matches("pseudorandom_element(").count() >= 2, "{code}");
+        for selection in ["'2'", "'J'", "'A'", "'Hearts'", "'Clubs'"] { assert!(code.contains(selection), "{code}"); }
+        assert!(!code.contains("rank = 'pool'") && !code.contains("suit = 'pool'"), "{code}");
+        assert!(!code.contains(":emplace("), "{code}");
+        assert_eq!(code.matches("playing_card_added = true").count(), 1, "Notify once after the whole batch: {code}");
+        assert!(code.contains("math.max("), "Older Steamodded deck capacity must include created cards: {code}");
+    }
+    for typed in [false, true] {
+        let pool = |value: serde_json::Value| if typed {
+            ParamValue::Typed(TypedValue { value, value_type: "checkbox".into() })
+        } else { ParamValue::Str(value.to_string()) };
+        let code = effect_code("create_playing_cards", &[
+            ("count", ParamValue::Int(2)), ("rank", ParamValue::Str("pool".into())),
+            ("rank_pool", pool(serde_json::json!([true, false, false, false, false, false, false, false, false, false, false, false, true]))),
+            ("suit", ParamValue::Str("pool".into())),
+            ("suit_pool", pool(serde_json::json!([true, false, true, false]))),
+        ]);
+        for selected in ["'2'", "'A'", "'Spades'", "'Diamonds'"] { assert!(code.contains(selected), "{code}"); }
+        for excluded in ["'Hearts'", "'Clubs'", "'J'", "'K'"] { assert!(!code.contains(excluded), "{code}"); }
+    }
+    let empty = effect_code("create_playing_cards", &[
+        ("count", ParamValue::Int(1)), ("rank", ParamValue::Str("pool".into())),
+        ("rank_pool", ParamValue::Str("[]".into())), ("suit", ParamValue::Str("pool".into())),
+        ("suit_pool", ParamValue::Str("[]".into())),
+    ]);
+    assert!(!empty.contains("pseudorandom_element("), "Empty pools should fall back to normal random rank/suit: {empty}");
+    assert!(!empty.contains("rank =") && !empty.contains("suit ="), "{empty}");
+}
+
+#[test]
+fn create_playing_card_static_properties_remain_editable_in_live_preview() {
+    let joker = preview_test_joker(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played", "effects": [{
+            "id": "create", "effect_type": "create_playing_card", "params": {
+                "rank": "8", "suit": "Hearts", "enhancement": "m_lucky", "seal": "Blue", "edition": "e_foil"
+            }
+        }]
+    }]));
+    let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&compile_joker(&joker, "mod"));
+    for (key, value) in [("rank", "8"), ("suit", "Hearts"), ("enhancement", "m_lucky"), ("seal", "Blue"), ("edition", "e_foil")] {
+        let path = serde_json::json!(["rules", 0, "effects", 0, "params", key, "value"]);
+        let binding = bindings.iter().find(|binding| serde_json::json!(binding.source_path) == path)
+            .unwrap_or_else(|| panic!("Missing editable {key} property in {code}"));
+        assert_eq!(binding.original_value, serde_json::json!(value));
+        assert_eq!(field_binding_text(&code, binding), format!("'{value}'"));
+    }
+}
+
+#[test]
 fn rule_chain_places_conditional_before_unconditional_fallback() {
     let fallback = make_rule_output("r_fallback", "hand_played", None, "FALLBACK");
     let conditional = make_rule_output(

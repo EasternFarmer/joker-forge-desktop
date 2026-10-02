@@ -662,6 +662,91 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn frontend_playing_card_properties_reach_preview_and_export() {
+        for location in ["deck", "hand"] {
+            let input = serde_json::json!({
+                "objectKey": "card_test", "name": "Card Test", "description": "Create a card",
+                "cost": 4, "rarity": "common",
+                "rules": [{ "id": "card_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "create_card", "type": "create_playing_card", "params": {
+                        "location": { "value": location, "valueType": "string" },
+                        "rank": { "value": "10", "valueType": "string" },
+                        "suit": { "value": "Hearts", "valueType": "string" },
+                        "enhancement": { "value": "m_lucky", "valueType": "string" },
+                        "seal": { "value": "Blue", "valueType": "string" },
+                        "edition": { "value": "rainbow", "valueType": "string" }
+                    }
+                }] }]
+            });
+            let preview = compile_item_from_data_with_segments(
+                "joker".into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                "joker".into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for code in [&preview.code, &exported] {
+                for property in [
+                    format!("area = G.{location}"), "rank = '10'".into(), "suit = 'Hearts'".into(),
+                    "enhancement = 'm_lucky'".into(), "seal = 'Blue'".into(), "edition = 'e_mod_rainbow'".into(),
+                ] { assert!(code.contains(&property), "Missing {property}: {code}"); }
+                assert_eq!(code.matches("SMODS.add_card(").count(), 1);
+                assert!(!code.contains(":emplace("));
+            }
+            assert!(preview.segments.iter().any(|segment| segment.id == "effect:card_rule:create_card"));
+            for key in ["rank", "suit", "enhancement", "seal"] {
+                let path = serde_json::json!(["rules", 0, "effects", 0, "params", key, "value"]);
+                assert!(preview.field_bindings.iter().any(|binding| serde_json::json!(binding.source_path) == path));
+            }
+        }
+    }
+
+    #[test]
+    fn frontend_playing_card_pools_and_variables_use_live_values() {
+        let consumable = serde_json::json!({
+            "objectKey": "cards_test", "name": "Cards Test", "description": "Create cards", "set": "Tarot",
+            "rules": [{ "id": "card_rule", "trigger": "card_used", "effects": [{
+                "id": "create_cards", "type": "create_playing_cards", "params": {
+                    "count": { "value": "3", "valueType": "number" },
+                    "rank": { "value": "pool", "valueType": "string" },
+                    "rank_pool": { "value": [false, false, false, false, false, false, false, false, true, false, false, false, true], "valueType": "checkbox" },
+                    "suit": { "value": "pool", "valueType": "string" },
+                    "suit_pool": { "value": [false, true, false, true], "valueType": "checkbox" }
+                }
+            }] }]
+        });
+        let code = compile_item_from_data(
+            "consumable".into(), consumable, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for expected in ["area = G.hand", "create_cards_count0 = 3", "'10'", "'A'", "'Hearts'", "'Clubs'"] {
+            assert!(code.contains(expected), "Missing {expected}: {code}");
+        }
+        assert!(!code.contains("'Spades'") && !code.contains("'Diamonds'"));
+        assert_eq!(code.matches("playing_card_added = true").count(), 1);
+
+        let joker = serde_json::json!({
+            "objectKey": "variable_test", "name": "Variable Test", "description": "Create a card", "rarity": "common", "cost": 4,
+            "userVariables": [
+                { "name": "chosen_suit", "type": "suit", "initialSuit": "Hearts" },
+                { "name": "chosen_rank", "type": "rank", "initialRank": "Ace" },
+                { "name": "chosen_edition", "type": "key", "initialKey": "e_foil" }
+            ],
+            "rules": [{ "id": "card_rule", "trigger": "blind_selected", "effects": [{
+                "id": "create_card", "type": "create_playing_card", "params": {
+                    "suit": { "value": "chosen_suit", "valueType": "user_var" },
+                    "rank": { "value": "chosen_rank", "valueType": "user_var" },
+                    "edition": { "value": "chosen_edition", "valueType": "user_var" }
+                }
+            }] }]
+        });
+        let code = compile_item_from_data(
+            "joker".into(), joker, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for expected in ["G.GAME.current_round.chosen_suit_card.suit", "G.GAME.current_round.chosen_rank_card.rank", "G.P_CENTERS[card.ability.extra.chosen_edition]", "G.P_CENTERS[card.ability.extra.chosen_edition].set == 'Edition'"] {
+            assert!(code.contains(expected), "Missing {expected}: {code}");
+        }
+    }
+
+    #[test]
     fn frontend_tag_selection_uses_registered_keys_in_preview_and_export() {
         for item_type in ["joker", "deck", "consumable", "voucher", "enhancement"] {
             let input = serde_json::json!({

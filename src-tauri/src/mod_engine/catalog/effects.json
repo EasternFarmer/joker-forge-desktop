@@ -2882,7 +2882,7 @@
             "label": "Add To Hand"
           }
         ],
-        "default": ["deck"]
+        "default": "deck"
       },
       {
         "id": "suit",
