@@ -1410,9 +1410,14 @@ export default function SettingsPage() {
                   )}
                   {fuzzyMatch("Enable Drag-box Selection", settingsSearch) && (
                     <div className="flex items-center justify-between py-2">
-                      <Label htmlFor="rb-drag-box-selection">
-                        Enable Drag-box Selection
-                      </Label>
+                      <div>
+                        <Label htmlFor="rb-drag-box-selection">
+                          Enable Drag-box Selection
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Hold Shift and drag when left-click panning is enabled.
+                        </p>
+                      </div>
                       <Switch
                         id="rb-drag-box-selection"
                         checked={ruleBuilderSettings.enableDragBoxSelection}

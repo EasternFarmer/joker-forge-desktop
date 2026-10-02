@@ -661,10 +661,10 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     null,
   );
   const [isDragSelecting, setIsDragSelecting] = useState(false);
-  const [isMiddlePanning, setIsMiddlePanning] = useState(false);
+  const [isCanvasPanning, setIsCanvasPanning] = useState(false);
   const [lastContextWorldPoint, setLastContextWorldPoint] =
     useState<WorldPoint | null>(null);
-  const middlePanStartRef = useRef<{
+  const canvasPanStartRef = useRef<{
     clientX: number;
     clientY: number;
     originX: number;
@@ -3752,22 +3752,42 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
   const handleViewportMouseDownCapture = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!ruleBuilderSettings.enableMiddleMousePan) return;
-      if (event.button !== 1) return;
+      if (event.button === 0) {
+        if (!ruleBuilderSettings.enableLeftMousePan || event.shiftKey) return;
+        const target = event.target as HTMLElement;
+        if (
+          target.closest(
+            "[data-rb-context], [data-rb-panel='true'], [data-rb-live-code='true'], button, input, textarea, select, [contenteditable='true']",
+          )
+        ) return;
+        if (
+          document.querySelector(
+            "[data-slot='select-content'][data-state='open'], [data-radix-popper-content-wrapper] [role='listbox']",
+          )
+        ) return;
+      } else if (event.button !== 1 || !ruleBuilderSettings.enableMiddleMousePan) {
+        return;
+      }
 
       event.preventDefault();
       event.stopPropagation();
 
-      middlePanStartRef.current = {
+      canvasPanStartRef.current = {
         clientX: event.clientX,
         clientY: event.clientY,
         originX: panState.x,
         originY: panState.y,
         scale: panState.scale,
       };
-      setIsMiddlePanning(true);
+      setIsCanvasPanning(true);
     },
-    [panState.x, panState.y, panState.scale, ruleBuilderSettings.enableMiddleMousePan],
+    [
+      panState.x,
+      panState.y,
+      panState.scale,
+      ruleBuilderSettings.enableLeftMousePan,
+      ruleBuilderSettings.enableMiddleMousePan,
+    ],
   );
 
   const handleViewportAuxClick = useCallback(
@@ -3844,12 +3864,12 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   }, [isDragSelecting]);
 
   useEffect(() => {
-    if (!isMiddlePanning) return;
+    if (!isCanvasPanning) return;
 
     document.body.style.cursor = "grabbing";
 
     const handleMouseMove = (event: MouseEvent) => {
-      const start = middlePanStartRef.current;
+      const start = canvasPanStartRef.current;
       if (!start) return;
 
       const deltaX = event.clientX - start.clientX;
@@ -3863,20 +3883,22 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       );
     };
 
-    const stopMiddlePan = () => {
-      setIsMiddlePanning(false);
-      middlePanStartRef.current = null;
+    const stopCanvasPan = () => {
+      setIsCanvasPanning(false);
+      canvasPanStartRef.current = null;
     };
 
     window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", stopMiddlePan);
+    window.addEventListener("mouseup", stopCanvasPan);
+    window.addEventListener("blur", stopCanvasPan);
 
     return () => {
       document.body.style.cursor = "";
       window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", stopMiddlePan);
+      window.removeEventListener("mouseup", stopCanvasPan);
+      window.removeEventListener("blur", stopCanvasPan);
     };
-  }, [isMiddlePanning]);
+  }, [isCanvasPanning]);
 
   const resolveContextTarget = useCallback(
     (target: EventTarget | null): RuleBuilderContextTarget => {
@@ -4919,7 +4941,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
               <div
                 ref={builderViewportRef}
                 className={`relative h-full overflow-hidden ${
-                  isMiddlePanning ? "cursor-grabbing" : "cursor-grab"
+                  isCanvasPanning ? "cursor-grabbing" : "cursor-grab"
                 }`}
                 style={{ width: `${builderWidthPercent}%` }}
                 onMouseDownCapture={handleViewportMouseDownCapture}
@@ -4948,7 +4970,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                         ease: "easeOut",
                         delay: 0.1,
                       }}
-                      className="absolute inset-0 flex items-center justify-center z-40"
+                      className="absolute inset-0 flex items-center justify-center z-40 pointer-events-none"
                     >
                       <motion.div
                         initial={{ opacity: 0, y: 10 }}
@@ -5028,7 +5050,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                       disabled: true,
                     }}
                     panning={{
-                      allowLeftClickPan: ruleBuilderSettings.enableLeftMousePan,
+                      // Empty-grid left drags are handled above so rule drags stay independent.
+                      allowLeftClickPan: false,
                       allowRightClickPan: ruleBuilderSettings.enableRightMousePan,
                       allowMiddleClickPan: ruleBuilderSettings.enableMiddleMousePan,
                       wheelPanning: false,
