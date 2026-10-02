@@ -184,9 +184,8 @@ export const DescriptionEditor = memo(
       const groups: Array<{
         id:
           | "user"
-          | "generated"
+          | "loc"
           | "probability"
-          | "game"
           | "userGlobal"
           | "userGlobalPersistent";
         label: string;
@@ -202,13 +201,13 @@ export const DescriptionEditor = memo(
           label: "User Global Persistent",
           items: [],
         },
-        { id: "generated", label: "Generated", items: [] },
-        { id: "probability", label: "Probability Vars", items: [] },
-        { id: "game", label: "Game", items: [] },
+        { id: "loc", label: "Description Values", items: [] },
+        { id: "probability", label: "Chance", items: [] },
       ];
 
       variableTokens.forEach((token, idx) => {
-        if (token.category === "loc") return;
+        // Keep the original slot numbers while hiding internal rule values.
+        if (token.category === "config" || token.category === "game") return;
 
         const index = idx + 1;
         const labelText = `#${index}# ${token.label}`;
@@ -220,7 +219,7 @@ export const DescriptionEditor = memo(
           return;
         }
 
-        if (token.category === "config") {
+        if (token.category === "loc") {
           groups[3].items.push({ index, token });
           return;
         }
@@ -230,13 +229,8 @@ export const DescriptionEditor = memo(
           return;
         }
 
-        if (token.category === "game") {
-          groups[5].items.push({ index, token });
-          return;
-        }
-
         if (token.category === "user") {
-          const name = token.source.replace("card.ability.extra.", "").trim();
+          const name = token.label.trim();
           const matchedVar = userVariablesByName.get(name.toLowerCase());
           if (matchedVar?.isGlobal && matchedVar?.isPersistent) {
             groups[2].items.push({ index, token });
@@ -411,13 +405,12 @@ export const DescriptionEditor = memo(
                         {group.id === "userGlobalPersistent" && (
                           <User className="h-3 w-3" />
                         )}
-                        {group.id === "generated" && (
-                          <Sparkle className="h-3 w-3" />
+                        {group.id === "loc" && (
+                          <List className="h-3 w-3" />
                         )}
                         {group.id === "probability" && (
                           <DiceFive className="h-3 w-3" />
                         )}
-                        {group.id === "game" && <Cube className="h-3 w-3" />}
                         <span>{group.label}</span>
                       </p>
                       <div className="space-y-2">
@@ -439,9 +432,11 @@ export const DescriptionEditor = memo(
                                     #{index}#
                                   </span>
                                 </div>
-                                <div className="text-[10px] text-muted-foreground mt-0.5 truncate">
-                                  {token.source}
-                                </div>
+                                {token.previewValue !== undefined && (
+                                  <div className="text-[10px] text-muted-foreground mt-0.5 truncate">
+                                    Initial value: {token.previewValue}
+                                  </div>
+                                )}
                               </button>
                             </TooltipTrigger>
                             <TooltipContent>Insert #{index}#</TooltipContent>
@@ -452,7 +447,9 @@ export const DescriptionEditor = memo(
                   ))
                 ) : (
                   <p className="text-[11px] text-muted-foreground">
-                    No variables match your search.
+                    {variableSearch.trim()
+                      ? "No variables match your search."
+                      : "Add a variable or a chance group in the Rule Builder to use it here."}
                   </p>
                 )}
               </div>

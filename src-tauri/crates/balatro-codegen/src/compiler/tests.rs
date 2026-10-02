@@ -1,6 +1,181 @@
 use super::*;
 use std::collections::HashMap;
 
+fn ordered_description_code(ctx: &CompileContext) -> String {
+    let loc_vars = build_shared_loc_vars(ctx, &[]).expect("ordered bindings should emit loc_vars");
+    Emitter::new().emit_expr_to_string(&loc_vars)
+}
+
+#[test]
+fn description_bindings_preserve_slots_and_duplicate_literals() {
+    let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+    ctx.set_user_vars(vec![UserVariableDef {
+        name: "label".into(),
+        var_type: UserVarType::Text,
+        initial_value: ParamValue::Str("chance".into()),
+        is_global: false,
+        is_persistent: false,
+    }]);
+    let rules: Vec<RuleDef> = serde_json::from_value(serde_json::json!([{
+        "id": "rule", "trigger": "hand_played",
+        "effects": [{ "id": "hidden", "effect_type": "juice_up_card", "params": { "scale": 4, "rotation": 3 } }],
+        "random_groups": [{ "id": "chance", "chance_numerator": 1, "chance_denominator": 8,
+            "effects": [{ "id": "mult", "effect_type": "apply_x_mult", "params": { "value": 5 } }] }]
+    }])).unwrap();
+    compile_rules(&rules, &mut ctx);
+    ctx.set_description_variables(Some(
+        serde_json::from_value(serde_json::json!([
+            { "kind": "probability", "group_id": "chance", "part": "numerator" },
+            { "kind": "probability", "group_id": "chance", "part": "denominator" },
+            { "kind": "user", "name": "label" },
+            { "kind": "literal", "value": 7 },
+            { "kind": "literal", "value": 7 },
+            { "kind": "config", "name": "Xmult0", "effect_id": "mult", "fallback": 5 }
+        ]))
+        .unwrap(),
+    ));
+    let code = ordered_description_code(&ctx);
+    let vars = &code[index_of(&code, "vars = {")..];
+    assert!(index_of(vars, "description_numerator0") < index_of(vars, "description_denominator0"));
+    assert!(index_of(vars, "description_denominator0") < index_of(vars, "['label']"));
+    assert!(index_of(vars, "['label']") < index_of(vars, "['Xmult0']"));
+    assert_eq!(
+        vars.lines()
+            .filter(|line| line.trim().trim_end_matches(',') == "7")
+            .count(),
+        2
+    );
+    assert!(!vars.contains("juice_scale"));
+    assert!(!vars.contains("juice_rotation"));
+    assert_eq!(code.matches("SMODS.get_probability_vars").count(), 1);
+}
+
+#[test]
+fn description_probabilities_use_group_identity_across_skipped_and_many_groups() {
+    let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+    let mut groups = vec![
+        serde_json::json!({ "id": "empty", "chance_numerator": 3, "chance_denominator": 9, "effects": [] }),
+    ];
+    groups.extend((0..12).map(|index| serde_json::json!({
+        "id": format!("group{index}"), "chance_numerator": index + 1, "chance_denominator": index + 20,
+        "effects": [{ "id": format!("effect{index}"), "effect_type": "add_mult", "params": { "value": 2 } }]
+    })));
+    let rules: Vec<RuleDef> = serde_json::from_value(
+        serde_json::json!([{ "id": "rule", "trigger": "hand_played", "random_groups": groups }]),
+    )
+    .unwrap();
+    compile_rules(&rules, &mut ctx);
+    ctx.set_description_variables(Some(
+        serde_json::from_value(serde_json::json!([
+            { "kind": "probability", "group_id": "group10", "part": "denominator" },
+            { "kind": "probability", "group_id": "group2", "part": "numerator" },
+            { "kind": "probability", "group_id": "empty", "part": "numerator" },
+            { "kind": "probability", "group_id": "group10", "part": "numerator" }
+        ]))
+        .unwrap(),
+    ));
+    let code = ordered_description_code(&ctx);
+    let first_pair = &code[..index_of(&code, "local description_numerator1")];
+    assert!(first_pair.contains("['numerator_10']"));
+    assert!(first_pair.contains("['odds_10']"));
+    assert!(code.contains("SMODS.get_probability_vars(card, 3, 9, 'j_mod_test')"));
+    let vars = &code[index_of(&code, "vars = {")..];
+    assert!(index_of(vars, "description_denominator0") < index_of(vars, "description_numerator1"));
+    assert!(index_of(vars, "description_numerator1") < index_of(vars, "description_numerator2"));
+    assert!(index_of(vars, "description_numerator2") < index_of(vars, "description_numerator0"));
+}
+
+#[test]
+fn description_config_bindings_resolve_actual_effect_names_and_dynamic_fallbacks() {
+    let mut ctx = CompileContext::new(ObjectType::Edition, "mod".into(), "test".into(), false);
+    ctx.set_user_vars(vec![UserVariableDef {
+        name: "amount".into(),
+        var_type: UserVarType::Number,
+        initial_value: ParamValue::Int(4),
+        is_global: false,
+        is_persistent: false,
+    }]);
+    let rules: Vec<RuleDef> = serde_json::from_value(serde_json::json!([{
+        "id": "rule", "trigger": "card_scored", "effects": [
+            { "id": "dynamic", "effect_type": "add_chips", "params": { "value": { "value": "amount", "valueType": "user_var" } } },
+            { "id": "literal", "effect_type": "add_chips", "params": { "value": 17 } }
+        ]
+    }])).unwrap();
+    compile_rules(&rules, &mut ctx);
+    ctx.set_description_variables(Some(serde_json::from_value(serde_json::json!([
+        { "kind": "config", "name": "chips0", "effect_id": "literal", "fallback": 17 },
+        { "kind": "config", "name": "chips1", "effect_id": "dynamic", "fallback": { "value": "amount", "valueType": "user_var" } },
+        { "kind": "game", "id": "os.execute('unsafe')" }
+    ])).unwrap()));
+    let code = ordered_description_code(&ctx);
+    assert!(code.contains("card.edition.extra['chips1']"));
+    assert!(code.contains("card.edition.extra['amount']"));
+    assert!(!code.contains("['chips0']"));
+    assert!(!code.contains("os.execute"));
+}
+
+#[test]
+fn description_user_bindings_guard_scoped_values_and_global_defaults() {
+    for object_type in [
+        ObjectType::Joker,
+        ObjectType::Seal,
+        ObjectType::Edition,
+        ObjectType::Deck,
+    ] {
+        let mut ctx = CompileContext::new(object_type, "mod".into(), "test".into(), false);
+        ctx.set_user_vars(vec![
+            UserVariableDef {
+                name: "amount".into(),
+                var_type: UserVarType::Number,
+                initial_value: ParamValue::Int(3),
+                is_global: false,
+                is_persistent: false,
+            },
+            UserVariableDef {
+                name: "shared".into(),
+                var_type: UserVarType::Number,
+                initial_value: ParamValue::Int(6),
+                is_global: true,
+                is_persistent: false,
+            },
+        ]);
+        ctx.set_description_variables(Some(vec![
+            DescriptionVariableBinding::User {
+                name: "amount".into(),
+            },
+            DescriptionVariableBinding::User {
+                name: "shared".into(),
+            },
+        ]));
+        let code = ordered_description_code(&ctx);
+        assert!(code.contains(&format!("{}['amount']", object_type.ability_path())));
+        assert!(code.contains("self.config.extra['amount']"));
+        assert!(code.contains("G.GAME.jf_global_vars['shared']"));
+        assert!(code.contains("or 6"));
+    }
+}
+
+#[test]
+fn description_game_bindings_accept_current_catalog_ids_and_dynamic_parameters() {
+    let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+    ctx.set_description_variables(Some(serde_json::from_value(serde_json::json!([
+        { "kind": "game", "id": "cards_in_deck" },
+        { "kind": "game", "id": "cards_in_hand" },
+        { "kind": "game", "id": "total_playing_cards" },
+        { "kind": "game", "id": "blind_chip_req" },
+        { "kind": "config", "name": "chips0", "fallback": { "value": "GAMEVAR:current_money|2|3", "valueType": "gameVariable" } }
+    ])).unwrap()));
+    let code = ordered_description_code(&ctx);
+    assert!(code.contains("G.deck.cards"));
+    assert!(code.contains("G.hand.cards"));
+    assert!(code.contains("G.playing_cards"));
+    assert!(code.contains("G.GAME.blind.chips"));
+    assert!(code.contains("G.GAME.dollars"));
+    assert!(code.contains("+ 3"));
+    assert!(code.contains("* 2"));
+    assert!(!code.contains("context."));
+}
+
 fn make_rule_output(
     rule_id: &str,
     trigger: &str,

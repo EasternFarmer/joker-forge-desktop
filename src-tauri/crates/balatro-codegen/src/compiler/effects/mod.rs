@@ -47,6 +47,7 @@ pub fn compile_effect(
     ctx: &mut CompileContext,
     trigger: &str,
 ) -> Option<EffectOutput> {
+    let config_start = ctx.config_vars().len();
     let result = match effect.effect_type.as_str() {
         // --------------- Scoring ---------------
         "add_chips" => scoring::add_chips(effect, ctx),
@@ -193,6 +194,7 @@ pub fn compile_effect(
         }
     };
 
+    ctx.record_effect_config_names(&effect.id, config_start);
     Some(result)
 }
 

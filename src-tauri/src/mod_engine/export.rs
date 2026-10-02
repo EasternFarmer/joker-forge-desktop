@@ -7,7 +7,7 @@
 //! updating Rust, not both the TypeScript mapper and the Rust codegen.
 
 use balatro_codegen::types::{
-    AppearanceDef, AtlasPos, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef,
+    AppearanceDef, AtlasPos, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef, DescriptionVariableBinding,
     DeckDef, DisplaySize, EditionDef, EffectDef, EnhancementDef, JokerDef, LogicOp, LoopGroupDef,
     ParamValue, RandomGroupDef, RarityDef, RuleDef, SealDef, TypedValue, UnlockDef, UserVarType,
     UserVariableDef, VoucherDef,
@@ -73,6 +73,8 @@ pub struct JokerDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub force_eternal: bool,
     #[serde(default)]
@@ -126,6 +128,8 @@ pub struct ConsumableDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub atlas: Option<String>,
 }
@@ -142,6 +146,8 @@ pub struct EnhancementDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub any_suit: Option<bool>,
     #[serde(default)]
@@ -176,6 +182,8 @@ pub struct SealDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub badge_colour: Option<String>,
     #[serde(default)]
@@ -206,6 +214,8 @@ pub struct EditionDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub shader: Option<Value>,
     #[serde(default)]
@@ -262,6 +272,8 @@ pub struct VoucherDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub draw_shader_sprite: Option<Value>,
     #[serde(default)]
@@ -280,6 +292,8 @@ pub struct DeckDataInput {
     pub rules: Vec<RuleInput>,
     #[serde(rename = "userVariables", default)]
     pub user_variables: Vec<UserVariableInput>,
+    #[serde(rename = "descriptionVariables", default)]
+    pub description_variables: Option<Vec<DescriptionVariableBinding>>,
     #[serde(default)]
     pub unlocked: Option<bool>,
     #[serde(default)]
@@ -601,6 +615,7 @@ pub fn joker_data_to_def(
         appearance,
         unlock,
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         force_eternal: input.force_eternal,
         force_perishable: input.force_perishable,
         force_rental: input.force_rental,
@@ -644,6 +659,7 @@ pub fn consumable_data_to_def(
         soul_pos: soul_pos.map(|sp| AtlasPos { x: sp.x, y: sp.y }),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
     }
 }
 
@@ -659,6 +675,7 @@ pub fn enhancement_data_to_def(input: &EnhancementDataInput, pos: AtlasPosInput)
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         any_suit: input.any_suit,
         replace_base_card: input.replace_base_card,
         no_rank: input.no_rank,
@@ -683,6 +700,7 @@ pub fn seal_data_to_def(input: &SealDataInput, pos: AtlasPosInput) -> SealDef {
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         badge_colour: input.badge_colour.clone(),
         unlocked: input.unlocked,
         discovered: input.discovered,
@@ -703,6 +721,7 @@ pub fn edition_data_to_def(input: &EditionDataInput) -> EditionDef {
         description: split_description(&input.description),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         shader: option_value_to_string(input.shader.as_ref()),
         in_shop: input.in_shop,
         weight: input.weight,
@@ -753,6 +772,7 @@ pub fn voucher_data_to_def(
         soul_pos: soul_pos.map(|sp| AtlasPos { x: sp.x, y: sp.y }),
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         draw_shader_sprite: option_value_to_string(input.draw_shader_sprite.as_ref()),
     }
 }
@@ -778,6 +798,7 @@ pub fn deck_data_to_def(input: &DeckDataInput, mod_prefix: &str, pos: AtlasPosIn
         pos: AtlasPos { x: pos.x, y: pos.y },
         rules: input.rules.iter().map(map_rule).collect(),
         user_variables: input.user_variables.iter().map(map_user_variable).collect(),
+        description_variables: input.description_variables.clone(),
         unlocked: input.unlocked,
         discovered: input.discovered,
         no_collection: input.no_collection,
@@ -2107,6 +2128,7 @@ mod tests {
                 scale_h: None,
                 rules: vec![],
                 user_variables: vars,
+                description_variables: None,
                 force_eternal: false,
                 force_perishable: false,
                 force_rental: false,
@@ -2137,6 +2159,26 @@ mod tests {
 
         assert_eq!(parsed.value, serde_json::json!(7));
         assert_eq!(parsed.value_type.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn ordered_description_bindings_survive_frontend_mapping() {
+        let input: JokerDataInput = serde_json::from_value(serde_json::json!({
+            "objectKey": "chance", "name": "Chance", "description": "#1# in #2#", "cost": 4, "rarity": "common",
+            "descriptionVariables": [
+                { "kind": "probability", "group_id": "chance-group", "part": "numerator" },
+                { "kind": "probability", "group_id": "chance-group", "part": "denominator" },
+                { "kind": "literal", "value": 2 },
+                { "kind": "literal", "value": 2 }
+            ]
+        })).unwrap();
+        let def = joker_data_to_def(&input, "mod", AtlasPosInput { x: 0, y: 0 }, None);
+        let bindings = def.description_variables.expect("bindings must reach the generator");
+        assert_eq!(bindings.len(), 4);
+        assert!(matches!(&bindings[0], DescriptionVariableBinding::Probability { group_id, part: balatro_codegen::types::ProbabilityPart::Numerator } if group_id == "chance-group"));
+        assert!(matches!(&bindings[1], DescriptionVariableBinding::Probability { group_id, part: balatro_codegen::types::ProbabilityPart::Denominator } if group_id == "chance-group"));
+        assert!(matches!(&bindings[2], DescriptionVariableBinding::Literal { value } if value == &serde_json::json!(2)));
+        assert!(matches!(&bindings[3], DescriptionVariableBinding::Literal { value } if value == &serde_json::json!(2)));
     }
 
     #[test]
@@ -2217,6 +2259,7 @@ mod tests {
             localizations: vec![],
             rules: vec![],
             user_variables: vec![],
+            description_variables: None,
             unlocked: Some(true),
             discovered: Some(true),
             no_collection: None,

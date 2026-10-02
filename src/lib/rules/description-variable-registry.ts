@@ -1,11 +1,38 @@
-import type { Effect, Rule } from "@/components/rule-builder/types";
+import type { Effect, RandomGroup, Rule } from "@/components/rule-builder/types";
 import { GAME_VARIABLE_CATEGORIES } from "@/lib/content/game-vars";
 import type { UserVariable } from "@/lib/core/types";
+
+type ParameterValue = { value: unknown; valueType?: string };
+
+export type DescriptionVariableBinding =
+  | { kind: "literal"; value: string | number }
+  | { kind: "user"; name: string }
+  | {
+      kind: "config";
+      name: string;
+      effect_id?: string;
+      fallback?: string | number | { value: unknown; valueType: string };
+    }
+  | {
+      kind: "probability";
+      group_id: string;
+      part: "numerator" | "denominator";
+    }
+  | { kind: "game"; id: string };
 
 export type DescriptionVariableToken = {
   label: string;
   source: string;
   category: "loc" | "config" | "user" | "game" | "probability";
+  binding: DescriptionVariableBinding;
+  previewValue?: string;
+};
+
+type DescriptionVariableItem = {
+  objectType?: string;
+  rules?: Rule[];
+  userVariables?: UserVariable[];
+  locVars?: { vars?: Array<string | number> };
 };
 
 const GAME_VARIABLE_LABELS = new Map<string, string>();
@@ -51,28 +78,91 @@ const CONFIG_VAR_BASES_BY_EFFECT: Record<string, string> = {
   edit_shop_slots: "shop_slots",
 };
 
+// Keep the original inferred slots so existing #N# descriptions retain their
+// meaning. Bind them to the compiler's actual names rather than guessing a
+// different ordering from the compiled config table.
+const CONFIG_VAR_COMPILER_BASES_BY_EFFECT: Record<string, string> = {
+  apply_exp_chips: "e_chips",
+  apply_exp_mult: "e_mult",
+  apply_hyper_chips: "hyperchips_n",
+  apply_hyper_mult: "hypermult_n",
+};
+
+export const getVariableDisplayValue = (variable: UserVariable): string => {
+  if (variable.type === "suit") return variable.initialSuit ?? "Spades";
+  if (variable.type === "rank") return variable.initialRank ?? "Ace";
+  if (variable.type === "key") return variable.initialKey ?? "none";
+  if (variable.type === "text") return variable.initialText ?? "";
+  if (variable.type === "pokerhand") {
+    return variable.initialPokerHand ?? "High Card";
+  }
+  return String(variable.initialValue ?? 0);
+};
+
+const getAbilityPath = (objectType: string | undefined): string => {
+  if (objectType === "edition") return "card.edition.extra";
+  if (objectType === "seal") return "card.ability.seal.extra";
+  if (objectType === "deck") return "self.config.extra";
+  return "card.ability.extra";
+};
+
+const getParameterDisplayValue = (
+  parameter: ParameterValue | undefined,
+  userVariables: UserVariable[],
+  defaultValue: number,
+): string => {
+  const value = parameter?.value;
+  if (typeof value === "number") return String(value);
+  if (typeof value !== "string") return String(defaultValue);
+
+  const variable = userVariables.find((entry) => entry.name === value);
+  if (variable) return getVariableDisplayValue(variable);
+
+  if (value.startsWith("GAMEVAR:")) {
+    const id = value.slice("GAMEVAR:".length).split("|")[0];
+    return GAME_VARIABLE_LABELS.get(id) ?? id;
+  }
+  return value;
+};
+
+const getProbabilityDisplayValue = (
+  parameter: ParameterValue | undefined,
+  defaultValue: number,
+): string => {
+  const value = parameter?.value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  // The compiler's ParamValue::as_i64 accepts numeric strings only in typed
+  // parameters. Dynamic chance inputs currently use the compiler defaults.
+  if (parameter?.valueType && typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) {
+    return String(Number(value));
+  }
+  return String(defaultValue);
+};
+
 const forEachRuleEffect = (
   rules: Rule[] | undefined,
-  cb: (effectType: string, effect?: Effect) => void,
+  cb: (effectType: string, effect?: Effect, group?: RandomGroup) => void,
 ) => {
   if (!Array.isArray(rules)) return;
 
-    for (const rule of rules) {
-      for (const effect of rule.effects || []) {
+  for (const rule of rules) {
+    for (const effect of rule.effects || []) {
+      cb(effect.type, effect);
+    }
+    for (const group of rule.randomGroups || []) {
+      cb("random_group_odds", undefined, group);
+      for (const effect of group.effects || []) {
         cb(effect.type, effect);
       }
-      for (const group of rule.randomGroups || []) {
-        cb("random_group_odds");
-        for (const effect of group.effects || []) {
-          cb(effect.type, effect);
-        }
-      }
-      for (const loop of rule.loops || []) {
-        for (const effect of loop.effects || []) {
-          cb(effect.type, effect);
-        }
+    }
+    for (const loop of rule.loops || []) {
+      for (const effect of loop.effects || []) {
+        cb(effect.type, effect);
       }
     }
+  }
 };
 
 const readEffectParamString = (effect: Effect | undefined, key: string): string => {
@@ -98,30 +188,74 @@ const dynamicConfigBaseForEffect = (effect: Effect | undefined): string | null =
   return null;
 };
 
-const inferConfigExtraNames = (rules: Rule[] | undefined): string[] => {
+const inferConfigVariables = (
+  item: DescriptionVariableItem,
+): DescriptionVariableToken[] => {
   const counts = new Map<string, number>();
-  const names: string[] = [];
+  const tokens: DescriptionVariableToken[] = [];
+  const userVariables = item.userVariables ?? [];
+  const abilityPath = getAbilityPath(item.objectType);
+  const probabilityGroupCount = (item.rules ?? []).reduce(
+    (total, rule) => total + (rule.randomGroups?.length ?? 0),
+    0,
+  );
 
-  const pushName = (base: string) => {
+  const nextName = (base: string) => {
     const count = counts.get(base) || 0;
-    names.push(`${base}${count}`);
     counts.set(base, count + 1);
+    return { name: `${base}${count}`, count };
   };
 
-  forEachRuleEffect(rules, (effectType, effect) => {
-    if (effectType === "random_group_odds") {
-      pushName("probability_numerator");
-      pushName("probability_denominator");
+  forEachRuleEffect(item.rules, (effectType, effect, group) => {
+    if (group) {
+      for (const part of ["numerator", "denominator"] as const) {
+        const { name, count } = nextName(`probability_${part}`);
+        const groupSuffix = probabilityGroupCount > 1 ? ` ${count + 1}` : "";
+        tokens.push({
+          label: `Chance${groupSuffix} ${part}`,
+          source: `${abilityPath}.${name}`,
+          category: "probability",
+          binding: { kind: "probability", group_id: group.id, part },
+          previewValue: getProbabilityDisplayValue(
+            group[`chance_${part}`],
+            part === "numerator" ? 1 : 2,
+          ),
+        });
+      }
       return;
     }
     const base =
       dynamicConfigBaseForEffect(effect) ?? CONFIG_VAR_BASES_BY_EFFECT[effectType];
-    if (base) {
-      pushName(base);
-    }
+    if (!base || !effect) return;
+
+    const { name, count } = nextName(base);
+    const compilerBase = CONFIG_VAR_COMPILER_BASES_BY_EFFECT[effectType] ?? base;
+    const parameter = effect.params?.value;
+    const isScoring = [
+      "add_chips", "add_mult", "apply_x_mult", "apply_x_chips",
+      "apply_exp_chips", "apply_exp_mult",
+    ].includes(effectType);
+    const defaultValue = isScoring ? 0 : 1;
+    const fallback = parameter?.valueType
+      ? { value: parameter.value, valueType: parameter.valueType }
+      : typeof parameter?.value === "number" || typeof parameter?.value === "string"
+        ? parameter.value
+        : defaultValue;
+    tokens.push({
+      label: name,
+      source: `${abilityPath}.${name}`,
+      category: "config",
+      binding: {
+        kind: "config",
+        name: `${compilerBase}${count}`,
+        effect_id: effect.id,
+        fallback,
+      },
+      previewValue: getParameterDisplayValue(parameter, userVariables, defaultValue),
+    });
   });
 
-  return names;
+  return tokens;
 };
 
 const extractGameVariableIds = (rules: Rule[] | undefined): string[] => {
@@ -183,54 +317,60 @@ const extractGameVariableIds = (rules: Rule[] | undefined): string[] => {
 };
 
 export const buildDescriptionVariableTokens = (
-  item:
-    | {
-        rules?: Rule[];
-        userVariables?: UserVariable[];
-        locVars?: { vars?: Array<string | number> };
-      }
-    | undefined,
+  item: DescriptionVariableItem | undefined,
 ): DescriptionVariableToken[] => {
   if (!item) return [];
 
   const tokens: DescriptionVariableToken[] = [];
   const seen = new Set<string>();
-  const push = (token: DescriptionVariableToken) => {
-    if (seen.has(token.source)) return;
-    seen.add(token.source);
+  const push = (token: DescriptionVariableToken, identity = token.source) => {
+    if (seen.has(identity)) return;
+    seen.add(identity);
     tokens.push(token);
   };
 
-  const locVars = Array.isArray(item.locVars?.vars)
-    ? item.locVars?.vars.filter((entry) => entry !== undefined)
-    : [];
-  if (locVars.length > 0) {
-    for (const value of locVars) {
-      const source = String(value);
-      push({ label: source, source, category: "loc" });
-    }
+  if (Array.isArray(item.locVars?.vars) && item.locVars.vars.length > 0) {
+    // Explicit localization arrays are already ordered. Duplicate values still
+    // occupy separate placeholders, and inferred variables must not append.
+    return item.locVars.vars.map((value) => ({
+      label: String(value),
+      source: String(value),
+      category: "loc",
+      binding: { kind: "literal", value },
+      previewValue: String(value),
+    }));
   }
 
+  const abilityPath = getAbilityPath(item.objectType);
   for (const userVar of Array.isArray(item.userVariables)
     ? item.userVariables
     : []) {
-    const source = `card.ability.extra.${userVar.name}`;
-    push({ label: userVar.name, source, category: "user" });
+    const source = userVar.isGlobal
+      ? `${userVar.isPersistent ? "JF_GLOBALS" : "G.GAME.jf_global_vars"}.${userVar.name}`
+      : `${abilityPath}.${userVar.name}`;
+    push({
+      label: userVar.name,
+      source,
+      category: "user",
+      binding: { kind: "user", name: userVar.name },
+      previewValue: getVariableDisplayValue(userVar),
+    }, `${abilityPath}.${userVar.name}`);
   }
 
-  for (const configName of inferConfigExtraNames(item.rules)) {
-    const source = `card.ability.extra.${configName}`;
-    push({
-      label: configName,
-      source,
-      category: configName.startsWith("probability_") ? "probability" : "config",
-    });
+  for (const token of inferConfigVariables(item)) {
+    push(token);
   }
 
   for (const gameVarId of extractGameVariableIds(item.rules)) {
     const label = GAME_VARIABLE_LABELS.get(gameVarId) || gameVarId;
     const source = `GAMEVAR:${gameVarId}`;
-    push({ label, source, category: "game" });
+    push({
+      label,
+      source,
+      category: "game",
+      binding: { kind: "game", id: gameVarId },
+      previewValue: label,
+    });
   }
 
   return tokens;

@@ -1,7 +1,16 @@
 use std::collections::HashMap;
 
 use crate::lua_ast::Expr;
-use crate::types::{ConfigValue, ConfigVar, ObjectType, UserVarType, UserVariableDef};
+use crate::types::{
+    ConfigValue, ConfigVar, DescriptionVariableBinding, ObjectType, UserVarType, UserVariableDef,
+};
+
+#[derive(Debug, Clone)]
+pub(crate) struct DescriptionProbability {
+    pub config_names: Option<(String, String)>,
+    pub numerator: i64,
+    pub denominator: i64,
+}
 
 /// Compilation context: tracks state while compiling a single game object.
 ///
@@ -24,6 +33,10 @@ pub struct CompileContext {
 
     /// User-defined variables.
     user_vars: Vec<UserVariableDef>,
+
+    description_variables: Option<Vec<DescriptionVariableBinding>>,
+    description_probabilities: HashMap<String, DescriptionProbability>,
+    effect_config_names: HashMap<String, Vec<String>>,
 
     /// Monotonic index for deterministic probability config variable names.
     probability_var_index: usize,
@@ -54,6 +67,9 @@ impl CompileContext {
             effect_type_counts: HashMap::new(),
             config_vars: Vec::new(),
             user_vars: Vec::new(),
+            description_variables: None,
+            description_probabilities: HashMap::new(),
+            effect_config_names: HashMap::new(),
             probability_var_index: 0,
             loop_var_index: 0,
             random_group_index: 0,
@@ -201,6 +217,43 @@ impl CompileContext {
     /// Get user variables.
     pub fn user_vars(&self) -> &[UserVariableDef] {
         &self.user_vars
+    }
+
+    pub fn set_description_variables(&mut self, vars: Option<Vec<DescriptionVariableBinding>>) {
+        self.description_variables = vars;
+    }
+
+    pub fn description_variables(&self) -> Option<&[DescriptionVariableBinding]> {
+        self.description_variables.as_deref()
+    }
+
+    pub(crate) fn register_description_probability(
+        &mut self,
+        group_id: &str,
+        probability: DescriptionProbability,
+    ) {
+        self.description_probabilities
+            .insert(group_id.to_string(), probability);
+    }
+
+    pub(crate) fn description_probability(
+        &self,
+        group_id: &str,
+    ) -> Option<&DescriptionProbability> {
+        self.description_probabilities.get(group_id)
+    }
+
+    pub(crate) fn record_effect_config_names(&mut self, effect_id: &str, start: usize) {
+        let names = self.config_vars[start..]
+            .iter()
+            .map(|var| var.name.clone())
+            .collect();
+        self.effect_config_names
+            .insert(effect_id.to_string(), names);
+    }
+
+    pub(crate) fn effect_config_names(&self, effect_id: &str) -> Option<&[String]> {
+        self.effect_config_names.get(effect_id).map(Vec::as_slice)
     }
 
     /// The full SMODS key for this object (e.g.: `j_modprefix_myjoker`).

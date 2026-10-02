@@ -12,6 +12,7 @@ pub fn compile_enhancement(enhancement: &EnhancementDef, mod_prefix: &str) -> Ch
         false,
     );
     ctx.set_user_vars(enhancement.user_variables.clone());
+    ctx.set_description_variables(enhancement.description_variables.clone());
 
     let rule_outputs = compile_rules(&enhancement.rules, &mut ctx);
     let table = build_enhancement_table(enhancement, &ctx, &rule_outputs);
