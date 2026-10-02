@@ -2,7 +2,7 @@ use crate::compiler::context::CompileContext;
 use crate::compiler::effects::utils::is_literal_one_param;
 use crate::compiler::effects::EffectOutput;
 use crate::lua_ast::*;
-use crate::types::EffectDef;
+use crate::types::{EffectDef, ParamValue};
 
 /// Create Joker effect: spawns a joker card.
 ///
@@ -222,80 +222,342 @@ pub fn create_consumable(effect: &EffectDef, ctx: &mut CompileContext) -> Effect
     }
 }
 
-/// Create Playing Card effect: adds a single base playing card.
-pub fn create_playing_card(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    let target = get_str_param(effect, "location").unwrap_or("deck");
-    let message = get_str_param(effect, "customMessage").unwrap_or("Added Card!");
+/// Create Playing Card effect: adds a card with the selected properties.
+pub fn create_playing_card(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+    playing_card_creation(effect, ctx, false)
+}
 
-    let pre = if target == "hand" {
-        vec![lua_raw_stmt(
-            "local c = SMODS.add_card({ set = 'Base' }); if c and G.hand then G.hand:emplace(c) end",
-        )]
+/// Create Playing Cards effect: adds a batch to the hand.
+pub fn create_playing_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+    playing_card_creation(effect, ctx, true)
+}
+
+fn playing_card_creation(
+    effect: &EffectDef,
+    ctx: &mut CompileContext,
+    multiple: bool,
+) -> EffectOutput {
+    let index = ctx.next_effect_count("created_playing_cards");
+    let cards_name = format!("created_playing_cards{index}");
+    let card_name = format!("created_playing_card{index}");
+    let cards = lua_ident(&cards_name);
+    let card = lua_ident(&card_name);
+    let default_location = if multiple { "hand" } else { "deck" };
+    let location = get_str_param(effect, "location").unwrap_or(default_location);
+    let mut payload = vec![
+        ("set", lua_str("Base")),
+        (
+            "area",
+            lua_raw_expr(if location == "hand" {
+                "G.hand"
+            } else {
+                "G.deck"
+            }),
+        ),
+        // Prevent the base creation routine from rolling an edition when None is selected.
+        ("no_edition", lua_bool(true)),
+    ];
+    for key in ["rank", "suit", "enhancement", "seal", "edition"] {
+        if let Some(value) = playing_card_property(effect, ctx, key) {
+            payload.push((key, value));
+        }
+    }
+
+    // SMODS.create_card mutates its argument, so each iteration gets a fresh table.
+    let add = vec![
+        lua_local(
+            &card_name,
+            lua_call("SMODS.add_card", vec![lua_table(payload)]),
+        ),
+        lua_if(
+            card.clone(),
+            vec![lua_expr_stmt(lua_call(
+                "table.insert",
+                vec![cards.clone(), card],
+            ))],
+        ),
+    ];
+    let mut pre_return = vec![lua_local(&cards_name, lua_table_raw(vec![]))];
+    if multiple {
+        let count = crate::compiler::values::resolve_config_value(
+            &effect.params,
+            "count",
+            ctx,
+            "create_cards_count",
+        );
+        if is_literal_one_param(effect, "count") {
+            pre_return.extend(add);
+        } else {
+            pre_return.push(Stmt::ForRange {
+                var: "i".into(),
+                start: lua_int(1),
+                stop: count.expr,
+                step: None,
+                body: add,
+            });
+        }
     } else {
-        vec![lua_raw_stmt("SMODS.add_card({ set = 'Base' })")]
-    };
+        pre_return.extend(add);
+    }
+    let added = lua_gt(lua_len(cards.clone()), lua_int(0));
+    pre_return.push(lua_if(
+        added.clone(),
+        vec![
+            // Older Steamodded releases do not update deck capacity in SMODS.add_card.
+            lua_if(
+                lua_and(lua_raw_expr("G.deck"), lua_raw_expr("G.deck.config")),
+                vec![lua_assign(
+                    lua_raw_expr("G.deck.config.card_limit"),
+                    lua_call(
+                        "math.max",
+                        vec![
+                            lua_raw_expr("G.deck.config.card_limit"),
+                            lua_len(lua_raw_expr("G.playing_cards")),
+                        ],
+                    ),
+                )],
+            ),
+            lua_expr_stmt(lua_call(
+                "SMODS.calculate_context",
+                vec![lua_table(vec![
+                    ("playing_card_added", lua_bool(true)),
+                    ("cards", cards),
+                ])],
+            )),
+        ],
+    ));
+    let message = get_str_param(effect, "customMessage").unwrap_or(if multiple {
+        "Added Cards!"
+    } else {
+        "Added Card!"
+    });
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: pre,
+        pre_return,
         config_vars: vec![],
-        message: Some(lua_str(message)),
+        message: Some(lua_and(added, lua_str(message))),
         colour: Some(lua_raw_expr("G.C.GREEN")),
-
         segment_id: None,
     }
 }
 
-/// Create Playing Cards effect: adds multiple base playing cards.
-pub fn create_playing_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let resolved = crate::compiler::values::resolve_config_value(
-        &effect.params,
-        "count",
-        ctx,
-        "create_cards_count",
-    );
-
-    let pre = if is_literal_one_param(effect, "count") {
-        vec![lua_raw_stmt("SMODS.add_card({ set = 'Base' })")]
-    } else {
-        vec![lua_raw_stmt(format!(
-            "for _ = 1, {} do SMODS.add_card({{ set = 'Base' }}) end",
-            resolved.lua_str
-        ))]
-    };
-
-    EffectOutput {
-        return_fields: vec![],
-        pre_return: pre,
-        config_vars: vec![],
-        message: Some(lua_str("Added Cards!")),
-        colour: Some(lua_raw_expr("G.C.GREEN")),
-
-        segment_id: None,
+fn playing_card_property(effect: &EffectDef, ctx: &CompileContext, key: &str) -> Option<Expr> {
+    let param = effect.params.get(key)?;
+    let value = param.as_str().unwrap_or("");
+    let is_variable = matches!(param, ParamValue::Typed(t)
+        if crate::compiler::values::is_user_variable_type(&t.value_type))
+        || matches!(param, ParamValue::Str(name) if ctx.has_user_var(name));
+    if is_variable {
+        if !ctx.has_user_var(value) {
+            return None;
+        }
+        return Some(if matches!(key, "rank" | "suit") {
+            let record = lua_field(
+                lua_raw_expr("G.GAME.current_round"),
+                format!("{value}_card"),
+            );
+            lua_or(
+                lua_and(
+                    lua_and(lua_raw_expr("G.GAME.current_round"), record.clone()),
+                    lua_field(record, key),
+                ),
+                ctx.user_var_expr(value),
+            )
+        } else {
+            // Key variables start at None and can refer to another kind of object.
+            // Only registered keys for this property may reach the creation API.
+            let variable = ctx.user_var_expr(value);
+            let registered = lua_index(
+                lua_raw_expr(if key == "seal" {
+                    "G.P_SEALS"
+                } else {
+                    "G.P_CENTERS"
+                }),
+                variable.clone(),
+            );
+            let mut valid = lua_and(
+                lua_eq(lua_call("type", vec![variable.clone()]), lua_str("string")),
+                registered.clone(),
+            );
+            if key != "seal" {
+                valid = lua_and(
+                    valid,
+                    lua_eq(
+                        lua_field(registered, "set"),
+                        lua_str(if key == "edition" {
+                            "Edition"
+                        } else {
+                            "Enhanced"
+                        }),
+                    ),
+                );
+            }
+            lua_and(valid, variable)
+        });
     }
+    match value.trim() {
+        "" | "none" => None,
+        "random" if matches!(key, "rank" | "suit") => None,
+        "pool" if matches!(key, "rank" | "suit") => playing_card_pool(effect, key),
+        "random" => Some(lua_call(
+            format!("SMODS.poll_{key}"),
+            vec![lua_table(vec![
+                ("key", lua_str(format!("create_playing_card_{key}"))),
+                ("guaranteed", lua_bool(true)),
+            ])],
+        )),
+        specific => Some(lua_str(match key {
+            "edition" => normalize_edition_key(specific, &ctx.mod_prefix),
+            "enhancement"
+                if matches!(
+                    specific,
+                    "bonus" | "mult" | "wild" | "glass" | "steel" | "stone" | "gold" | "lucky"
+                ) =>
+            {
+                format!("m_{specific}")
+            }
+            "seal" => match specific {
+                "gold" => "Gold".into(),
+                "red" => "Red".into(),
+                "blue" => "Blue".into(),
+                "purple" => "Purple".into(),
+                _ => specific.into(),
+            },
+            _ => specific.into(),
+        })),
+    }
+}
+
+fn playing_card_pool(effect: &EffectDef, property: &str) -> Option<Expr> {
+    let param = effect.params.get(&format!("{property}_pool"))?;
+    let values = match param {
+        ParamValue::Typed(t) => t.value.as_array()?.clone(),
+        // Legacy checkbox arrays are passed through the frontend mapper as JSON strings.
+        ParamValue::Str(s) => serde_json::from_str::<Vec<serde_json::Value>>(s).ok()?,
+        _ => return None,
+    };
+    let order: &[&str] = if property == "rank" {
+        &[
+            "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A",
+        ]
+    } else {
+        &["Spades", "Hearts", "Diamonds", "Clubs"]
+    };
+    let mut entries = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        let selected = match value {
+            serde_json::Value::Bool(true) => order.get(index).copied(),
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
+        if let Some(selected) = selected {
+            entries.push(TableEntry::Value(lua_str(selected)));
+        }
+    }
+    // An unselected pool falls back to the ordinary random rank or suit.
+    if entries.is_empty() {
+        return None;
+    }
+    Some(lua_call(
+        "pseudorandom_element",
+        vec![
+            lua_table_raw(entries),
+            lua_call(
+                "pseudoseed",
+                vec![lua_str(format!("create_playing_card_{property}_pool"))],
+            ),
+        ],
+    ))
 }
 
 /// Create Tag effect: creates a random or specific tag.
-pub fn create_tag(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
+pub fn create_tag(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     let mode = get_str_param(effect, "tag_type").unwrap_or("random");
     let specific = get_str_param(effect, "specific_tag").unwrap_or("tag_double");
+    let index = ctx.next_effect_count("create_tag");
+    let created = format!("created_tag{index}");
+    let key_name = format!("tag_key{index}");
+    let key = lua_ident(&key_name);
+    let registered = |key: Expr| lua_index(lua_raw_expr("G.P_TAGS"), key);
+    let add = |key: Expr| {
+        vec![
+            lua_expr_stmt(lua_call("add_tag", vec![lua_call("Tag", vec![key])])),
+            lua_assign(lua_ident(&created), lua_bool(true)),
+        ]
+    };
+    let mut pre_return = vec![lua_local(&created, lua_bool(false))];
 
-    let stmt = if mode == "random" {
-        lua_raw_stmt(
-            "local selected_tag = pseudorandom_element(G.P_TAGS, pseudoseed('create_tag')).key; local tag = Tag(selected_tag); tag:set_ability(); add_tag(tag)",
-        )
-    } else {
-        lua_raw_stmt(format!(
-            "local tag = Tag('{}'); tag:set_ability(); add_tag(tag)",
-            specific
-        ))
+    match mode {
+        "random" => {
+            let pool_name = format!("tag_pool{index}");
+            pre_return.push(lua_local(
+                &pool_name,
+                lua_call(
+                    "SMODS.get_clean_pool",
+                    vec![lua_str("Tag"), lua_nil(), lua_nil(), lua_str("create_tag")],
+                ),
+            ));
+            pre_return.push(lua_if(
+                lua_gt(lua_len(lua_ident(&pool_name)), lua_int(0)),
+                vec![
+                    lua_local(
+                        &key_name,
+                        lua_call(
+                            "pseudorandom_element",
+                            vec![
+                                lua_ident(&pool_name),
+                                lua_call("pseudoseed", vec![lua_str("create_tag")]),
+                            ],
+                        ),
+                    ),
+                    lua_if(lua_and(key.clone(), registered(key.clone())), add(key)),
+                ],
+            ));
+        }
+        "keyvar" => {
+            let variable = get_str_param(effect, "variable").unwrap_or("");
+            if ctx.has_user_var(variable) {
+                pre_return.push(lua_local(&key_name, ctx.user_var_expr(variable)));
+                pre_return.push(lua_if(
+                    lua_eq(lua_call("type", vec![key.clone()]), lua_str("string")),
+                    vec![
+                        lua_if(
+                            lua_and(
+                                lua_not(registered(key.clone())),
+                                lua_neq(
+                                    lua_call(
+                                        "string.sub",
+                                        vec![key.clone(), lua_int(1), lua_int(4)],
+                                    ),
+                                    lua_str("tag_"),
+                                ),
+                            ),
+                            vec![lua_assign(
+                                key.clone(),
+                                Expr::BinOp(
+                                    Box::new(lua_str("tag_")),
+                                    BinOp::Concat,
+                                    Box::new(key.clone()),
+                                ),
+                            )],
+                        ),
+                        lua_if(registered(key.clone()), add(key)),
+                    ],
+                ));
+            }
+        }
+        _ => {
+            let key = lua_str(normalize_tag_key(specific));
+            pre_return.push(lua_if(registered(key.clone()), add(key)));
+        }
     };
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![stmt],
+        pre_return,
         config_vars: vec![],
-        message: Some(lua_str("Created Tag!")),
+        message: Some(lua_and(lua_ident(created), lua_str("Created Tag!"))),
         colour: Some(lua_raw_expr("G.C.GREEN")),
 
         segment_id: None,
@@ -654,6 +916,17 @@ fn normalize_joker_key(key: &str) -> String {
         key.to_string()
     } else {
         format!("j_{}", key)
+    }
+}
+
+fn normalize_tag_key(key: &str) -> String {
+    let key = key.trim();
+    match key {
+        "uncommon" | "rare" | "negative" | "foil" | "holo" | "polychrome" | "investment"
+        | "voucher" | "boss" | "standard" | "charm" | "meteor" | "buffoon" | "handy"
+        | "garbage" | "ethereal" | "coupon" | "double" | "juggle" | "d_six" | "top_up" | "skip"
+        | "orbital" | "economy" => format!("tag_{key}"),
+        _ => key.to_owned(),
     }
 }
 

@@ -141,7 +141,7 @@ pub fn compile_effect(
         "juice_up_card" => misc::juice_up_card(effect, ctx),
 
         // --------------- Game State ---------------
-        "level_up_hand" => misc::level_up_hand(effect, ctx),
+        "level_up_hand" => misc::level_up_hand(effect, ctx, trigger),
         "edit_blind_size" => misc::edit_blind_size(effect, ctx),
         "set_ante" => misc::set_ante(effect, ctx),
         "disable_boss_blind" => misc::disable_boss_blind(effect, ctx),

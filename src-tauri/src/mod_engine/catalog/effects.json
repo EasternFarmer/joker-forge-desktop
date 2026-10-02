@@ -27,6 +27,10 @@
         "label": "Hand Selection",
         "options": [
           {
+            "value": "all",
+            "label": "All Hands"
+          },
+          {
             "value": "current",
             "label": "Current Hand (Played/Discarded)"
           },
@@ -2882,7 +2886,7 @@
             "label": "Add To Hand"
           }
         ],
-        "default": ["deck"]
+        "default": "deck"
       },
       {
         "id": "suit",

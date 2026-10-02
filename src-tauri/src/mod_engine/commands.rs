@@ -662,6 +662,195 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn frontend_planet_parameters_reach_use_preview_and_export() {
+        let input = serde_json::json!({
+            "objectKey": "planet_test", "name": "Planet Test", "description": "Level up Flush", "set": "Planet",
+            "rules": [{ "id": "planet_rule", "trigger": "card_used", "effects": [{
+                "id": "level_hand", "type": "level_up_hand", "params": {
+                    "hand_selection": { "value": "specific", "valueType": "string" },
+                    "specific_hand": { "value": "Flush", "valueType": "string" },
+                    "value": { "value": "3", "valueType": "number" }
+                }
+            }] }]
+        });
+        let preview = compile_item_from_data_with_segments(
+            "consumable".into(), input.clone(), None, None, "mod".into(), true, None,
+        ).unwrap();
+        let exported = compile_item_from_data(
+            "consumable".into(), input, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for code in [&preview.code, &exported] {
+            for expected in ["use = function(self, card, area, copier)", "local used_card = copier or card", "level_hand0 = 'Flush'", "level_amount0 = 3", "SMODS.smart_level_up_hand(used_card, level_hand0, false, card.ability.extra.level_amount0)"] {
+                assert!(code.contains(expected), "Missing {expected}: {code}");
+            }
+            assert!(!code.contains("context"), "Use callbacks have no context argument: {code}");
+        }
+        assert!(preview.segments.iter().any(|segment| segment.id == "effect:planet_rule:level_hand"));
+        let preview = serde_json::to_value(preview).unwrap();
+        let bindings = preview["fieldBindings"].as_array().unwrap();
+        for (key, expected) in [("specific_hand", serde_json::json!("Flush")), ("value", serde_json::json!(3))] {
+            assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "effects", 0, "params", key, "value"]) && binding["originalValue"] == expected));
+        }
+    }
+
+    #[test]
+    fn legacy_planet_parameters_and_trigger_export_as_a_safe_use_hook() {
+        for (hand, expected) in [("Pair", "level_hand0 = 'Pair'"), ("all", "for _, level_hand0 in ipairs(G.handlist) do")] {
+            let input = serde_json::json!({
+                "objectKey": "legacy_planet", "name": "Legacy Planet", "description": "Level up hands", "set": "Planet",
+                "rules": [{ "id": "planet_rule", "trigger": "consumable_used", "effects": [{
+                    "id": "level_hand", "type": "level_up_hand", "params": { "hand_type": hand, "levels": 2 }
+                }] }]
+            });
+            let code = compile_item_from_data(
+                "consumable".into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for expected in [expected, "use = function(self, card, area, copier)", "level_amount0 = 2", "SMODS.smart_level_up_hand(used_card, level_hand0, false, card.ability.extra.level_amount0)"] {
+                assert!(code.contains(expected), "Missing {expected}: {code}");
+            }
+            assert!(!code.contains("context"), "{code}");
+        }
+    }
+
+    #[test]
+    fn frontend_playing_card_properties_reach_preview_and_export() {
+        for location in ["deck", "hand"] {
+            let input = serde_json::json!({
+                "objectKey": "card_test", "name": "Card Test", "description": "Create a card",
+                "cost": 4, "rarity": "common",
+                "rules": [{ "id": "card_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "create_card", "type": "create_playing_card", "params": {
+                        "location": { "value": location, "valueType": "string" },
+                        "rank": { "value": "10", "valueType": "string" },
+                        "suit": { "value": "Hearts", "valueType": "string" },
+                        "enhancement": { "value": "m_lucky", "valueType": "string" },
+                        "seal": { "value": "Blue", "valueType": "string" },
+                        "edition": { "value": "rainbow", "valueType": "string" }
+                    }
+                }] }]
+            });
+            let preview = compile_item_from_data_with_segments(
+                "joker".into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                "joker".into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for code in [&preview.code, &exported] {
+                for property in [
+                    format!("area = G.{location}"), "rank = '10'".into(), "suit = 'Hearts'".into(),
+                    "enhancement = 'm_lucky'".into(), "seal = 'Blue'".into(), "edition = 'e_mod_rainbow'".into(),
+                ] { assert!(code.contains(&property), "Missing {property}: {code}"); }
+                assert_eq!(code.matches("SMODS.add_card(").count(), 1);
+                assert!(!code.contains(":emplace("));
+            }
+            assert!(preview.segments.iter().any(|segment| segment.id == "effect:card_rule:create_card"));
+            for key in ["rank", "suit", "enhancement", "seal"] {
+                let path = serde_json::json!(["rules", 0, "effects", 0, "params", key, "value"]);
+                assert!(preview.field_bindings.iter().any(|binding| serde_json::json!(binding.source_path) == path));
+            }
+        }
+    }
+
+    #[test]
+    fn frontend_playing_card_pools_and_variables_use_live_values() {
+        let consumable = serde_json::json!({
+            "objectKey": "cards_test", "name": "Cards Test", "description": "Create cards", "set": "Tarot",
+            "rules": [{ "id": "card_rule", "trigger": "card_used", "effects": [{
+                "id": "create_cards", "type": "create_playing_cards", "params": {
+                    "count": { "value": "3", "valueType": "number" },
+                    "rank": { "value": "pool", "valueType": "string" },
+                    "rank_pool": { "value": [false, false, false, false, false, false, false, false, true, false, false, false, true], "valueType": "checkbox" },
+                    "suit": { "value": "pool", "valueType": "string" },
+                    "suit_pool": { "value": [false, true, false, true], "valueType": "checkbox" }
+                }
+            }] }]
+        });
+        let code = compile_item_from_data(
+            "consumable".into(), consumable, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for expected in ["area = G.hand", "create_cards_count0 = 3", "'10'", "'A'", "'Hearts'", "'Clubs'"] {
+            assert!(code.contains(expected), "Missing {expected}: {code}");
+        }
+        assert!(!code.contains("'Spades'") && !code.contains("'Diamonds'"));
+        assert_eq!(code.matches("playing_card_added = true").count(), 1);
+
+        let joker = serde_json::json!({
+            "objectKey": "variable_test", "name": "Variable Test", "description": "Create a card", "rarity": "common", "cost": 4,
+            "userVariables": [
+                { "name": "chosen_suit", "type": "suit", "initialSuit": "Hearts" },
+                { "name": "chosen_rank", "type": "rank", "initialRank": "Ace" },
+                { "name": "chosen_edition", "type": "key", "initialKey": "e_foil" }
+            ],
+            "rules": [{ "id": "card_rule", "trigger": "blind_selected", "effects": [{
+                "id": "create_card", "type": "create_playing_card", "params": {
+                    "suit": { "value": "chosen_suit", "valueType": "user_var" },
+                    "rank": { "value": "chosen_rank", "valueType": "user_var" },
+                    "edition": { "value": "chosen_edition", "valueType": "user_var" }
+                }
+            }] }]
+        });
+        let code = compile_item_from_data(
+            "joker".into(), joker, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for expected in ["G.GAME.current_round.chosen_suit_card.suit", "G.GAME.current_round.chosen_rank_card.rank", "G.P_CENTERS[card.ability.extra.chosen_edition]", "G.P_CENTERS[card.ability.extra.chosen_edition].set == 'Edition'"] {
+            assert!(code.contains(expected), "Missing {expected}: {code}");
+        }
+    }
+
+    #[test]
+    fn frontend_tag_selection_uses_registered_keys_in_preview_and_export() {
+        for item_type in ["joker", "deck", "consumable", "voucher", "enhancement"] {
+            let input = serde_json::json!({
+                "objectKey": "tag_test", "name": "Tag Test", "description": "Create a Negative Tag",
+                "cost": 4, "rarity": "common", "set": "Tarot",
+                "rules": [{ "id": "tag_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "create_negative", "type": "create_tag", "params": {
+                        "tag_type": { "value": "specific", "valueType": "string" },
+                        "specific_tag": { "value": "negative", "valueType": "string" }
+                    }
+                }] }]
+            });
+            let preview = compile_item_from_data_with_segments(
+                item_type.into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for code in [&preview.code, &exported] {
+                assert!(code.contains("'tag_negative'"), "{item_type}: {code}");
+                assert!(!code.contains("Tag('negative')"));
+                assert!(!code.contains("tag:set_ability()"));
+            }
+            assert!(preview.segments.iter().any(|segment| segment.id == "effect:tag_rule:create_negative"));
+        }
+    }
+
+    #[test]
+    fn frontend_tag_key_variable_reads_the_current_object_scope() {
+        for (item_type, variable_path) in [
+            ("joker", "card.ability.extra.chosen_tag"),
+            ("deck", "self.config.extra.chosen_tag"),
+            ("consumable", "card.ability.extra.chosen_tag"),
+        ] {
+            let input = serde_json::json!({
+                "objectKey": "tag_variable", "name": "Tag Variable", "description": "Create the chosen tag",
+                "cost": 4, "rarity": "common", "set": "Tarot",
+                "userVariables": [{ "name": "chosen_tag", "type": "key", "initialKey": "tag_negative" }],
+                "rules": [{ "id": "tag_rule", "trigger": "blind_selected", "effects": [{
+                    "id": "from_variable", "type": "create_tag", "params": {
+                        "tag_type": { "value": "keyvar" }, "variable": { "value": "chosen_tag" }
+                    }
+                }] }]
+            });
+            let code = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            assert!(code.contains(variable_path), "{item_type}: {code}");
+            assert!(!code.contains("'tag_double'"));
+        }
+    }
+
+    #[test]
     fn preview_command_returns_editable_rule_fields_in_ipc_contract() {
         let input = serde_json::json!({
             "objectKey": "preview", "name": "Preview", "description": "Test", "cost": 4, "rarity": "common",

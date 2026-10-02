@@ -3,7 +3,7 @@ use crate::compiler::effects::utils::{get_str_default, get_str_opt, is_literal_o
 use crate::compiler::effects::EffectOutput;
 use crate::compiler::values::resolve_config_value;
 use crate::lua_ast::*;
-use crate::types::EffectDef;
+use crate::types::{EffectDef, ObjectType, ParamValue};
 
 /// Show Message effect: displays a status message.
 pub fn show_message(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
@@ -222,31 +222,302 @@ pub fn retrigger(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
 }
 
 /// Level Up Hand effect.
-pub fn level_up_hand(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let hand = effect.params.get("hand").and_then(|v| v.as_str());
-    let resolved = crate::compiler::values::resolve_config_value(
-        &effect.params,
-        "amount",
-        ctx,
-        "level_amount",
-    );
-    let hand_expr = hand
-        .map(|h| format!("'{}'", h))
-        .unwrap_or_else(|| "context.scoring_name".to_string());
-
-    let level_call = lua_raw_stmt(format!(
-        "SMODS.smart_level_up_hand(card, {}, false, {})",
-        hand_expr, resolved.lua_str
-    ));
+pub fn level_up_hand(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
+    let index = ctx.next_effect_count("level_hand_target");
+    let target_name = format!("level_hand{index}");
+    let target = lua_ident(&target_name);
+    let success_name = format!("levelled_hand{index}");
+    let selection_param = effect.params.get("hand_selection");
+    let legacy_hand = get_str_opt(effect, "hand").or_else(|| get_str_opt(effect, "hand_type"));
+    let typed_variable = matches!(selection_param, Some(ParamValue::Typed(t))
+        if crate::compiler::values::is_user_variable_type(&t.value_type));
+    let modern_selection = selection_param.and_then(ParamValue::as_str);
+    // Older builder versions added defaults without migrating the legacy properties.
+    let selection = if !typed_variable && matches!(modern_selection, None | Some("current")) {
+        legacy_hand.as_deref().unwrap_or("current")
+    } else {
+        modern_selection.unwrap_or("current")
+    };
+    let amount_keys = if is_literal_one_param(effect, "value") {
+        ["amount", "levels", "value"]
+    } else {
+        ["value", "amount", "levels"]
+    };
+    let amount_key = amount_keys
+        .into_iter()
+        .find(|key| effect.params.contains_key(*key))
+        .unwrap_or("value");
+    let mut amount = resolve_config_value(&effect.params, amount_key, ctx, "level_amount").expr;
+    if trigger == "card_used" {
+        scope_use_level_amount(&mut amount, &target_name);
+    }
+    let source = if trigger == "card_used" && ctx.object_type == ObjectType::Consumable {
+        lua_ident("used_card")
+    } else if trigger != "card_used" && ctx.object_type == ObjectType::Joker {
+        lua_or(lua_path(&["context", "blueprint_card"]), lua_ident("card"))
+    } else {
+        lua_ident("card")
+    };
+    let hand_data = |hand: Expr| lua_index(lua_raw_expr("G.GAME.hands"), hand);
+    let level = |hand: Expr| {
+        vec![
+            lua_expr_stmt(lua_call(
+                "SMODS.smart_level_up_hand",
+                vec![source.clone(), hand, lua_bool(false), amount.clone()],
+            )),
+            lua_assign(lua_ident(&success_name), lua_bool(true)),
+        ]
+    };
+    let mut pre_return = vec![lua_local(&success_name, lua_bool(false))];
+    let is_variable = typed_variable
+        || matches!(selection_param, Some(ParamValue::Str(name)) if ctx.has_user_var(name));
+    if selection == "all" && !is_variable {
+        pre_return.push(Stmt::ForIn {
+            vars: vec!["_".into(), target_name],
+            iterators: vec![lua_call("ipairs", vec![lua_raw_expr("G.handlist")])],
+            body: vec![lua_if(hand_data(target.clone()), level(target))],
+        });
+    } else {
+        pre_return.push(lua_local(&target_name, lua_nil()));
+        if is_variable {
+            if ctx.has_user_var(selection) {
+                let record = lua_field(
+                    lua_raw_expr("G.GAME.current_round"),
+                    format!("{selection}_hand"),
+                );
+                pre_return.push(lua_assign(
+                    target.clone(),
+                    lua_or(
+                        lua_and(lua_raw_expr("G.GAME.current_round"), record),
+                        ctx.user_var_expr(selection),
+                    ),
+                ));
+            }
+        } else {
+            match selection {
+                "current" => {
+                    if trigger != "card_used" {
+                        pre_return.push(lua_assign(
+                            target.clone(),
+                            lua_path(&["context", "scoring_name"]),
+                        ));
+                        pre_return.push(lua_if(
+                            lua_and(
+                                lua_not(target.clone()),
+                                lua_and(
+                                    lua_path(&["context", "full_hand"]),
+                                    lua_gt(
+                                        lua_len(lua_path(&["context", "full_hand"])),
+                                        lua_int(0),
+                                    ),
+                                ),
+                            ),
+                            vec![lua_assign(
+                                target.clone(),
+                                lua_call(
+                                    "G.FUNCS.get_poker_hand_info",
+                                    vec![lua_path(&["context", "full_hand"])],
+                                ),
+                            )],
+                        ));
+                    }
+                    pre_return.push(lua_assign(
+                        target.clone(),
+                        lua_or(
+                            target.clone(),
+                            lua_or(
+                                lua_raw_expr("G.GAME.last_hand_played"),
+                                lua_str("High Card"),
+                            ),
+                        ),
+                    ));
+                }
+                "random" | "pool" | "most" | "least" => {
+                    let pool_name = format!("level_hand_pool{index}");
+                    let tally_name = format!("level_hand_tally{index}");
+                    let random = matches!(selection, "random" | "pool");
+                    pre_return.push(lua_local(
+                        if random { &pool_name } else { &tally_name },
+                        if random {
+                            lua_table_raw(vec![])
+                        } else {
+                            lua_nil()
+                        },
+                    ));
+                    let candidates = if selection == "pool" {
+                        level_hand_pool(effect)
+                    } else {
+                        lua_raw_expr("G.handlist")
+                    };
+                    let candidate = lua_ident("hand_name");
+                    let data = lua_ident("hand_data");
+                    let selected = if random {
+                        vec![lua_expr_stmt(lua_call(
+                            "table.insert",
+                            vec![lua_ident(&pool_name), candidate.clone()],
+                        ))]
+                    } else {
+                        let played = lua_or(lua_field(data.clone(), "played"), lua_int(0));
+                        let better = if selection == "most" {
+                            lua_gt(played.clone(), lua_ident(&tally_name))
+                        } else {
+                            lua_lt(played.clone(), lua_ident(&tally_name))
+                        };
+                        vec![lua_if(
+                            lua_or(lua_not(lua_ident(&tally_name)), better),
+                            vec![
+                                lua_assign(target.clone(), candidate.clone()),
+                                lua_assign(lua_ident(&tally_name), played),
+                            ],
+                        )]
+                    };
+                    pre_return.push(Stmt::ForIn {
+                        vars: vec!["_".into(), "hand_name".into()],
+                        iterators: vec![lua_call("ipairs", vec![candidates])],
+                        body: vec![
+                            lua_local("hand_data", hand_data(candidate.clone())),
+                            lua_if(
+                                lua_and(
+                                    data,
+                                    lua_call("SMODS.is_poker_hand_visible", vec![candidate]),
+                                ),
+                                selected,
+                            ),
+                        ],
+                    });
+                    if random {
+                        pre_return.push(lua_if(
+                            lua_gt(lua_len(lua_ident(&pool_name)), lua_int(0)),
+                            vec![lua_assign(
+                                target.clone(),
+                                lua_call(
+                                    "pseudorandom_element",
+                                    vec![
+                                        lua_ident(&pool_name),
+                                        lua_call("pseudoseed", vec![lua_str("level_up_hand")]),
+                                    ],
+                                ),
+                            )],
+                        ));
+                    }
+                }
+                "specific" => pre_return.push(lua_assign(
+                    target.clone(),
+                    lua_str(
+                        get_str_opt(effect, "specific_hand")
+                            .or(legacy_hand)
+                            .unwrap_or_else(|| "High Card".into()),
+                    ),
+                )),
+                specific => pre_return.push(lua_assign(target.clone(), lua_str(specific))),
+            }
+        }
+        pre_return.push(lua_if(
+            lua_and(
+                lua_eq(lua_call("type", vec![target.clone()]), lua_str("string")),
+                hand_data(target.clone()),
+            ),
+            level(target),
+        ));
+    }
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![level_call],
+        pre_return,
         config_vars: vec![],
-        message: Some(lua_call("localize", vec![lua_str("k_level_up_ex")])),
+        message: Some(lua_and(
+            lua_ident(success_name),
+            lua_call("localize", vec![lua_str("k_level_up_ex")]),
+        )),
         colour: Some(lua_raw_expr("G.C.GREEN")),
-
         segment_id: None,
+    }
+}
+
+fn level_hand_pool(effect: &EffectDef) -> Expr {
+    let parse_pool = |param: Option<&ParamValue>| match param {
+        Some(ParamValue::Typed(t)) => t.value.as_array().cloned().unwrap_or_default(),
+        Some(ParamValue::Str(s)) => {
+            serde_json::from_str::<Vec<serde_json::Value>>(s).unwrap_or_default()
+        }
+        _ => vec![],
+    };
+    let modern = effect.params.get("poker_hand_pool");
+    let mut values = parse_pool(modern);
+    let legacy = effect.params.get("pokerhand_pool");
+    let use_legacy = legacy.is_some()
+        && (modern.is_none() || values.iter().all(|value| value == &serde_json::Value::Bool(false)));
+    if use_legacy {
+        values = parse_pool(legacy);
+    }
+    let mut order = [
+        "High Card",
+        "Pair",
+        "Two Pair",
+        "Three of a Kind",
+        "Straight",
+        "Flush",
+        "Full House",
+        "Four of a Kind",
+        "Five of a Kind",
+        "Straight Flush",
+        "Flush House",
+        "Flush Five",
+    ];
+    if use_legacy {
+        // The legacy checkbox list used a different order for its final four hands.
+        order[8..].copy_from_slice(&[
+            "Straight Flush",
+            "Five of a Kind",
+            "Flush Five",
+            "Flush House",
+        ]);
+    }
+    lua_table_raw(
+        values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let selected = match value {
+                    serde_json::Value::Bool(true) => order.get(index).copied(),
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+                    _ => None,
+                }?;
+                Some(TableEntry::Value(lua_str(selected)))
+            })
+            .collect(),
+    )
+}
+
+/// Context-dependent numeric game variables still need valid data inside a use hook.
+/// At use time the selected hand supplies its stats, and highlighted cards supply counts.
+fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
+    match expr {
+        Expr::Raw(code) => {
+            *code = code
+                .replace("context.scoring_name", target_name)
+                .replace(
+                    "context.full_hand",
+                    "((G.hand and G.hand.highlighted) or {})",
+                )
+                .replace(
+                    "context.scoring_hand",
+                    "((G.hand and G.hand.highlighted) or {})",
+                );
+        }
+        Expr::FieldBinding(inner, _) | Expr::UnaryOp(_, inner) => {
+            scope_use_level_amount(inner, target_name)
+        }
+        Expr::BinOp(lhs, _, rhs) => {
+            scope_use_level_amount(lhs, target_name);
+            scope_use_level_amount(rhs, target_name);
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                scope_use_level_amount(arg, target_name);
+            }
+        }
+        _ => {}
     }
 }
 
