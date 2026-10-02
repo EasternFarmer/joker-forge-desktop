@@ -115,6 +115,7 @@ const AUTO_OPEN_NEW_ITEM_DIALOG_KEY = "joker_forge_auto_open_new_item_dialog";
 const DESCRIPTION_VARIABLE_PLACEHOLDERS_KEY =
   "joker_forge_description_variable_placeholders";
 const RULE_BUILDER_SETTINGS_KEY = "joker_forge_rule_builder_settings";
+const RULE_BUILDER_CANVAS_NAVIGATION_VERSION = 1;
 const THEME_PREFERENCE_KEY = "joker_forge_theme_preference";
 const THEME_CHANGE_EVENT = "joker_forge_theme_change";
 const STORAGE_ERROR_ALERT_THROTTLE_MS = 4000;
@@ -277,7 +278,7 @@ export const DEFAULT_RULE_BUILDER_SETTINGS: RuleBuilderSettings = {
   confirmDeleteRule: false,
   confirmDeleteBlock: false,
   enableDragBoxSelection: true,
-  enableLeftMousePan: false,
+  enableLeftMousePan: true,
   enableRightMousePan: false,
   enableMiddleMousePan: true,
   enableWheelZoom: true,
@@ -2205,7 +2206,23 @@ export const getRuleBuilderSettings = (): RuleBuilderSettings => {
   const stored = window.localStorage.getItem(RULE_BUILDER_SETTINGS_KEY);
   if (!stored) return DEFAULT_RULE_BUILDER_SETTINGS;
   try {
-    return sanitizeRuleBuilderSettings(JSON.parse(stored));
+    const parsed = JSON.parse(stored);
+    const settings = sanitizeRuleBuilderSettings(parsed);
+    if (
+      (parsed?.canvasNavigationVersion ?? 0) <
+      RULE_BUILDER_CANVAS_NAVIGATION_VERSION
+    ) {
+      // Apply the new navigation default once, preserving later explicit choices.
+      settings.enableLeftMousePan = true;
+      window.localStorage.setItem(
+        RULE_BUILDER_SETTINGS_KEY,
+        JSON.stringify({
+          ...settings,
+          canvasNavigationVersion: RULE_BUILDER_CANVAS_NAVIGATION_VERSION,
+        }),
+      );
+    }
+    return settings;
   } catch {
     return DEFAULT_RULE_BUILDER_SETTINGS;
   }
@@ -2223,7 +2240,13 @@ export const setRuleBuilderSettings = (
       ...(settings.shortcuts ?? {}),
     },
   });
-  window.localStorage.setItem(RULE_BUILDER_SETTINGS_KEY, JSON.stringify(merged));
+  window.localStorage.setItem(
+    RULE_BUILDER_SETTINGS_KEY,
+    JSON.stringify({
+      ...merged,
+      canvasNavigationVersion: RULE_BUILDER_CANVAS_NAVIGATION_VERSION,
+    }),
+  );
 };
 
 export const getJokerforgeAutoSaveDownloadsEnabled = (): boolean => {
