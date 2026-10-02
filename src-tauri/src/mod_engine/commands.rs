@@ -1856,33 +1856,6 @@ pub fn ensure_balatro_mod_setup(
     let game_dir =
         resolved_game.ok_or_else(|| "Unable to find Balatro game folder.".to_string())?;
 
-    let version_dll_target = game_dir.join("version.dll");
-    if let Some(parent) = version_dll_target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-    }
-    if !version_dll_target.exists() {
-        let version_dll_source = resolve_bundled_any(
-            &app,
-            &[
-                "other/version.dll",
-                "_up_/public/other/version.dll",
-                "version.dll",
-            ],
-        )
-        .ok_or_else(|| {
-            "Missing bundled Lovely file: expected one of `other/version.dll`, `_up_/public/other/version.dll`, or `version.dll`".to_string()
-        })?;
-        fs::copy(&version_dll_source, &version_dll_target).map_err(|e| {
-            format!(
-                "Failed to install Lovely (copy {} to {}): {}",
-                version_dll_source.display(),
-                version_dll_target.display(),
-                e
-            )
-        })?;
-    }
-
     let mods_dir = resolve_mods_dir_from_appdata(&appdata_root);
     if mods_dir.exists() && !mods_dir.is_dir() {
         return Err(format!(

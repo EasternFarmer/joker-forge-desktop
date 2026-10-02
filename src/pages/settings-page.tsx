@@ -1265,7 +1265,7 @@ export default function SettingsPage() {
                       </Button>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
-                      Balatro game folder (contains `Balatro.exe`). Lovely `version.dll` is installed here.
+                      Balatro game folder (contains `Balatro.exe`). Used to launch the game after exporting.
                     </p>
                   </>
                 )}

@@ -56,6 +56,7 @@ impl ObjectType {
             // Deck config variables live on the back definition config, not card ability.
             ObjectType::Deck => "self.config.extra",
             ObjectType::Seal => "card.ability.seal.extra",
+            ObjectType::Edition => "card.edition.extra",
             _ => "card.ability.extra",
         }
     }
