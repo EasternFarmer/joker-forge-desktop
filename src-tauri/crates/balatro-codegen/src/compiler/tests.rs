@@ -11,6 +11,19 @@ fn preview_test_joker(rules: serde_json::Value) -> JokerDef {
     .unwrap()
 }
 
+fn preview_test_planet(params: serde_json::Value) -> ConsumableDef {
+    serde_json::from_value(serde_json::json!({
+        "key": "planet_test", "name": "Planet Test", "description": ["Test"],
+        "set": "Planet", "cost": 3, "atlas": "CustomConsumables",
+        "pos": { "x": 0, "y": 0 }, "rules": [{
+            "id": "use", "trigger": "card_used", "effects": [{
+                "id": "level", "effect_type": "level_up_hand", "params": params
+            }]
+        }]
+    }))
+    .unwrap()
+}
+
 fn field_binding_text<'a>(code: &'a str, binding: &LuaFieldBinding) -> &'a str {
     assert_eq!(binding.start_line, binding.end_line);
     let line = code.lines().nth(binding.start_line - 1).unwrap();
@@ -871,6 +884,248 @@ fn create_playing_card_static_properties_remain_editable_in_live_preview() {
             .unwrap_or_else(|| panic!("Missing editable {key} property in {code}"));
         assert_eq!(binding.original_value, serde_json::json!(value));
         assert_eq!(field_binding_text(&code, binding), format!("'{value}'"));
+    }
+}
+
+#[test]
+fn level_up_hand_planet_use_respects_catalog_and_legacy_parameters_without_context() {
+    for (params, expected_hand, expected_amount, legacy_trigger) in [
+        (serde_json::json!({"hand_selection": "current", "value": 3}), None, 3, false),
+        (serde_json::json!({
+            "hand_selection": {"value": "current", "valueType": "select"},
+            "value": {"value": "3", "valueType": "number"}
+        }), None, 3, false),
+        (serde_json::json!({
+            "hand_selection": "specific", "specific_hand": "Two Pair", "value": 4,
+            "hand": "Pair", "amount": 8, "levels": 9
+        }), Some("Two Pair"), 4, false),
+        (serde_json::json!({"hand": "Pair", "amount": 2}), Some("Pair"), 2, false),
+        (serde_json::json!({"hand_type": "Three of a Kind", "levels": 5}), Some("Three of a Kind"), 5, true),
+        (serde_json::json!({
+            "hand_selection": "current", "value": 1, "hand_type": "Pair", "levels": 3
+        }), Some("Pair"), 3, true),
+        (serde_json::json!({
+            "hand_selection": {"value": "current", "valueType": "select"},
+            "value": {"value": "1", "valueType": "number"}, "hand": "Pair", "amount": 3
+        }), Some("Pair"), 3, false),
+    ] {
+        let mut planet = preview_test_planet(params);
+        if legacy_trigger {
+            planet.rules[0].trigger = "consumable_used".into();
+        }
+        let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+        assert!(code.contains("use = function(self, card, area, copier)"), "{code}");
+        assert!(!code.contains("context"), "Consumable use has no context argument: {code}");
+        assert!(code.contains("local used_card = copier or card"), "The copied consumable must be the animation source: {code}");
+        assert!(code.contains("SMODS.smart_level_up_hand(used_card,"), "{code}");
+        assert!(code.contains(&format!("level_amount0 = {expected_amount}")), "Selected levels must reach config: {code}");
+        assert!(code.contains("G.GAME.hands["), "Unregistered targets must be skipped: {code}");
+        if let Some(hand) = expected_hand {
+            assert!(code.contains(&format!("'{hand}'")), "Wrong selected poker hand: {code}");
+        } else {
+            assert!(code.contains("G.GAME.last_hand_played") && code.contains("'High Card'"), "Current-hand use needs a safe fallback: {code}");
+        }
+    }
+}
+
+#[test]
+fn level_up_hand_current_calculation_resolves_discarded_cards_and_scoring_context() {
+    for trigger in ["hand_played", "hand_discarded", "card_discarded"] {
+        let joker = preview_test_joker(serde_json::json!([{
+            "id": "current", "trigger": trigger, "effects": [{
+                "id": "level", "effect_type": "level_up_hand", "params": {
+                    "hand_selection": "current", "value": 2
+                }
+            }]
+        }]));
+        let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+        assert!(code.contains("context.scoring_name"), "Played hands should use their scoring name: {code}");
+        assert!(code.contains("G.FUNCS.get_poker_hand_info(context.full_hand)"), "Discarded cards need an evaluated hand name: {code}");
+        assert!(code.contains("G.GAME.last_hand_played") && code.contains("'High Card'"), "{code}");
+        assert!(code.contains("G.GAME.hands["), "{code}");
+    }
+}
+
+#[test]
+fn level_up_hand_selection_modes_use_ordered_hands() {
+    for mode in ["random", "most", "least", "all"] {
+        let planet = preview_test_planet(serde_json::json!({
+            "hand_selection": {"value": mode, "valueType": "select"}, "value": 2
+        }));
+        let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+        assert!(!code.contains("context"), "Selection in consumable use must not require context: {code}");
+        assert!(code.contains("ipairs(") && code.contains("G.handlist"), "Ordered hands preserve modded hands and stable ties: {code}");
+        if mode != "all" {
+            assert!(code.contains("SMODS.is_poker_hand_visible("), "Visibility may be a function on modded poker hands: {code}");
+        }
+        assert!(code.contains("G.GAME.hands["), "Unknown hand keys must be guarded: {code}");
+        assert!(!code.contains("pairs(G.GAME.hands)"), "Unordered iteration makes tied play counts unstable: {code}");
+        match mode {
+            "random" => assert!(code.contains("pseudorandom_element("), "{code}"),
+            "most" => assert!(code.contains(".played") && code.contains(" > "), "{code}"),
+            "least" => assert!(code.contains(".played") && code.contains(" < "), "{code}"),
+            "all" => {
+                assert!(index_of(&code, "ipairs(G.handlist)") < index_of(&code, "SMODS.smart_level_up_hand(used_card,"), "All mode should level each registered hand in the loop: {code}");
+                assert!(!code.contains("pseudorandom_element("), "All mode must not select just one hand: {code}");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn level_up_hand_pools_accept_checkbox_and_string_encodings_without_empty_fallback() {
+    for typed in [false, true] {
+        for (selection, expected) in [
+            (serde_json::json!(["Pair", "Flush"]), vec!["Pair", "Flush"]),
+            (serde_json::json!([false, false, false, false, false, false, false, false, true, true, false, false]), vec!["Five of a Kind", "Straight Flush"]),
+        ] {
+            let pool = if typed {
+                serde_json::json!({"value": selection, "valueType": "checkbox"})
+            } else {
+                serde_json::json!(selection.to_string())
+            };
+            let planet = preview_test_planet(serde_json::json!({
+                "hand_selection": "pool", "poker_hand_pool": pool, "value": 2
+            }));
+            let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+            assert!(!code.contains("context"), "{code}");
+            assert!(code.contains("pseudorandom_element("), "{code}");
+            assert!(code.contains("G.GAME.hands["), "The selected pool key must exist: {code}");
+            for hand in expected {
+                assert!(code.contains(&format!("'{hand}'")), "Selected checkbox/pool hand was lost: {code}");
+            }
+        }
+        let legacy_selection = serde_json::json!([false, false, false, false, false, false, false, false, true, false, true, false]);
+        let legacy_pool = if typed {
+            serde_json::json!({"value": legacy_selection, "valueType": "checkbox"})
+        } else {
+            serde_json::json!(legacy_selection.to_string())
+        };
+        for injected_default in [false, true] {
+            let mut params = serde_json::json!({
+                "hand_selection": "pool", "pokerhand_pool": legacy_pool, "value": 2
+            });
+            if injected_default {
+                let empty_selection = serde_json::json!(vec![false; 12]);
+                params["poker_hand_pool"] = if typed {
+                    serde_json::json!({"value": empty_selection, "valueType": "checkbox"})
+                } else {
+                    serde_json::json!(empty_selection.to_string())
+                };
+            }
+            let legacy_planet = preview_test_planet(params);
+            let legacy_code = Emitter::new().emit_chunk(&compile_consumable(&legacy_planet, "mod"));
+            for hand in ["Straight Flush", "Flush Five"] {
+                assert!(legacy_code.contains(&format!("'{hand}'")), "Injected defaults must preserve selected legacy checkbox hands and ordering: {legacy_code}");
+            }
+            for hand in ["Five of a Kind", "Flush House"] {
+                assert!(!legacy_code.contains(&format!("'{hand}'")), "Legacy selection must not be reinterpreted in current catalog order: {legacy_code}");
+            }
+        }
+        for selection in [serde_json::json!([]), serde_json::json!(vec![false; 12])] {
+            let pool = if typed {
+                serde_json::json!({"value": selection, "valueType": "checkbox"})
+            } else {
+                serde_json::json!(selection.to_string())
+            };
+            let planet = preview_test_planet(serde_json::json!({
+                "hand_selection": "pool", "poker_hand_pool": pool, "value": 2
+            }));
+            let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+            assert!(!code.contains("'High Card'"), "An empty pool must skip leveling, without selecting an unrelated hand: {code}");
+            assert!(!code.contains("context"), "{code}");
+        }
+    }
+}
+
+#[test]
+fn level_up_hand_uses_current_round_hand_variables_and_scoped_level_amounts() {
+    for value_type in [Some("userVariable"), Some("user_var"), None] {
+        for (is_global, is_persistent, path) in [
+            (false, false, "card.ability.extra"),
+            (true, false, "G.GAME.jf_global_vars"),
+            (true, true, "JF_GLOBALS"),
+        ] {
+            let variable = |name: &str| match value_type {
+                Some(value_type) => serde_json::json!({"value": name, "valueType": value_type}),
+                None => serde_json::json!(name),
+            };
+            let mut planet = preview_test_planet(serde_json::json!({
+                "hand_selection": variable("chosen_hand"), "value": variable("chosen_levels")
+            }));
+            planet.user_variables = vec![
+                UserVariableDef {
+                    name: "chosen_hand".into(), var_type: UserVarType::PokerHand,
+                    initial_value: ParamValue::Str("Flush".into()), is_global, is_persistent,
+                },
+                UserVariableDef {
+                    name: "chosen_levels".into(), var_type: UserVarType::Number,
+                    initial_value: ParamValue::Int(3), is_global, is_persistent,
+                },
+            ];
+            let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+            assert!(!code.contains("context"), "{code}");
+            assert!(code.contains("G.GAME.current_round.chosen_hand_hand"), "Changing poker-hand variables must affect the target: {code}");
+            for name in ["chosen_hand", "chosen_levels"] {
+                assert!(code.contains(&format!("{path}.{name}")), "The initial hand/level amount must retain its scope: {code}");
+            }
+            assert!(!code.contains("'chosen_hand'"), "Variable names are not poker hand keys: {code}");
+            assert!(code.contains("G.GAME.hands["), "Invalid variable values must be skipped: {code}");
+        }
+    }
+}
+
+#[test]
+fn level_up_hand_planet_dynamic_amounts_do_not_reference_calculate_context() {
+    for (game_var, required_expression) in [
+        ("hand_level", ".level"),
+        ("times_hand_played", ".played"),
+        ("played_card_count", "G.hand.highlighted"),
+        ("scored_card_count", "G.hand.highlighted"),
+    ] {
+        for value_type in [Some("gameVariable"), Some("game_var"), None] {
+            let encoded = format!("GAMEVAR:{game_var}|2|1");
+            let value = match value_type {
+                Some(value_type) => serde_json::json!({"value": encoded, "valueType": value_type}),
+                None => serde_json::json!(encoded),
+            };
+            let planet = preview_test_planet(serde_json::json!({
+                "hand_selection": "specific", "specific_hand": "Flush", "value": value
+            }));
+            let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+            assert!(!code.contains("context"), "Dynamic consumable amounts must use fields available in use: {code}");
+            assert!(code.contains(required_expression), "Dynamic level amount was lost: {code}");
+            assert!(code.contains("SMODS.smart_level_up_hand(used_card,"), "{code}");
+            assert!(code.contains("G.GAME.hands["), "{code}");
+        }
+    }
+    let planet = preview_test_planet(serde_json::json!({
+        "hand_selection": "specific", "specific_hand": "Pair",
+        "value": {"value": "RANGE:2|5", "valueType": "range"}
+    }));
+    let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
+    assert!(code.contains("pseudorandom(") && code.contains("RANGE:2|5"), "Range amounts must still resolve dynamically: {code}");
+    assert!(!code.contains("context"), "{code}");
+}
+
+#[test]
+fn level_up_hand_specific_hand_and_amount_remain_editable_in_live_preview() {
+    let planet = preview_test_planet(serde_json::json!({
+        "hand_selection": {"value": "specific", "valueType": "select"},
+        "specific_hand": {"value": "Flush", "valueType": "select"},
+        "value": {"value": "3", "valueType": "number"}
+    }));
+    let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&compile_consumable(&planet, "mod"));
+    for (parameter, expected, original) in [
+        ("specific_hand", "'Flush'", serde_json::json!("Flush")),
+        ("value", "3", serde_json::json!(3)),
+    ] {
+        let path = serde_json::json!(["rules", 0, "effects", 0, "params", parameter, "value"]);
+        let binding = bindings.iter().find(|binding| serde_json::json!(binding.source_path) == path)
+            .unwrap_or_else(|| panic!("Missing editable {parameter} in {code}"));
+        assert_eq!(binding.original_value, original);
+        assert_eq!(field_binding_text(&code, binding), expected);
     }
 }
 

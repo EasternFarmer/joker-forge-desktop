@@ -662,6 +662,57 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn frontend_planet_parameters_reach_use_preview_and_export() {
+        let input = serde_json::json!({
+            "objectKey": "planet_test", "name": "Planet Test", "description": "Level up Flush", "set": "Planet",
+            "rules": [{ "id": "planet_rule", "trigger": "card_used", "effects": [{
+                "id": "level_hand", "type": "level_up_hand", "params": {
+                    "hand_selection": { "value": "specific", "valueType": "string" },
+                    "specific_hand": { "value": "Flush", "valueType": "string" },
+                    "value": { "value": "3", "valueType": "number" }
+                }
+            }] }]
+        });
+        let preview = compile_item_from_data_with_segments(
+            "consumable".into(), input.clone(), None, None, "mod".into(), true, None,
+        ).unwrap();
+        let exported = compile_item_from_data(
+            "consumable".into(), input, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for code in [&preview.code, &exported] {
+            for expected in ["use = function(self, card, area, copier)", "local used_card = copier or card", "level_hand0 = 'Flush'", "level_amount0 = 3", "SMODS.smart_level_up_hand(used_card, level_hand0, false, card.ability.extra.level_amount0)"] {
+                assert!(code.contains(expected), "Missing {expected}: {code}");
+            }
+            assert!(!code.contains("context"), "Use callbacks have no context argument: {code}");
+        }
+        assert!(preview.segments.iter().any(|segment| segment.id == "effect:planet_rule:level_hand"));
+        let preview = serde_json::to_value(preview).unwrap();
+        let bindings = preview["fieldBindings"].as_array().unwrap();
+        for (key, expected) in [("specific_hand", serde_json::json!("Flush")), ("value", serde_json::json!(3))] {
+            assert!(bindings.iter().any(|binding| binding["sourcePath"] == serde_json::json!(["rules", 0, "effects", 0, "params", key, "value"]) && binding["originalValue"] == expected));
+        }
+    }
+
+    #[test]
+    fn legacy_planet_parameters_and_trigger_export_as_a_safe_use_hook() {
+        for (hand, expected) in [("Pair", "level_hand0 = 'Pair'"), ("all", "for _, level_hand0 in ipairs(G.handlist) do")] {
+            let input = serde_json::json!({
+                "objectKey": "legacy_planet", "name": "Legacy Planet", "description": "Level up hands", "set": "Planet",
+                "rules": [{ "id": "planet_rule", "trigger": "consumable_used", "effects": [{
+                    "id": "level_hand", "type": "level_up_hand", "params": { "hand_type": hand, "levels": 2 }
+                }] }]
+            });
+            let code = compile_item_from_data(
+                "consumable".into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            for expected in [expected, "use = function(self, card, area, copier)", "level_amount0 = 2", "SMODS.smart_level_up_hand(used_card, level_hand0, false, card.ability.extra.level_amount0)"] {
+                assert!(code.contains(expected), "Missing {expected}: {code}");
+            }
+            assert!(!code.contains("context"), "{code}");
+        }
+    }
+
+    #[test]
     fn frontend_playing_card_properties_reach_preview_and_export() {
         for location in ["deck", "hand"] {
             let input = serde_json::json!({

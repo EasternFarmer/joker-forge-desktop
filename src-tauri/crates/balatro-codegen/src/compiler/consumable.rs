@@ -15,7 +15,13 @@ pub fn compile_consumable(consumable: &ConsumableDef, mod_prefix: &str) -> Chunk
     ctx.set_user_vars(consumable.user_variables.clone());
     ctx.set_description_variables(consumable.description_variables.clone());
 
-    let rule_outputs = compile_rules(&consumable.rules, &mut ctx);
+    let mut rules = consumable.rules.clone();
+    for rule in &mut rules {
+        if rule.trigger == "consumable_used" {
+            rule.trigger = "card_used".into();
+        }
+    }
+    let rule_outputs = compile_rules(&rules, &mut ctx);
     let table = build_consumable_table(consumable, &ctx, &rule_outputs);
 
     let smods_call = Stmt::ExprStmt(lua_table_call(

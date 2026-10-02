@@ -396,12 +396,99 @@ const normalizeConditionFromCatalog = (condition: Condition): Condition => {
   };
 };
 
+const migrateLevelUpHandParams = (params: Effect["params"]): Effect["params"] => {
+  const migrated = { ...params };
+  const wrap = (value: unknown): Effect["params"][string] =>
+    value !== null && typeof value === "object" && "value" in value
+      ? { ...(value as Effect["params"][string]) }
+      : { value, valueType: detectValueType(value) };
+
+  for (const key of [
+    "hand_selection",
+    "specific_hand",
+    "poker_hand_pool",
+    "value",
+  ]) {
+    if (migrated[key] !== undefined) migrated[key] = wrap(migrated[key]);
+  }
+
+  const legacyHand = migrated.hand ?? migrated.hand_type;
+  const currentSelection = migrated.hand_selection;
+  const currentSelectionIsDefault =
+    currentSelection?.value === "current" &&
+    currentSelection.valueType !== "user_var" &&
+    currentSelection.valueType !== "userVariable";
+  if (
+    legacyHand !== undefined &&
+    (currentSelection?.value === undefined || currentSelectionIsDefault)
+  ) {
+    const hand = wrap(legacyHand);
+    if (hand.valueType === "user_var" || hand.valueType === "userVariable") {
+      migrated.hand_selection = hand;
+    } else if (typeof hand.value === "string" && hand.value) {
+      const modes = [
+        "current", "specific", "all", "random", "pool", "most", "least",
+      ];
+      if (modes.includes(hand.value)) {
+        migrated.hand_selection = { ...hand, valueType: "text" };
+      } else {
+        migrated.hand_selection = { value: "specific", valueType: "text" };
+        migrated.specific_hand = hand;
+      }
+    }
+  }
+
+  const legacyValue = migrated.amount ?? migrated.levels;
+  const currentValue = migrated.value;
+  const currentIsDefault =
+    currentValue?.value === 1 ||
+    (currentValue?.valueType !== "user_var" &&
+      currentValue?.valueType !== "userVariable" &&
+      typeof currentValue?.value === "string" &&
+      currentValue.value.trim() !== "" &&
+      Number(currentValue.value) === 1);
+  if (
+    legacyValue !== undefined &&
+    (currentValue?.value === undefined || currentIsDefault)
+  ) {
+    migrated.value = wrap(legacyValue);
+  }
+  const currentPool = migrated.poker_hand_pool?.value;
+  const currentPoolIsDefault =
+    Array.isArray(currentPool) && currentPool.every((checked) => checked === false);
+  if (
+    migrated.pokerhand_pool !== undefined &&
+    (currentPool === undefined || currentPoolIsDefault)
+  ) {
+    const legacyPool = wrap(migrated.pokerhand_pool);
+    if (
+      Array.isArray(legacyPool.value) &&
+      legacyPool.value.every((checked) => typeof checked === "boolean")
+    ) {
+      const checkedHands = legacyPool.value;
+      legacyPool.value = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8, 11, 10].map(
+        (index) => checkedHands[index] ?? false,
+      );
+    }
+    migrated.poker_hand_pool = legacyPool;
+  }
+
+  for (const key of ["hand", "hand_type", "amount", "levels", "pokerhand_pool"]) {
+    delete migrated[key];
+  }
+  return migrated;
+};
+
 const normalizeEffectFromCatalog = (effect: Effect): Effect => {
   const definition = getEffectTypeById(effect.type);
   if (!definition) return effect;
+  const params =
+    effect.type === "level_up_hand"
+      ? migrateLevelUpHandParams(effect.params)
+      : effect.params;
   return {
     ...effect,
-    params: normalizeParamsForDefinition(effect.params, definition.params),
+    params: normalizeParamsForDefinition(params, definition.params),
   };
 };
 
