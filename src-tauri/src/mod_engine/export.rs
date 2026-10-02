@@ -16,6 +16,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Input types, match the TypeScript `JokerData` / `Rule` shapes exactly
@@ -1932,17 +1933,17 @@ pub fn build_sounds_lua(sounds: &[SoundDataInput]) -> String {
         if key.is_empty() {
             continue;
         }
-        let path = sound.sound_string.trim();
-        if path.is_empty() {
+        let Some(path) = Path::new(sound.sound_string.trim())
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
             continue;
-        }
+        };
         let mut block = vec![
             "SMODS.Sound({".to_string(),
             format!("    key = '{}',", escape_lua_string(key)),
-            format!(
-                "    path = '{}',",
-                escape_lua_string(&format!("sounds/{}", path))
-            ),
+            // SMODS resolves this path relative to the mod's assets/sounds directory.
+            format!("    path = '{}',", escape_lua_string(path)),
             format!("    pitch = {},", sound.pitch.unwrap_or(1.0)),
             format!("    volume = {},", sound.volume.unwrap_or(1.0)),
         ];
@@ -2002,6 +2003,69 @@ pub fn build_mod_json(metadata: &ModMetadataInput) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_sound(key: &str, filename: &str) -> SoundDataInput {
+        SoundDataInput {
+            key: key.to_string(),
+            sound_string: filename.to_string(),
+            audio_bytes: Some(vec![1, 2, 3]),
+            volume: None,
+            pitch: None,
+            replace: None,
+        }
+    }
+
+    #[test]
+    fn build_sounds_lua_resolves_upload_in_smods_assets_directory() {
+        // Imported filenames may include a directory, but export packages only the basename.
+        for filename in ["test.ogg", "sounds/test.ogg", " assets/sounds/test.ogg "] {
+            let lua = build_sounds_lua(&[make_sound("test", filename)]);
+            let registered_path = lua
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("path = '")
+                        .and_then(|path| path.strip_suffix("',"))
+                })
+                .expect("sound registration must include a path");
+
+            // This is the location that SMODS.Sound.inject reads when the sound is played.
+            let smods_path = Path::new("mod/assets/sounds").join(registered_path);
+            assert_eq!(smods_path, Path::new("mod/assets/sounds/test.ogg"));
+        }
+    }
+
+    #[test]
+    fn build_sounds_lua_preserves_registration_key_and_playback_settings() {
+        let mut sound = make_sound(" test ", "test.ogg");
+        sound.pitch = Some(1.25);
+        sound.volume = Some(0.5);
+        sound.replace = Some(" card1 ".to_string());
+
+        let lua = build_sounds_lua(&[sound]);
+
+        assert!(lua.contains("key = 'test',"));
+        // Keep SMODS's default key prefixing enabled for project sounds.
+        assert!(!lua.contains("prefix_config"));
+        assert!(lua.contains("pitch = 1.25,"));
+        assert!(lua.contains("volume = 0.5,"));
+        assert!(lua.contains("replace = 'card1',"));
+    }
+
+    #[test]
+    fn build_sounds_lua_skips_unconfigured_sounds() {
+        let lua = build_sounds_lua(&[
+            make_sound("", "test.ogg"),
+            make_sound("blank", " "),
+            make_sound("ready", "ready.ogg"),
+        ]);
+
+        assert_eq!(lua.matches("SMODS.Sound({").count(), 1);
+        assert!(lua.contains("key = 'ready',"));
+        assert!(lua.contains("path = 'ready.ogg',"));
+        assert!(lua.contains("pitch = 1,"));
+        assert!(lua.contains("volume = 1,"));
+    }
 
     fn make_global_var(name: &str, is_persistent: bool) -> UserVariableInput {
         UserVariableInput {

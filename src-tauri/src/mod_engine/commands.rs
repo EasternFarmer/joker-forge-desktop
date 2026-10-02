@@ -733,6 +733,44 @@ fn prepare_sounds_for_export(sounds: &mut [SoundDataInput]) -> Result<(), String
     Ok(())
 }
 
+fn write_sounds(root: &Path, sounds: &[SoundDataInput]) -> Result<usize, String> {
+    if sounds.is_empty() {
+        return Ok(0);
+    }
+
+    let sounds_lua = format_lua_source(&super::export::build_sounds_lua(sounds));
+    let sounds_lua_path = root.join("sounds.lua");
+    fs::write(&sounds_lua_path, sounds_lua.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", sounds_lua_path.display(), e))?;
+    let mut file_count = 1;
+
+    // SMODS.Sound resolves each registered path relative to assets/sounds.
+    let sounds_dir = root.join("assets").join("sounds");
+    fs::create_dir_all(&sounds_dir)
+        .map_err(|e| format!("Failed to create {}: {}", sounds_dir.display(), e))?;
+    for sound in sounds {
+        let file_name = sound.sound_string.trim();
+        if file_name.is_empty() {
+            continue;
+        }
+        let sanitized_file_name = Path::new(file_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("Invalid sound file name: {}", file_name))?;
+        if let Some(bytes) = &sound.audio_bytes {
+            if bytes.is_empty() {
+                continue;
+            }
+            let path = sounds_dir.join(sanitized_file_name);
+            fs::write(&path, bytes)
+                .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+            file_count += 1;
+        }
+    }
+
+    Ok(file_count)
+}
+
 fn transcode_mp3_to_ogg(mp3_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut decoder = Mp3Decoder::new(Cursor::new(mp3_bytes));
     let first_frame = next_mp3_frame(&mut decoder)?
@@ -968,36 +1006,7 @@ pub fn export_mod_package(
         file_count += 1;
     }
 
-    if !sounds.is_empty() {
-        let sounds_lua = format_lua_source(&super::export::build_sounds_lua(&sounds));
-        let sounds_lua_path = root.join("sounds.lua");
-        fs::write(&sounds_lua_path, sounds_lua.as_bytes())
-            .map_err(|e| format!("Failed to write {}: {}", sounds_lua_path.display(), e))?;
-        file_count += 1;
-
-        let sounds_dir = root.join("sounds");
-        fs::create_dir_all(&sounds_dir)
-            .map_err(|e| format!("Failed to create {}: {}", sounds_dir.display(), e))?;
-        for sound in &sounds {
-            let file_name = sound.sound_string.trim();
-            if file_name.is_empty() {
-                continue;
-            }
-            let sanitized_file_name = Path::new(file_name)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("Invalid sound file name: {}", file_name))?;
-            if let Some(bytes) = &sound.audio_bytes {
-                if bytes.is_empty() {
-                    continue;
-                }
-                let path = sounds_dir.join(sanitized_file_name);
-                fs::write(&path, bytes)
-                    .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-                file_count += 1;
-            }
-        }
-    }
+    file_count += write_sounds(root, &sounds)?;
 
     // Write atlas PNGs
     let write_atlas = |scale: &str, name: &str, bytes: Vec<u8>| -> Result<(), String> {
@@ -2096,4 +2105,81 @@ pub fn launch_or_relaunch_balatro(game_path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch Balatro.exe: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod sound_export_tests {
+    use super::*;
+
+    struct TestModDir(PathBuf);
+
+    impl TestModDir {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "joker-forge-sound-export-{}-{}",
+                std::process::id(),
+                nonce
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for TestModDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn exported_custom_sound_can_be_loaded_from_its_registered_smods_path() {
+        let root = TestModDir::new();
+        let audio = include_bytes!("../../../public/other/smods-main/assets/sounds/xchips.ogg");
+        let mut sounds: Vec<SoundDataInput> = ["test.ogg", " uploads/nested/imported.ogg "]
+            .iter()
+            .enumerate()
+            .map(|(index, filename)| SoundDataInput {
+                key: format!("test_{index}"),
+                sound_string: filename.to_string(),
+                audio_bytes: Some(audio.to_vec()),
+                volume: None,
+                pitch: None,
+                replace: None,
+            })
+            .collect();
+
+        prepare_sounds_for_export(&mut sounds).unwrap();
+        assert_eq!(write_sounds(&root.0, &sounds).unwrap(), 3);
+
+        let lua = fs::read_to_string(root.0.join("sounds.lua")).unwrap();
+        let registered_paths: Vec<&str> = lua
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("path = '")
+                    .and_then(|path| path.strip_suffix("',"))
+            })
+            .collect();
+        assert_eq!(registered_paths.len(), sounds.len());
+        for path in registered_paths {
+            // Resolve exactly as SMODS.Sound.inject does before calling newDecoder.
+            let bytes = fs::read(root.0.join("assets").join("sounds").join(path))
+                .expect("every registered sound must have a packaged audio file");
+            assert_eq!(bytes, audio);
+            let mut decoder = vorbis_rs::VorbisDecoder::new(Cursor::new(bytes)).unwrap();
+            assert!(decoder.decode_audio_block().unwrap().is_some());
+        }
+        assert!(!root.0.join("sounds").exists());
+    }
+
+    #[test]
+    fn exporting_without_sounds_writes_no_sound_files() {
+        let root = TestModDir::new();
+        assert_eq!(write_sounds(&root.0, &[]).unwrap(), 0);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
+    }
 }
