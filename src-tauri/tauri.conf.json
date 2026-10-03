@@ -69,6 +69,7 @@
       "timestampUrl": "",
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "nsis/installer-hooks.nsh",
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
         "sidebarImage": "icons/installer-banner.bmp",
