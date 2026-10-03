@@ -21,7 +21,7 @@ use context::CompileContext;
 use std::collections::HashSet;
 
 // Re-export compile functions for each game object type
-pub use booster::compile_booster;
+pub use booster::{compile_booster, compile_booster_with_options};
 pub use consumable::{compile_consumable, compile_consumable_type};
 pub use deck::compile_deck;
 pub use edition::compile_edition;

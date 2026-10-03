@@ -3,6 +3,7 @@ import { downloadDir, join } from "@tauri-apps/api/path";
 import { exists, remove } from "@tauri-apps/plugin-fs";
 import type {
   BaseGameObject,
+  BoosterData,
   ConsumableData,
   ConsumableSetData,
   DeckData,
@@ -77,7 +78,8 @@ export type PreviewCompileItemType =
   | "deck"
   | "enhancement"
   | "seal"
-  | "edition";
+  | "edition"
+  | "booster";
 
 interface ExportModRustOptions {
   useLocalizationFile?: boolean;
@@ -478,7 +480,7 @@ export const exportSingleItemRust = async (
  * Atlas image building stays in TypeScript (Canvas API).
  * All Lua compilation + file writing is delegated to a single Rust call,
  * covering all item types: jokers, consumables, vouchers, decks, enhancements,
- * seals, and editions.
+ * seals, editions, and boosters.
  */
 export const exportModRust = async (
   metadata: ModMetadata,
@@ -492,6 +494,7 @@ export const exportModRust = async (
   enhancements: EnhancementData[],
   seals: SealData[],
   editions: EditionData[],
+  boosters: BoosterData[],
   options: ExportModRustOptions = {},
 ): Promise<ExportModRustResult> => {
   const exportRootPath = await resolveExportRootPath(options);
@@ -510,6 +513,7 @@ export const exportModRust = async (
   const sortedEnhancements = [...enhancements].sort((a, b) => a.orderValue - b.orderValue);
   const sortedSeals = [...seals].sort((a, b) => a.orderValue - b.orderValue);
   const sortedEditions = [...editions].sort((a, b) => a.orderValue - b.orderValue);
+  const sortedBoosters = [...boosters].sort((a, b) => a.orderValue - b.orderValue);
 
   const jokerAtlas1x = sortedJokers.length > 0 ? await buildJokerAtlas(sortedJokers, 1) : null;
   const jokerAtlas2x = sortedJokers.length > 0 ? await buildJokerAtlas(sortedJokers, 2) : null;
@@ -528,6 +532,9 @@ export const exportModRust = async (
 
   const sealsAtlas1x = sortedSeals.length > 0 ? await buildItemAtlas(sortedSeals, 1) : null;
   const sealsAtlas2x = sortedSeals.length > 0 ? await buildItemAtlas(sortedSeals, 2) : null;
+
+  const boostersAtlas1x = sortedBoosters.length > 0 ? await buildItemAtlas(sortedBoosters, 1) : null;
+  const boostersAtlas2x = sortedBoosters.length > 0 ? await buildItemAtlas(sortedBoosters, 2) : null;
 
   const modIconSource =
     metadata.iconImage && (metadata.hasUserUploadedIcon || metadata.iconImage.trim())
@@ -656,6 +663,18 @@ export const exportModRust = async (
       fileName: `${item.objectKey}.lua`,
       customLua: item.customCode?.fullCode ?? null,
     })),
+    boosters: sortedBoosters.map((item) => {
+      const normalized = ensureLocalizableWithLanguage(item, locale);
+      return {
+        boosterData: {
+          ...normalized,
+          localizations: sanitizeLocalizationEntries(normalized.localizations),
+        },
+        pos: boostersAtlas1x?.positionsById[item.id] ?? { x: 0, y: 0 },
+        fileName: `${item.objectKey}.lua`,
+        customLua: item.customCode?.fullCode ?? null,
+      };
+    }),
     includeLocTxt: !useLocalizationFile,
     useLocalizationFile,
     localizationLocale: locale,
@@ -675,6 +694,8 @@ export const exportModRust = async (
     enhancementsAtlas2xPng: enhancementsAtlas2x ? dataURLToUint8Array(enhancementsAtlas2x.atlasDataUrl) : null,
     sealsAtlas1xPng: sealsAtlas1x ? dataURLToUint8Array(sealsAtlas1x.atlasDataUrl) : null,
     sealsAtlas2xPng: sealsAtlas2x ? dataURLToUint8Array(sealsAtlas2x.atlasDataUrl) : null,
+    boostersAtlas1xPng: boostersAtlas1x ? dataURLToUint8Array(boostersAtlas1x.atlasDataUrl) : null,
+    boostersAtlas2xPng: boostersAtlas2x ? dataURLToUint8Array(boostersAtlas2x.atlasDataUrl) : null,
     removeOtherManagedMods: options.removeOtherManagedModsFromBalatroFolder ?? false,
     managedModFolderNames: options.managedModFolderNames ?? null,
   });

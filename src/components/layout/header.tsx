@@ -285,6 +285,7 @@ export function Header({ title }: HeaderProps) {
         data.enhancements as any,
         data.seals as any,
         data.editions as any,
+        data.boosters as any,
         {
           useLocalizationFile: getSplitLocalizationExportEnabled(),
           localizationLocale: getDefaultLocalizationLanguage(),

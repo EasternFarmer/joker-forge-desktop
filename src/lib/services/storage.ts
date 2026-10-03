@@ -1169,16 +1169,41 @@ const sanitizeMetadata = (input: any): ModMetadata => {
   };
 };
 
+const ensureUniqueItemIds = <T extends { id: string }>(items: T[]): T[] => {
+  const reservedIds = new Set(items.map((item) => item.id));
+  const seenIds = new Set<string>();
+
+  return items.map((item) => {
+    if (!seenIds.has(item.id)) {
+      seenIds.add(item.id);
+      return item;
+    }
+
+    // Keep saved copies and their content, but give each its own editor identity.
+    let id = crypto.randomUUID();
+    while (reservedIds.has(id)) id = crypto.randomUUID();
+    reservedIds.add(id);
+    seenIds.add(id);
+    return { ...item, id };
+  });
+};
+
 const sanitizeProjectData = (input: any): ProjectData => {
   if (!input || typeof input !== "object") return DEFAULT_DATA;
 
-  const toArray = <T>(val: T[] | undefined) => (Array.isArray(val) ? val : []);
+  const toArray = <T extends { id: string }>(val: T[] | undefined): T[] =>
+    ensureUniqueItemIds(Array.isArray(val) ? val : []);
   const toLocalizedArray = <
-    T extends { name?: unknown; description?: unknown; localizations?: unknown },
+    T extends {
+      id: string;
+      name?: unknown;
+      description?: unknown;
+      localizations?: unknown;
+    },
   >(
     val: T[] | undefined,
   ): T[] =>
-    (Array.isArray(val) ? val : []).map((item) =>
+    toArray(val).map((item) =>
       ensureLocalizableWithLanguage(item, DEFAULT_LOCALIZATION_LANGUAGE),
     ) as T[];
 
@@ -1387,7 +1412,7 @@ const getStoredStore = (): ProjectStore =>
   cachedProjectStore ?? loadStoreFromLocalStorage();
 
 export const useProjectData = () => {
-  const [store, setStore] = useState<ProjectStore>(getStoredStore());
+  const [store, setStore] = useState<ProjectStore>(getStoredStore);
   const [isHydrating, setIsHydrating] = useState<boolean>(
     isTauriRuntime() && cachedProjectStore === null,
   );
@@ -1486,10 +1511,22 @@ export const useProjectData = () => {
       });
   }, []);
 
+  const commitStore = useCallback(
+    (updater: (previous: ProjectStore) => ProjectStore) => {
+      // React may replay state updaters. Resolve and persist the mutation once,
+      // then give React the finished snapshot so replay cannot duplicate it.
+      const previous = cachedProjectStore ?? getStoredStore();
+      const nextStore = updater(previous);
+      if (nextStore === previous) return;
+      saveStore(nextStore);
+      setStore(nextStore);
+    },
+    [saveStore],
+  );
+
   const updateMetadata = useCallback(
     (updatesOrUpdater: MetadataUpdateArg) => {
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
+      commitStore((baseStore) => {
         const currentId = baseStore.currentProjectId;
         const current = baseStore.projects[currentId] || DEFAULT_DATA;
         const updates =
@@ -1519,11 +1556,10 @@ export const useProjectData = () => {
           ...baseStore,
           projects: { ...baseStore.projects, [currentId]: updatedProject },
         };
-        saveStore(nextStore);
         return nextStore;
       });
     },
-    [saveStore],
+    [commitStore],
   );
 
   const updateCollection = useCallback(
@@ -1533,8 +1569,7 @@ export const useProjectData = () => {
         | ProjectData[K]
         | ((previous: ProjectData[K]) => ProjectData[K]),
     ) => {
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
+      commitStore((baseStore) => {
         const currentId = baseStore.currentProjectId;
         const current = baseStore.projects[currentId] || DEFAULT_DATA;
         const resolvedItems =
@@ -1585,31 +1620,27 @@ export const useProjectData = () => {
           ...baseStore,
           projects: { ...baseStore.projects, [currentId]: updatedProject },
         };
-        saveStore(nextStore);
         return nextStore;
       });
     },
-    [saveStore],
+    [commitStore],
   );
 
   const switchProject = useCallback(
     (projectId: string) => {
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
+      commitStore((baseStore) => {
         if (!baseStore.projects[projectId]) return baseStore;
         const nextStore = { ...baseStore, currentProjectId: projectId };
-        saveStore(nextStore);
         return nextStore;
       });
     },
-    [saveStore],
+    [commitStore],
   );
 
   const createProject = useCallback(
     (metadataOverrides: Partial<ModMetadata> = {}) => {
       let createdId = "";
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
+      commitStore((baseStore) => {
         const baseMetadata = sanitizeMetadata({
           ...DEFAULT_METADATA,
           ...metadataOverrides,
@@ -1632,18 +1663,16 @@ export const useProjectData = () => {
           projects: { ...baseStore.projects, [uniqueId]: newProject },
         };
         createdId = uniqueId;
-        saveStore(nextStore);
         return nextStore;
       });
       return createdId;
     },
-    [saveStore],
+    [commitStore],
   );
 
   const deleteProject = useCallback(
     (projectId: string) => {
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
+      commitStore((baseStore) => {
         if (!baseStore.projects[projectId]) return baseStore;
 
         const { [projectId]: _removed, ...remaining } = baseStore.projects;
@@ -1660,7 +1689,6 @@ export const useProjectData = () => {
             currentProjectId: fallbackId,
             projects: { [fallbackId]: fallbackProject },
           };
-          saveStore(nextStore);
           return nextStore;
         }
 
@@ -1674,21 +1702,18 @@ export const useProjectData = () => {
           currentProjectId: nextCurrentId,
           projects: remaining,
         };
-        saveStore(nextStore);
         return nextStore;
       });
     },
-    [saveStore],
+    [commitStore],
   );
 
-  // Atomically replace an entire project in one setStore call.
-  // Avoids the glitchy sequential-update pattern of calling each updateX
-  // separately, which caused multiple save → event → setState cycles.
+  // Replace an entire project as one shared-store mutation.
   const importProject = useCallback(
     (projectData: ProjectData) => {
-      setStore((prev) => {
-        const baseStore = cachedProjectStore ?? prev;
-        const importedName = (projectData.metadata?.name || "").trim().toLowerCase();
+      const normalizedProject = sanitizeProjectData(projectData);
+      commitStore((baseStore) => {
+        const importedName = (normalizedProject.metadata?.name || "").trim().toLowerCase();
         const existingId = Object.keys(baseStore.projects).find(
           (id) =>
             (baseStore.projects[id].metadata.name || "").trim().toLowerCase() ===
@@ -1703,16 +1728,16 @@ export const useProjectData = () => {
           nextProjects = {
             ...baseStore.projects,
             [existingId]: {
-              ...projectData,
-              metadata: { ...projectData.metadata, id: existingId },
+              ...normalizedProject,
+              metadata: { ...normalizedProject.metadata, id: existingId },
             },
           };
         } else {
-          const baseId = projectData.metadata.id || DEFAULT_METADATA.id;
+          const baseId = normalizedProject.metadata.id || DEFAULT_METADATA.id;
           const uniqueId = ensureUniqueProjectId(baseId, baseStore.projects);
           const finalProject: ProjectData = {
-            ...projectData,
-            metadata: { ...projectData.metadata, id: uniqueId },
+            ...normalizedProject,
+            metadata: { ...normalizedProject.metadata, id: uniqueId },
           };
           nextCurrentId = uniqueId;
           nextProjects = { ...baseStore.projects, [uniqueId]: finalProject };
@@ -1723,11 +1748,10 @@ export const useProjectData = () => {
           currentProjectId: nextCurrentId,
           projects: nextProjects,
         };
-        saveStore(nextStore);
         return nextStore;
       });
     },
-    [saveStore],
+    [commitStore],
   );
 
   const projects = Object.entries(store.projects).map(([projectId, project]) => ({

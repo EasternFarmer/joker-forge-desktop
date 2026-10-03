@@ -33,6 +33,7 @@ type DescriptionVariableItem = {
   rules?: Rule[];
   userVariables?: UserVariable[];
   locVars?: { vars?: Array<string | number> };
+  config?: { choose?: number; extra?: number };
 };
 
 const GAME_VARIABLE_LABELS = new Map<string, string>();
@@ -320,6 +321,20 @@ export const buildDescriptionVariableTokens = (
   item: DescriptionVariableItem | undefined,
 ): DescriptionVariableToken[] => {
   if (!item) return [];
+
+  if (item.objectType === "booster") {
+    // Steamodded reserves these two slots for a pack's choices and size.
+    return [
+      { name: "Cards to choose", key: "choose", value: item.config?.choose ?? 1 },
+      { name: "Cards in pack", key: "extra", value: item.config?.extra ?? 3 },
+    ].map(({ name, key, value }) => ({
+      label: name,
+      source: `card.ability.${key}`,
+      category: "config" as const,
+      binding: { kind: "literal" as const, value },
+      previewValue: String(value),
+    }));
+  }
 
   const tokens: DescriptionVariableToken[] = [];
   const seen = new Set<string>();

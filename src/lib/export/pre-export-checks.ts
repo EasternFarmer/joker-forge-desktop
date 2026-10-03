@@ -529,6 +529,26 @@ export const runPreExportChecks = (data: ProjectData): PreExportIssue[] => {
     objectTypePrefix: "p",
   });
 
+  data.boosters.forEach((booster) => {
+    const target: NavigationTarget = {
+      path: "/boosters",
+      itemId: booster.id,
+      editor: "info",
+    };
+    const name = formatItemName(booster, booster.id);
+    const extra = booster.config?.extra ?? 3;
+    const choose = booster.config?.choose ?? 1;
+    if (!Number.isInteger(extra) || extra < 1 || !Number.isInteger(choose) || choose < 1 || choose > extra) {
+      pushIssue(issues, `Boosters: "${name}" needs a positive whole number of cards and choices, with choices no greater than the pack size.`, target);
+    }
+    const rules = booster.card_rules ?? [];
+    if (rules.some((rule) => !Number.isFinite(rule.weight ?? 1) || (rule.weight ?? 1) < 0)) {
+      pushIssue(issues, `Boosters: "${name}" has an invalid content weight. Weights must be zero or greater.`, target);
+    } else if (rules.length > 0 && rules.every((rule) => (rule.weight ?? 1) === 0)) {
+      pushIssue(issues, `Boosters: "${name}" needs at least one content rule with a weight greater than zero.`, target);
+    }
+  });
+
   checkSimpleKeyCollection<SoundData>(
     issues,
     {

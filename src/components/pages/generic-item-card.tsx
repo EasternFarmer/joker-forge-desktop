@@ -225,11 +225,12 @@ export const GenericItemCard = memo(function GenericItemCard({
     updateLayoutState(cardRef.current.getBoundingClientRect().width);
 
     const observer = new window.ResizeObserver((entries) => {
-      const nextWidth = entries[0]?.contentRect.width ?? 0;
+      const nextWidth = entries[0]?.borderBoxSize[0]?.inlineSize ??
+        cardRef.current?.getBoundingClientRect().width ?? 0;
       updateLayoutState(nextWidth);
     });
 
-    observer.observe(cardRef.current);
+    observer.observe(cardRef.current, { box: "border-box" });
     return () => observer.disconnect();
   }, []);
 
@@ -382,6 +383,7 @@ export const GenericItemCard = memo(function GenericItemCard({
                   e.stopPropagation();
                   deleteAction.onClick();
                 }}
+                aria-label={deleteAction.label}
                 className="h-8 w-8 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 cursor-pointer rounded-lg"
               >
                 <Trash weight="bold" className="h-4 w-4" />
@@ -750,6 +752,7 @@ export const GenericItemCard = memo(function GenericItemCard({
                         duplicateAction.onClick();
                       }
                     }}
+                    aria-label={duplicateAction.label}
                     onPointerDown={(e) => e.preventDefault()}
                     className={cn(
                       "transition-all hover:scale-110 rounded-lg cursor-pointer",
