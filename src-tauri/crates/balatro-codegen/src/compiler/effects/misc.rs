@@ -208,7 +208,12 @@ pub fn set_dollars(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput
 
 /// Retrigger effect: causes cards to retrigger.
 pub fn retrigger(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let resolved = resolve_config_value(&effect.params, "value", ctx, "repetitions");
+    let parameter = if effect.params.contains_key("repetitions") {
+        "repetitions"
+    } else {
+        "value"
+    };
+    let resolved = resolve_config_value(&effect.params, parameter, ctx, "repetitions");
 
     EffectOutput {
         return_fields: vec![("repetitions".to_string(), resolved.expr)],

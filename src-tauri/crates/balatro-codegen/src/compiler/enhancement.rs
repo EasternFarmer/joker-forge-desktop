@@ -288,29 +288,28 @@ pub(crate) fn build_card_calculate_function(
         ));
     }
 
-    // Group rules by trigger
-    let mut triggers_seen: Vec<String> = Vec::new();
+    let mut triggers_seen: Vec<(String, bool)> = Vec::new();
     for ro in &non_passive {
-        if !triggers_seen.contains(&ro.trigger) {
-            triggers_seen.push(ro.trigger.clone());
+        let group = (ro.trigger.clone(), ro.has_retrigger);
+        if !triggers_seen.contains(&group) {
+            triggers_seen.push(group);
         }
     }
 
-    for trigger in &triggers_seen {
+    for (trigger, use_retrigger) in &triggers_seen {
         let rules_for_trigger: Vec<&RuleOutput> = non_passive
             .iter()
             .copied()
-            .filter(|r| r.trigger == *trigger)
+            .filter(|r| r.trigger == *trigger && r.has_retrigger == *use_retrigger)
             .collect();
 
-        let use_retrigger = rules_for_trigger.iter().any(|r| r.has_retrigger);
         let has_trigger_destroy = rules_for_trigger.iter().any(|r| r.has_destroy);
 
         let trigger_ctx = super::triggers::trigger_context_for_rule(
             ctx.object_type,
             trigger,
             false,
-            use_retrigger,
+            *use_retrigger,
         );
 
         let mut trigger_body: Vec<Stmt> = Vec::new();
@@ -321,7 +320,7 @@ pub(crate) fn build_card_calculate_function(
                 lua_bool(false),
             ));
         }
-        if use_retrigger {
+        if *use_retrigger {
             trigger_body.push(lua_assign(
                 lua_path(&["card", "should_retrigger"]),
                 lua_bool(false),

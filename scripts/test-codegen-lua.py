@@ -66,6 +66,9 @@ SMODS = {
  Consumable=function(definition) test_definition=definition end,
  Voucher=function(definition) test_definition=definition end,
  Back=function(definition) test_definition=definition end,
+ Enhancement=function(definition) test_definition=definition end,
+ Seal=function(definition) test_definition=definition end,
+ Edition=function(definition) test_definition=definition end,
  get_probability_vars=function(card,numerator,denominator) return numerator,denominator end,
  has_enhancement=function(card, key) return card.config and card.config.center and card.config.center.key==key end,
  get_enhancements=function(card)
@@ -79,7 +82,7 @@ SMODS = {
 
 
 def steamodded_effect_resolver():
-    """Use the bundled Steamodded implementation for consumable use effects."""
+    """Use the bundled Steamodded implementation to resolve generated effects."""
     source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
     individual = source.split("SMODS.calculate_individual_effect = function", 1)[1]
     individual = "SMODS.calculate_individual_effect = function" + individual.split(
@@ -103,6 +106,72 @@ function localize(key) return key end
 
 
 EFFECT_RESOLVER = steamodded_effect_resolver()
+
+
+def steamodded_scoring_parameters():
+    """Load the actual chips/mult calculators, including their supported keys."""
+    source = (ROOT / "public/other/smods-main/src/game_object.lua").read_text(encoding="utf-8")
+    scoring = source.split("------- API CODE GameObject.Scoring_Calculation", 1)[1]
+    parameters = "SMODS.Scoring_Parameter({" + scoring.split("SMODS.Scoring_Parameter({", 1)[1]
+    parameters = parameters.split("    SMODS.Calculation_Controls = {", 1)[0]
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    repetitions = "SMODS.insert_repetitions = function" + utils.split("SMODS.insert_repetitions = function", 1)[1]
+    repetitions = repetitions.split("\nSMODS.calculate_retriggers", 1)[0]
+    return """
+SMODS.Scoring_Parameters={}
+SMODS.Scoring_Parameter=function(parameter)
+ parameter.current=parameter.default_value
+ SMODS.Scoring_Parameters[parameter.key]=parameter
+ for _,key in ipairs(parameter.calculation_keys) do
+  SMODS.Scoring_Parameter_Calculation[key]=parameter.key
+ end
+end
+function mod_chips(amount) return amount end
+function mod_mult(amount) return amount end
+function update_hand_text() end
+function juice_card() end
+""" + parameters + """
+SMODS.Calculation_Controls={chips=true,mult=true}
+SMODS.calculation_keys={}
+for _,keys in ipairs({SMODS.pre_scoring_calculation_keys,SMODS.scoring_parameter_keys,SMODS.other_calculation_keys}) do
+ for _,key in ipairs(keys) do SMODS.calculation_keys[#SMODS.calculation_keys+1]=key end
+end
+function reset_score(chips,multiplier)
+ hand_chips=chips;mult=multiplier
+ SMODS.Scoring_Parameters.chips.current=chips
+ SMODS.Scoring_Parameters.mult.current=multiplier
+end
+function resolve_joker(context)
+ local effect=test_definition:calculate(actor,context)
+ if effect then SMODS.calculate_effect(effect,context.other_card or actor) end
+ return effect
+end
+repetition_warnings={}
+function sendWarnMessage(message) repetition_warnings[#repetition_warnings+1]=message end
+SMODS.optional_features={}
+SMODS.calculate_quantum_enhancements=function() end
+SMODS.get_card_areas=function(kind) return kind=='jokers' and {{cards={actor}}} or {} end
+function eval_card(card,context)
+ if card==actor then
+  local effect=test_definition:calculate(actor,context)
+  return effect and {jokers=effect} or {},{}
+ end
+ return {},{}
+end
+function collect_repetitions(context)
+ context.repetition=true
+ return SMODS.calculate_repetitions(context.other_card,context,{})
+end
+function message_count(kind)
+ local count=0
+ for _,message in ipairs(status_messages) do if message.kind==kind then count=count+1 end end
+ return count
+end
+reset_score(0,1)
+""" + repetitions
+
+
+SCORING_PARAMETERS = steamodded_scoring_parameters()
 JOKER_CREATION_STATE = """
 G={GAME={joker_buffer=0},C={GREEN=1}}
 event_queue={};created_cards={}
@@ -257,9 +326,11 @@ KNOWN_VALUES = {
 def run_checks(lua, cases):
     checks = 0
     for case in cases:
-        if case["kind"] in ("rule_options", "joker_creation"):
+        if case["kind"] in ("rule_options", "joker_creation", "scoring"):
             state = JOKER_CREATION_STATE if case["kind"] == "joker_creation" else RULE_OPTIONS_STATE
             source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
+            if case["kind"] == "scoring":
+                source += "\n" + SCORING_PARAMETERS
             source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"
             source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
             try:

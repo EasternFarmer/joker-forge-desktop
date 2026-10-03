@@ -63,15 +63,9 @@ pub fn retrigger_trigger_context(
         (ObjectType::Joker, "card_held_in_hand")
         | (ObjectType::Joker, "card_held_in_hand_end_of_round") => {
             let base = lua_and(
-                ctx("repetition"),
-                lua_and(
-                    lua_eq(ctx("cardarea"), lua_path(&["G", "hand"])),
-                    lua_and(
-                        ctx("end_of_round"),
-                        lua_raw_expr(
-                            "(next(context.card_effects[1]) or #context.card_effects > 1)",
-                        ),
-                    ),
+                held_retrigger_context(trigger),
+                lua_raw_expr(
+                    "(context.card_effects and context.card_effects[1] and (next(context.card_effects[1]) or #context.card_effects > 1))",
                 ),
             );
             Some(maybe_blueprint(base, blueprint_compat))
@@ -82,8 +76,24 @@ pub fn retrigger_trigger_context(
                 lua_eq(ctx("cardarea"), lua_path(&["G", "play"])),
             ))
         }
+        (ObjectType::Enhancement | ObjectType::Seal | ObjectType::Edition, "card_held_in_hand")
+        | (ObjectType::Enhancement | ObjectType::Seal | ObjectType::Edition, "card_held_in_hand_end_of_round") => {
+            Some(held_retrigger_context(trigger))
+        }
         _ => None,
     }
+}
+
+fn held_retrigger_context(trigger: &str) -> Expr {
+    let phase = if trigger == "card_held_in_hand_end_of_round" {
+        ctx("end_of_round")
+    } else {
+        lua_not(ctx("end_of_round"))
+    };
+    lua_and(
+        ctx("repetition"),
+        lua_and(lua_eq(ctx("cardarea"), lua_path(&["G", "hand"])), phase),
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -10,9 +10,9 @@ use balatro_codegen::compiler::values::{
     game_var_lua_code, resolve_condition_value, resolve_value,
 };
 use balatro_codegen::types::{
-    ConditionDef, ConsumableDef, DeckDef, EffectDef, JokerDef, ObjectType, ParamValue, UserVariableDef, VoucherDef,
+    ConditionDef, ConsumableDef, DeckDef, EditionDef, EffectDef, EnhancementDef, JokerDef, ObjectType, ParamValue, SealDef, UserVariableDef, VoucherDef,
 };
-use balatro_codegen::{compile_consumable, compile_deck, compile_joker, compile_voucher, Emitter};
+use balatro_codegen::{compile_consumable, compile_deck, compile_edition, compile_enhancement, compile_joker, compile_seal, compile_voucher, Emitter};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -32,6 +32,303 @@ fn deck(rules: Value) -> DeckDef {
         "atlas":"CustomDecks", "pos":{"x":0,"y":0}, "rules":rules
     }))
     .unwrap()
+}
+
+fn scoring_case(
+    cases: &mut Vec<Value>,
+    name: &str,
+    rules: Value,
+    prepare: &str,
+    invoke: &str,
+    verify: &str,
+) {
+    let mut definition = joker(rules);
+    definition.user_variables = serde_json::from_value(json!([
+        {"name":"counter", "var_type":"number", "initial_value":0}
+    ]))
+    .unwrap();
+    cases.push(json!({"kind":"scoring", "name":name,
+        "code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+        "prepare":format!("G.GAME.dollars=0;G.play={{cards={{}}}};G.hand={{cards={{}}}};{prepare}"),
+        "invoke":invoke,"verify":verify}));
+}
+
+fn append_scoring_group_cases(cases: &mut Vec<Value>) {
+    for count in [1, 3, 5] {
+        scoring_case(cases,&format!("scoring_loop_mixed_effects_{count}"),json!([{
+            "id":"mixed", "trigger":"hand_played",
+            "effects":[
+                {"effect_type":"add_chips","params":{"value":7}},
+                {"effect_type":"add_mult","params":{"value":5}},
+                {"effect_type":"set_dollars","params":{"value":2,"operation":"add"}}
+            ],
+            "loop_groups":[{"id":"repeat","count":count,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":2}},
+                {"effect_type":"add_chips","params":{"value":4}},
+                {"effect_type":"set_dollars","params":{"value":3,"operation":"add"}},
+                {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}}
+            ]}]
+        }]),"","resolve_joker({joker_main=true})",
+            &format!("assert(hand_chips=={});assert(mult=={});assert(G.GAME.dollars=={});assert(actor.ability.extra.counter=={count});assert(message_count('x_mult')=={count});assert(message_count('chips')=={});assert(message_count('dollars')=={})",
+                7+4*count,6*(1<<count),2+3*count,count+1,count+1));
+    }
+    scoring_case(cases,"scoring_loop_multiple_groups",json!([{
+        "id":"multiple", "trigger":"hand_played",
+        "effects":[{"effect_type":"add_chips","params":{"value":1}}],
+        "loop_groups":[
+            {"id":"first","count":2,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":2}},
+                {"effect_type":"set_dollars","params":{"value":1}}
+            ]},
+            {"id":"second","count":2,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":3}},
+                {"effect_type":"add_chips","params":{"value":2}}
+            ]}
+        ]
+    }]),"","resolve_joker({joker_main=true})",
+        "assert(hand_chips==5);assert(mult==36);assert(G.GAME.dollars==2);assert(message_count('x_mult')==4)");
+    scoring_case(cases,"scoring_loop_captures_iteration_values",json!([{
+        "id":"dynamic", "trigger":"hand_played",
+        "loop_groups":[{"id":"repeat","count":3,"effects":[
+            {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}},
+            {"effect_type":"apply_x_mult","params":{"value":{"value":"counter","valueType":"userVariable"}}},
+            {"effect_type":"add_chips","params":{"value":{"value":"counter","valueType":"userVariable"}}},
+            {"effect_type":"set_dollars","params":{"value":{"value":"counter","valueType":"userVariable"}}}
+        ]}]
+    }]),"","resolve_joker({joker_main=true})",
+        "assert(hand_chips==6);assert(mult==6);assert(G.GAME.dollars==6);assert(actor.ability.extra.counter==3)");
+    scoring_case(cases,"scoring_loop_xchips_and_xmult",json!([{
+        "id":"multiply", "trigger":"hand_played",
+        "effects":[{"effect_type":"add_chips","params":{"value":5}}],
+        "loop_groups":[{"id":"repeat","count":3,"effects":[
+            {"effect_type":"apply_x_chips","params":{"value":2}},
+            {"effect_type":"apply_x_mult","params":{"value":3}},
+            {"effect_type":"set_dollars","params":{"value":1}}
+        ]}]
+    }]),"","resolve_joker({joker_main=true})",
+        "assert(hand_chips==40);assert(mult==27);assert(G.GAME.dollars==3);assert(message_count('x_chips')==3 and message_count('x_mult')==3)");
+
+    for chance_succeeds in [true,false] {
+        scoring_case(cases,&format!("scoring_loop_chance_sibling_{chance_succeeds}"),json!([{
+            "id":"chance_and_repeat", "trigger":"hand_played",
+            "effects":[{"effect_type":"add_chips","params":{"value":2}}],
+            "random_groups":[{"id":"chance","chance_numerator":1,"chance_denominator":2,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":5}},
+                {"effect_type":"set_dollars","params":{"value":7}}
+            ]}],
+            "loop_groups":[{"id":"repeat","count":2,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":2}},
+                {"effect_type":"add_chips","params":{"value":1}}
+            ]}]
+        }]),&format!("SMODS.pseudorandom_probability=function() return {chance_succeeds} end"),
+            "resolve_joker({joker_main=true})",
+            &format!("assert(hand_chips==4);assert(mult=={});assert(G.GAME.dollars=={});assert(message_count('x_mult')=={})",
+                if chance_succeeds {20}else{4},if chance_succeeds {7}else{0},if chance_succeeds {3}else{2}));
+    }
+
+    let conditional_rules=json!([
+        {"id":"conditioned_loop","trigger":"hand_played",
+            "condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":10}}]}],
+            "loop_groups":[{"id":"repeat","count":3,"effects":[
+                {"effect_type":"apply_x_mult","params":{"value":2}},
+                {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}}
+            ]}]},
+        {"id":"fallback","trigger":"hand_played","effects":[
+            {"effect_type":"add_chips","params":{"value":11}},
+            {"effect_type":"add_mult","params":{"value":7}},
+            {"effect_type":"set_dollars","params":{"value":13}}
+        ]}
+    ]);
+    scoring_case(cases,"scoring_loop_condition_fallback",conditional_rules.clone(),"",
+        "resolve_joker({joker_main=true})",
+        "assert(hand_chips==11);assert(mult==8);assert(G.GAME.dollars==13);assert(actor.ability.extra.counter==0)");
+    scoring_case(cases,"scoring_loop_condition_match",conditional_rules,"G.GAME.dollars=20",
+        "resolve_joker({joker_main=true})",
+        "assert(hand_chips==0);assert(mult==8);assert(G.GAME.dollars==20);assert(actor.ability.extra.counter==3)");
+
+    scoring_case(cases,"scoring_loop_side_effect_only_sibling",json!([{
+        "id":"side_effects", "trigger":"hand_played",
+        "effects":[{"effect_type":"add_chips","params":{"value":9}}],
+        "loop_groups":[{"id":"repeat","count":4,"effects":[
+            {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}}
+        ]}]
+    }]),"","resolve_joker({joker_main=true})",
+        "assert(hand_chips==9);assert(mult==1);assert(actor.ability.extra.counter==4)");
+    scoring_case(cases,"scoring_chance_failure_falls_through_to_sibling",json!([
+        {"id":"chance","trigger":"hand_played","random_groups":[{
+            "id":"chance_only","chance_numerator":1,"chance_denominator":2,
+            "effects":[{"effect_type":"apply_x_mult","params":{"value":4}}]
+        }]},
+        {"id":"fallback","trigger":"hand_played","effects":[
+            {"effect_type":"add_chips","params":{"value":12}},
+            {"effect_type":"set_dollars","params":{"value":3}}
+        ]}
+    ]),"SMODS.pseudorandom_probability=function() return false end",
+        "resolve_joker({joker_main=true})",
+        "assert(hand_chips==12 and mult==1 and G.GAME.dollars==3)");
+    scoring_case(cases,"scoring_side_effect_loop_falls_through_to_sibling",json!([
+        {"id":"mutate","trigger":"hand_played","loop_groups":[{
+            "id":"side_effect_only","count":4,
+            "effects":[{"effect_type":"play_sound","params":{"sound":"card1"}}]
+        }]},
+        {"id":"fallback","trigger":"hand_played","effects":[
+            {"effect_type":"add_chips","params":{"value":12}},
+            {"effect_type":"set_dollars","params":{"value":4}}
+        ]}
+    ]),"played_sounds=0;function play_sound(sound) assert(sound=='card1');played_sounds=played_sounds+1 end",
+        "resolve_joker({joker_main=true})",
+        "assert(played_sounds==4);assert(hand_chips==12 and mult==1 and G.GAME.dollars==4)");
+}
+
+fn append_retrigger_scoring_cases(cases: &mut Vec<Value>) {
+    let scoring_effects=json!([
+        {"effect_type":"add_chips","params":{"value":10}},
+        {"effect_type":"apply_x_mult","params":{"value":2}},
+        {"effect_type":"set_dollars","params":{"value":3}},
+        {"effect_type":"permanent_bonus","params":{"bonus_type":"perma_bonus","value":5}},
+        {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}}
+    ]);
+    let prepare="played_card={ability={perma_bonus=0},config={center={key='c_base'}}}";
+    let discovery_checks="assert(hand_chips==0 and mult==1 and G.GAME.dollars==0);assert(played_card.ability.perma_bonus==0 and actor.ability.extra.counter==0);assert(#status_messages==0 and #repetition_warnings==0)";
+    let scoring_checks="assert(hand_chips==30);assert(mult==8);assert(G.GAME.dollars==9);assert(played_card.ability.perma_bonus==15);assert(actor.ability.extra.counter==3);assert(message_count('x_mult')==3)";
+    for (name,effect_type,params) in [
+        ("canonical_parameter","retrigger",json!({"repetitions":2,"value":1})),
+        ("legacy_value","retrigger",json!({"value":2})),
+        ("playing_card_alias","retrigger_playing_card",json!({"repetitions":2})),
+        ("cards_alias","retrigger_cards",json!({"repetitions":2})),
+    ] {
+        let mut effects=scoring_effects.as_array().unwrap().clone();
+        effects.insert(0,json!({"effect_type":effect_type,"params":params}));
+        scoring_case(cases,&format!("scoring_retrigger_mixed_{name}"),json!([{
+            "id":"mixed", "trigger":"card_scored", "retrigger":true,"effects":effects
+        }]),prepare,
+            &format!("local reps=collect_repetitions({{cardarea=G.play,other_card=played_card}});assert(#reps==2);{discovery_checks};for i=0,#reps do resolve_joker({{individual=true,cardarea=G.play,other_card=played_card}}) end"),
+            scoring_checks);
+    }
+    scoring_case(cases,"scoring_retrigger_separate_rule",json!([
+        {"id":"score","trigger":"card_scored","effects":scoring_effects.clone()},
+        {"id":"repeat","trigger":"card_scored","retrigger":true,"effects":[
+            {"effect_type":"retrigger","params":{"repetitions":2}}
+        ]}
+    ]),prepare,
+        &format!("local reps=collect_repetitions({{cardarea=G.play,other_card=played_card}});assert(#reps==2);{discovery_checks};for i=0,#reps do resolve_joker({{individual=true,cardarea=G.play,other_card=played_card}}) end"),
+        scoring_checks);
+    scoring_case(cases,"scoring_retrigger_stale_flag_without_retrigger_effect",json!([{
+        "id":"score","trigger":"card_scored","retrigger":true,"effects":scoring_effects.clone()
+    }]),prepare,
+        &format!("local reps=collect_repetitions({{cardarea=G.play,other_card=played_card}});assert(#reps==0);{discovery_checks};resolve_joker({{individual=true,cardarea=G.play,other_card=played_card}})"),
+        "assert(hand_chips==10 and mult==2 and G.GAME.dollars==3);assert(played_card.ability.perma_bonus==5 and actor.ability.extra.counter==1)");
+
+    let mut grouped_effects=scoring_effects.as_array().unwrap().clone();
+    grouped_effects.push(json!({"effect_type":"retrigger","params":{"repetitions":2}}));
+    for chance_succeeds in [true,false] {
+        scoring_case(cases,&format!("scoring_retrigger_chance_group_{chance_succeeds}"),json!([{
+            "id":"chance","trigger":"card_scored","retrigger":true,
+            "random_groups":[{"id":"mixed","chance_numerator":1,"chance_denominator":2,"effects":grouped_effects.clone()}]
+        }]),&format!("{prepare};SMODS.pseudorandom_probability=function() return {chance_succeeds} end"),
+            &format!("local reps=collect_repetitions({{cardarea=G.play,other_card=played_card}});assert(#reps=={});{discovery_checks};for i=0,#reps do resolve_joker({{individual=true,cardarea=G.play,other_card=played_card}}) end",if chance_succeeds {2}else{0}),
+            if chance_succeeds {scoring_checks}else{"assert(hand_chips==0 and mult==1 and G.GAME.dollars==0);assert(played_card.ability.perma_bonus==0 and actor.ability.extra.counter==0)"});
+    }
+    scoring_case(cases,"scoring_retrigger_loop_group",json!([{
+        "id":"loop","trigger":"card_scored","retrigger":true,
+        "loop_groups":[{"id":"mixed","count":2,"effects":grouped_effects}]
+    }]),prepare,
+        &format!("local reps=collect_repetitions({{cardarea=G.play,other_card=played_card}});assert(#reps==4);{discovery_checks};for i=0,#reps do resolve_joker({{individual=true,cardarea=G.play,other_card=played_card}}) end"),
+        "assert(hand_chips==100);assert(mult==1024);assert(G.GAME.dollars==30);assert(played_card.ability.perma_bonus==50);assert(actor.ability.extra.counter==10);assert(message_count('x_mult')==10)");
+
+    for (trigger,end_of_round) in [
+        ("card_held_in_hand",false),
+        ("card_held_in_hand_end_of_round",true),
+    ] {
+        let mut effects=scoring_effects.as_array().unwrap().clone();
+        effects.push(json!({"effect_type":"retrigger","params":{"repetitions":2}}));
+        let rules=json!([{"id":"held","trigger":trigger,"retrigger":true,"effects":effects}]);
+        for blueprint in [false,true] {
+            scoring_case(cases,&format!("scoring_retrigger_{trigger}_blueprint_{blueprint}"),rules.clone(),prepare,
+                &format!("local reps=collect_repetitions({{cardarea=G.hand,other_card=played_card,end_of_round={end_of_round},card_effects={{{{chips=1}}}},blueprint={blueprint}}});assert(#reps==2);{discovery_checks};for i=0,#reps do resolve_joker({{individual=true,cardarea=G.hand,other_card=played_card,end_of_round={end_of_round},blueprint={blueprint}}}) end"),
+                scoring_checks);
+        }
+        scoring_case(cases,&format!("scoring_retrigger_{trigger}_wrong_phase"),rules,prepare,
+            &format!("local reps=collect_repetitions({{cardarea=G.hand,other_card=played_card,end_of_round={},card_effects={{{{chips=1}}}}}});assert(#reps==0);resolve_joker({{individual=true,cardarea=G.hand,other_card=played_card,end_of_round={}}});{discovery_checks}",!end_of_round,!end_of_round),
+            "assert(actor.ability.extra.counter==0 and played_card.ability.perma_bonus==0)");
+    }
+
+    let mut incompatible=joker(json!([{"id":"mixed","trigger":"card_scored","retrigger":true,"effects":[
+        {"effect_type":"retrigger","params":{"repetitions":2}},
+        {"effect_type":"add_chips","params":{"value":10}},
+        {"effect_type":"apply_x_mult","params":{"value":2}},
+        {"effect_type":"set_dollars","params":{"value":3}}
+    ]}]));
+    incompatible.blueprint_compat=false;
+    cases.push(json!({"kind":"scoring","name":"scoring_retrigger_incompatible_blueprint",
+        "code":Emitter::new().emit_chunk(&compile_joker(&incompatible,"mod")),
+        "prepare":"G.GAME.dollars=0;G.play={cards={}};played_card={ability={}}",
+        "invoke":"local reps=collect_repetitions({cardarea=G.play,other_card=played_card,blueprint=true});assert(#reps==0);assert(not resolve_joker({individual=true,cardarea=G.play,other_card=played_card,blueprint=true}));assert(hand_chips==0 and mult==1 and G.GAME.dollars==0);reps=collect_repetitions({cardarea=G.play,other_card=played_card});assert(#reps==2);for i=0,#reps do resolve_joker({individual=true,cardarea=G.play,other_card=played_card}) end",
+        "verify":"assert(hand_chips==30 and mult==8 and G.GAME.dollars==9)"}));
+
+    let mut tooltip=joker(json!([{"id":"mixed","trigger":"card_scored","retrigger":true,
+        "effects":[{"effect_type":"retrigger","params":{"repetitions":1}}],
+        "random_groups":[{"id":"normal_chance","chance_numerator":1,"chance_denominator":2,
+            "effects":[{"effect_type":"apply_x_mult","params":{"value":2}}]}]
+    }]));
+    tooltip.description_variables=Some(serde_json::from_value(json!([
+        {"kind":"probability","group_id":"normal_chance","part":"numerator"},
+        {"kind":"probability","group_id":"normal_chance","part":"denominator"}
+    ])).unwrap());
+    cases.push(json!({"kind":"scoring","name":"scoring_retrigger_normal_chance_live_tooltip",
+        "code":Emitter::new().emit_chunk(&compile_joker(&tooltip,"mod")),
+        "prepare":"G.GAME.dollars=0;G.play={cards={}};played_card={ability={}};actor.ability.extra.numerator_0=3;actor.ability.extra.odds_0=7;chance_calls=0;SMODS.pseudorandom_probability=function(card,key,n,d) assert(n==3 and d==7);chance_calls=chance_calls+1;return true end",
+        "invoke":"local vars=test_definition:loc_vars({},actor).vars;assert(vars[1]==3 and vars[2]==7);local reps=collect_repetitions({cardarea=G.play,other_card=played_card});assert(#reps==1 and chance_calls==0);resolve_joker({individual=true,cardarea=G.play,other_card=played_card})",
+        "verify":"assert(mult==2 and chance_calls==1);local vars=test_definition:loc_vars({},actor).vars;assert(vars[1]==3 and vars[2]==7)"}));
+}
+
+fn append_card_retrigger_cases(cases: &mut Vec<Value>) {
+    for object in ["enhancement","seal","edition"] {
+        for grouping in ["direct","chance","loop"] {
+            let effects=json!([
+                {"effect_type":"retrigger","params":{"repetitions":1}},
+                {"effect_type":"add_chips","params":{"value":7}},
+                {"effect_type":"apply_x_chips","params":{"value":2}},
+                {"effect_type":"apply_x_mult","params":{"value":2}},
+                {"effect_type":"set_dollars","params":{"value":2}},
+                {"effect_type":"permanent_bonus","params":{"bonus_type":"perma_bonus","value":3}},
+                {"effect_type":"modify_internal_variable","params":{"variable_name":"counter","operation":"increment","value":1}}
+            ]);
+            let mut rule=json!({"id":"mixed","trigger":"card_scored","retrigger":true,
+                "condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":-1}}]}]});
+            match grouping {
+                "chance" => rule["random_groups"]=json!([{"id":"mixed","chance_numerator":1,"chance_denominator":1,"effects":effects}]),
+                "loop" => rule["loop_groups"]=json!([{"id":"mixed","count":2,"effects":effects}]),
+                _ => rule["effects"]=effects,
+            }
+            let input=json!({"key":"runtime_test","name":"Runtime Test","description":["Test"],
+                "atlas":"CustomCards","pos":{"x":0,"y":0},"rules":[rule],
+                "user_variables":[{"name":"counter","var_type":"number","initial_value":0}]});
+            let chunk=match object {
+                "seal" => compile_seal(&serde_json::from_value::<SealDef>(input).unwrap(),"mod"),
+                "edition" => compile_edition(&serde_json::from_value::<EditionDef>(input).unwrap(),"mod"),
+                _ => compile_enhancement(&serde_json::from_value::<EnhancementDef>(input).unwrap(),"mod"),
+            };
+            let variable_path=match object {
+                "seal" => "actor.ability.seal.extra.counter",
+                "edition" => "actor.edition.extra.counter",
+                _ => "actor.ability.extra.counter",
+            };
+            let object_setup=match object {
+                "seal" => "actor.ability.seal=copy_table(test_definition.config)",
+                "edition" => "actor.edition=copy_table(test_definition.config)",
+                _ => "actor.ability.extra=actor.ability.extra or {}",
+            };
+            let repetitions=if grouping=="loop" {2}else{1};
+            let effect_count=if grouping=="loop" {6}else{2};
+            cases.push(json!({"kind":"scoring","name":format!("scoring_retrigger_{object}_{grouping}"),
+                "code":Emitter::new().emit_chunk(&chunk),
+                "prepare":format!("G.GAME.dollars=0;G.play={{cards={{}}}};actor.ability.perma_bonus=0;{object_setup};SMODS.pseudorandom_probability=function() return true end;SMODS.get_card_areas=function() return {{}} end;eval_card=function(card,context) local effect=test_definition:calculate(card,context);return effect and {{[{object:?}]=effect}} or {{}},{{}} end;reset_score(1,1)"),
+                "invoke":format!("local reps=collect_repetitions({{cardarea=G.play,other_card=actor}});assert(#reps=={repetitions});assert(#repetition_warnings==0);assert(hand_chips==1 and mult==1 and G.GAME.dollars==0);assert(actor.ability.perma_bonus==0 and {variable_path}==0);for i=0,#reps do resolve_joker({{playing_card=true,main_scoring=true,cardarea=G.play,other_card=actor}}) end"),
+                "verify":format!("assert(hand_chips=={});assert(mult=={});assert(G.GAME.dollars=={});assert(actor.ability.perma_bonus=={});assert({variable_path}=={effect_count});assert(message_count('x_chips')=={effect_count} and message_count('x_mult')=={effect_count})",
+                    15*(1<<effect_count)-14,1<<effect_count,2*effect_count,3*effect_count)}));
+        }
+    }
 }
 
 fn append_joker_creation_cases(cases: &mut Vec<Value>) {
@@ -1095,6 +1392,9 @@ fn main() {
         cases.push(json!({"name": id, "kind": "planet", "code": Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"))}));
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
+    append_scoring_group_cases(&mut cases);
+    append_retrigger_scoring_cases(&mut cases);
+    append_card_retrigger_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);

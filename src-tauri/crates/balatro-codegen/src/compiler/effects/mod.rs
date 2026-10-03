@@ -250,6 +250,60 @@ pub fn build_return_block(effects: &[EffectOutput]) -> Vec<Stmt> {
     stmts
 }
 
+/// Collect group results without returning from the enclosing callback. Each
+/// iteration captures its values immediately; Steamodded resolves the complete
+/// linked `extra` chain after the calculation (or collects its repetitions).
+pub(crate) fn collect_group_effects(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    fn collect(stmts: Vec<Stmt>, found: &mut bool) -> Vec<Stmt> {
+        stmts.into_iter().map(|stmt| match stmt {
+            Stmt::Return(Some(effect @ Expr::Table(_))) => {
+                *found = true;
+                lua_expr_stmt(lua_call("jf_append_effect", vec![effect]))
+            }
+            Stmt::If { branches, else_body } => Stmt::If {
+                branches: branches.into_iter()
+                    .map(|(condition, body)| (condition, collect(body, found))).collect(),
+                else_body: else_body.map(|body| collect(body, found)),
+            },
+            Stmt::ForRange { var, start, stop, step, body } => Stmt::ForRange {
+                var, start, stop, step, body: collect(body, found),
+            },
+            Stmt::ForIn { vars, iterators, body } => Stmt::ForIn {
+                vars, iterators, body: collect(body, found),
+            },
+            Stmt::DoBlock(body) => Stmt::DoBlock(collect(body, found)),
+            // Expression functions own their returns (e.g. queued events).
+            stmt => stmt,
+        }).collect()
+    }
+
+    let mut found = false;
+    let collected = collect(stmts, &mut found);
+    if !found {
+        return collected;
+    }
+    let mut body = vec![
+        Stmt::Local("jf_effects".into(), None),
+        Stmt::Local("jf_effects_tail".into(), None),
+        lua_local("jf_append_effect", Expr::Function {
+            params: vec!["effect".into()],
+            body: vec![
+                Stmt::If {
+                    branches: vec![(lua_ident("jf_effects_tail"), vec![lua_assign(
+                        lua_field(lua_ident("jf_effects_tail"), "extra"), lua_ident("effect"),
+                    )])],
+                    else_body: Some(vec![lua_assign(lua_ident("jf_effects"), lua_ident("effect"))]),
+                },
+                lua_assign(lua_ident("jf_effects_tail"), lua_ident("effect")),
+                lua_raw_stmt("while jf_effects_tail.extra do\n    jf_effects_tail = jf_effects_tail.extra\nend"),
+            ],
+        }),
+    ];
+    body.extend(collected);
+    body.push(lua_if(lua_ident("jf_effects"), vec![lua_return(lua_ident("jf_effects"))]));
+    body
+}
+
 fn effect_entries(effect: &EffectOutput) -> Vec<TableEntry> {
     let mut entries: Vec<TableEntry> = Vec::new();
 

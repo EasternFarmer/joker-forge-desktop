@@ -21,9 +21,12 @@ pub fn apply_x_mult(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutpu
     scoring_effect(effect, ctx, "Xmult", "")
 }
 
-/// Apply XChips effect → `Xchips = N`
+/// Apply XChips effect → `x_chips = N`
 pub fn apply_x_chips(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    scoring_effect(effect, ctx, "Xchips", "")
+    // Keep existing ability config names while emitting Steamodded's supported key.
+    let mut output = scoring_effect(effect, ctx, "Xchips", "");
+    output.return_fields[0].0 = "x_chips".to_string();
+    output
 }
 
 /// Apply Exp Chips → `e_chips = N` (Talisman)

@@ -274,14 +274,37 @@ pub(crate) fn compile_rules(rules: &[RuleDef], ctx: &mut CompileContext) -> Vec<
     rules
         .iter()
         .enumerate()
-        .map(|(index, rule)| {
+        .flat_map(|(index, rule)| {
             ctx.begin_preview_rule(index);
-            compile_single_rule(rule, ctx)
+            let has_retrigger_effects = rule.effects.iter()
+                .chain(rule.random_groups.iter().flat_map(|group| &group.effects))
+                .chain(rule.loop_groups.iter().flat_map(|group| &group.effects))
+                .any(is_retrigger_effect);
+            if has_retrigger_effects && triggers::retrigger_trigger_context(
+                ctx.object_type, &rule.trigger, ctx.blueprint_compat,
+            ).is_some() {
+                // Repetition discovery consumes only repetition counts. Scoring
+                // and mutations must run when the card is actually evaluated.
+                vec![
+                    compile_single_rule(rule, ctx, Some(false)),
+                    compile_single_rule(rule, ctx, Some(true)),
+                ]
+            } else {
+                vec![compile_single_rule(rule, ctx, None)]
+            }
         })
         .collect()
 }
 
-fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
+fn is_retrigger_effect(effect: &EffectDef) -> bool {
+    matches!(effect.effect_type.as_str(), "retrigger" | "retrigger_playing_card" | "retrigger_cards")
+}
+
+fn effect_matches_phase(effect: &EffectDef, repetition_phase: Option<bool>) -> bool {
+    repetition_phase.map_or(true, |phase| is_retrigger_effect(effect) == phase)
+}
+
+fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phase: Option<bool>) -> RuleOutput {
     let trigger = rule.trigger.clone();
     let is_passive = trigger == "passive";
 
@@ -333,6 +356,9 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     let mut blind_rewards = Vec::new();
     if !is_passive {
         for (index, effect) in rule.effects.iter().enumerate() {
+            if !effect_matches_phase(effect, repetition_phase) {
+                continue;
+            }
             ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             if effect.effect_type == "blind_reward"
                 && (trigger == "round_end" || trigger == "boss_defeated")
@@ -354,19 +380,27 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
 
     // Compile random groups
     for (index, rg) in rule.random_groups.iter().enumerate() {
-        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger);
+        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger, repetition_phase);
         effect_outputs.extend(rg_effects);
     }
 
     // Compile loop groups
     for (index, lg) in rule.loop_groups.iter().enumerate() {
-        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger);
+        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger, repetition_phase);
         effect_outputs.extend(lg_effects);
     }
 
     // Build the effect statements
-    let effect_stmts = if effect_outputs.is_empty() {
-        vec![]
+    let collect_groups = (!rule.random_groups.is_empty() || !rule.loop_groups.is_empty())
+        && !(ctx.object_type == ObjectType::Consumable && trigger == "card_used");
+    let effect_stmts = if collect_groups {
+        // Group effects must not return out of the calculate hook mid-loop or
+        // before sibling effects. Consumable use already resolves each table.
+        // Capture direct effects before groups in their configured order.
+        let stmts = effect_outputs.iter()
+            .flat_map(|output| effects::build_return_block(std::slice::from_ref(output)))
+            .collect();
+        effects::collect_group_effects(stmts)
     } else {
         effects::build_return_block(&effect_outputs)
     };
@@ -380,8 +414,8 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
         is_passive,
         passive_outputs,
         passive_hooks,
-        has_retrigger: rule.retrigger,
-        has_destroy: rule.destroy,
+        has_retrigger: repetition_phase == Some(true),
+        has_destroy: rule.destroy && repetition_phase != Some(true),
         blind_rewards,
     }
 }
@@ -400,7 +434,13 @@ fn compile_random_group(
     rg: &RandomGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
+    repetition_phase: Option<bool>,
 ) -> Vec<effects::EffectOutput> {
+    if repetition_phase.is_some() && !rg.effects.is_empty()
+        && !rg.effects.iter().any(|effect| effect_matches_phase(effect, repetition_phase))
+    {
+        return vec![];
+    }
     let numerator = rg.chance_numerator.as_i64().unwrap_or(1);
     let denom = rg.chance_denominator.as_i64().unwrap_or(2);
     ctx.register_description_probability(&rg.id, context::DescriptionProbability {
@@ -411,6 +451,9 @@ fn compile_random_group(
     // Compile the effects within the random group
     let mut inner_outputs = Vec::new();
     for (index, effect) in rg.effects.iter().enumerate() {
+        if !effect_matches_phase(effect, repetition_phase) {
+            continue;
+        }
         ctx.set_preview_node(vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
@@ -473,9 +516,13 @@ fn compile_loop_group(
     lg: &LoopGroupDef,
     ctx: &mut CompileContext,
     trigger: &str,
+    repetition_phase: Option<bool>,
 ) -> Vec<effects::EffectOutput> {
     let mut inner_outputs = Vec::new();
     for (index, effect) in lg.effects.iter().enumerate() {
+        if !effect_matches_phase(effect, repetition_phase) {
+            continue;
+        }
         ctx.set_preview_node(vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
             eo.segment_id = effect_segment_id(rule_id, effect);
@@ -743,22 +790,22 @@ fn build_calculate_function(rule_outputs: &[RuleOutput], ctx: &CompileContext) -
         }
     }
 
-    // Group non-passive rules by trigger type
-    let mut triggers_seen: Vec<String> = Vec::new();
+    // Normal scoring and repetition discovery are separate engine callbacks.
+    let mut triggers_seen: Vec<(String, bool)> = Vec::new();
     for ro in &non_passive {
-        if !triggers_seen.contains(&ro.trigger) {
-            triggers_seen.push(ro.trigger.clone());
+        let phase = (ro.trigger.clone(), ro.has_retrigger);
+        if !triggers_seen.contains(&phase) {
+            triggers_seen.push(phase);
         }
     }
 
-    for trigger in &triggers_seen {
+    for (trigger, use_retrigger_context) in &triggers_seen {
         let rules_for_trigger: Vec<&RuleOutput> = non_passive
             .iter()
             .copied()
-            .filter(|r| r.trigger == *trigger)
+            .filter(|r| r.trigger == *trigger && r.has_retrigger == *use_retrigger_context)
             .collect();
 
-        let use_retrigger_context = rules_for_trigger.iter().any(|r| r.has_retrigger);
         let has_trigger_destroy = rules_for_trigger.iter().any(|r| r.has_destroy);
 
         // Get the trigger context expression
@@ -766,7 +813,7 @@ fn build_calculate_function(rule_outputs: &[RuleOutput], ctx: &CompileContext) -
             ctx.object_type,
             trigger,
             ctx.blueprint_compat,
-            use_retrigger_context,
+            *use_retrigger_context,
         );
 
         let mut trigger_body: Vec<Stmt> = Vec::new();
