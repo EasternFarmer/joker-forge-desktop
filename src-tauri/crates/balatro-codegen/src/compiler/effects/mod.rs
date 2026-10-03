@@ -66,7 +66,7 @@ pub fn compile_effect(
         }
 
         // --------------- Creation ---------------
-        "create_joker" => creation::create_joker(effect, ctx),
+        "create_joker" => creation::create_joker(effect, ctx, trigger),
         "create_consumable" | "add_consumable" => creation::create_consumable(effect, ctx),
         "create_playing_card" => creation::create_playing_card(effect, ctx),
         "create_playing_cards" => creation::create_playing_cards(effect, ctx),

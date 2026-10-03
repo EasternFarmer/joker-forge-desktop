@@ -65,6 +65,7 @@ SMODS = {
  Joker=function(definition) test_definition=definition end,
  Consumable=function(definition) test_definition=definition end,
  Voucher=function(definition) test_definition=definition end,
+ Back=function(definition) test_definition=definition end,
  get_probability_vars=function(card,numerator,denominator) return numerator,denominator end,
  has_enhancement=function(card, key) return card.config and card.config.center and card.config.center.key==key end,
  get_enhancements=function(card)
@@ -102,6 +103,28 @@ function localize(key) return key end
 
 
 EFFECT_RESOLVER = steamodded_effect_resolver()
+JOKER_CREATION_STATE = """
+G={GAME={joker_buffer=0},C={GREEN=1}}
+event_queue={};created_cards={}
+function Event(event) return event end
+G.E_MANAGER={add_event=function(self,event) event_queue[#event_queue+1]=event end}
+function run_events()
+ while #event_queue>0 do local event=table.remove(event_queue,1);assert(event.func()) end
+end
+function joker_area(limit,count)
+ local area={cards={},config={card_limit=limit}}
+ for i=1,count do area.cards[i]={existing=true} end
+ return area
+end
+function SMODS.add_card(params)
+ assert(G.jokers and G.jokers.cards and G.jokers.config, 'Joker area must exist at creation')
+ local card={params=params,buffer_at_add=G.GAME.joker_buffer or 0}
+ -- SMODS.add_card emplaces synchronously before returning to its caller.
+ G.jokers.cards[#G.jokers.cards+1]=card
+ created_cards[#created_cards+1]=card
+ return card
+end
+"""
 RULE_OPTIONS_STATE = """
 Card={};Card.__index=Card
 function Card:set_cost()
@@ -234,14 +257,15 @@ KNOWN_VALUES = {
 def run_checks(lua, cases):
     checks = 0
     for case in cases:
-        if case["kind"] == "rule_options":
-            source = HELPERS + EFFECT_RESOLVER + RULE_OPTIONS_STATE + case.get("setup", "") + "\n" + case["code"]
+        if case["kind"] in ("rule_options", "joker_creation"):
+            state = JOKER_CREATION_STATE if case["kind"] == "joker_creation" else RULE_OPTIONS_STATE
+            source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
             source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"
             source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
             try:
                 evaluate(lua, source)
             except AssertionError as error:
-                raise AssertionError(f"rule option {case['name']}: {error}") from error
+                raise AssertionError(f"{case['kind']} {case['name']}: {error}") from error
             checks += 1
             continue
         if case["kind"] == "planet":

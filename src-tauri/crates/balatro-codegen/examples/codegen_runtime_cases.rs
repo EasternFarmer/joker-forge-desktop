@@ -10,9 +10,9 @@ use balatro_codegen::compiler::values::{
     game_var_lua_code, resolve_condition_value, resolve_value,
 };
 use balatro_codegen::types::{
-    ConditionDef, ConsumableDef, EffectDef, JokerDef, ObjectType, ParamValue, UserVariableDef, VoucherDef,
+    ConditionDef, ConsumableDef, DeckDef, EffectDef, JokerDef, ObjectType, ParamValue, UserVariableDef, VoucherDef,
 };
-use balatro_codegen::{compile_consumable, compile_joker, compile_voucher, Emitter};
+use balatro_codegen::{compile_consumable, compile_deck, compile_joker, compile_voucher, Emitter};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -24,6 +24,79 @@ fn joker(rules: Value) -> JokerDef {
         "atlas": "CustomJokers", "pos": {"x": 0, "y": 0}, "rules": rules
     }))
     .unwrap()
+}
+
+fn deck(rules: Value) -> DeckDef {
+    serde_json::from_value(json!({
+        "key":"runtime_test", "name":"Runtime Test", "description":["Test"],
+        "atlas":"CustomDecks", "pos":{"x":0,"y":0}, "rules":rules
+    }))
+    .unwrap()
+}
+
+fn append_joker_creation_cases(cases: &mut Vec<Value>) {
+    let effect = json!({"effect_type":"create_joker", "params":{
+        "joker_type":"specific", "joker_key":"j_joker"
+    }});
+    let rules = json!([{"id":"create", "trigger":"card_used", "effects":[effect.clone()]}]);
+    let code = Emitter::new().emit_chunk(&compile_deck(&deck(rules.clone()), "mod"));
+    // Back:apply runs before the new run's Joker area exists. Replace the area
+    // only after invoking the generated callback, then execute queued events.
+    for (name, prepare, initialize, expected, buffer) in [
+        ("missing_area", "G.jokers=nil", "G.jokers=joker_area(5,0)", 1, 0),
+        ("stale_full_area", "old_area=joker_area(5,5);G.jokers=old_area", "G.jokers=joker_area(5,0)", 1, 0),
+        ("full_new_area", "G.jokers=nil", "G.jokers=joker_area(2,2)", 0, 0),
+        ("zero_slots", "G.jokers=nil", "G.jokers=joker_area(0,0)", 0, 0),
+        ("pending_buffer_full", "G.jokers=nil;G.GAME.joker_buffer=1", "G.jokers=joker_area(1,0)", 0, 1),
+        ("pending_buffer_room", "G.jokers=nil;G.GAME.joker_buffer=1", "G.jokers=joker_area(3,1)", 1, 1),
+        ("missing_buffer", "G.jokers=nil;G.GAME.joker_buffer=nil", "G.jokers=joker_area(5,0)", 1, 0),
+    ] {
+        cases.push(json!({"kind":"joker_creation", "name":format!("deck_create_joker_{name}"),
+            "code":code, "prepare":prepare,
+            "invoke":format!("test_definition:apply(actor);assert(#created_cards==0);assert(#event_queue==1);{initialize};run_events()"),
+            "verify":format!("assert(#created_cards=={expected});assert((G.GAME.joker_buffer or 0)=={buffer});if created_cards[1] then assert(created_cards[1].params.key=='j_joker');assert(created_cards[1].params.set=='Joker');assert(created_cards[1].buffer_at_add=={}) end;if old_area then assert(#old_area.cards==5) end",buffer+1)}));
+    }
+    let mut multiple_rules = rules.clone();
+    multiple_rules[0]["effects"] = json!([effect.clone(), effect.clone(), effect.clone(), effect.clone()]);
+    cases.push(json!({"kind":"joker_creation", "name":"deck_create_joker_multiple_effects",
+        "code":Emitter::new().emit_chunk(&compile_deck(&deck(multiple_rules), "mod")),
+        "prepare":"G.jokers=nil", "invoke":"test_definition:apply(actor);assert(#event_queue==4);G.jokers=joker_area(2,0);run_events()",
+        "verify":"assert(#created_cards==2 and #G.jokers.cards==2);assert(G.GAME.joker_buffer==0);assert(created_cards[1].buffer_at_add==1 and created_cards[2].buffer_at_add==1)"}));
+    cases.push(json!({"kind":"joker_creation", "name":"deck_create_joker_repeated_callbacks",
+        "code":code, "prepare":"G.jokers=nil",
+        "invoke":"test_definition:apply(actor);test_definition:apply(actor);test_definition:apply(actor);assert(#event_queue==3);G.jokers=joker_area(2,0);run_events()",
+        "verify":"assert(#created_cards==2 and #G.jokers.cards==2);assert(G.GAME.joker_buffer==0)"}));
+
+    for (name, params) in [
+        ("ignore_slots_checkbox", json!({"ignoreSlots":true})),
+        ("ignore_slots_selector", json!({"ignore_slots":"ignore"})),
+        ("negative_edition", json!({"edition":"negative"})),
+    ] {
+        let mut bypass_rules = rules.clone();
+        for (key, value) in params.as_object().unwrap() {
+            bypass_rules[0]["effects"][0]["params"][key] = value.clone();
+        }
+        cases.push(json!({"kind":"joker_creation", "name":format!("deck_create_joker_{name}"),
+            "code":Emitter::new().emit_chunk(&compile_deck(&deck(bypass_rules), "mod")),
+            "prepare":"G.jokers=nil;G.GAME.joker_buffer=2",
+            "invoke":"test_definition:apply(actor);assert(#event_queue==1);G.jokers=joker_area(0,0);run_events()",
+            "verify":format!("assert(#created_cards==1);assert(G.GAME.joker_buffer==2);assert(created_cards[1].buffer_at_add==2);{}",
+                if name=="negative_edition" {"assert(created_cards[1].params.edition=='e_negative')"} else {"assert(created_cards[1].params.edition==nil)"})}));
+    }
+
+    let calculate_rules = json!([{"id":"create", "trigger":"hand_played", "effects":[effect]}]);
+    for object in ["deck", "joker"] {
+        let chunk = if object == "deck" {
+            compile_deck(&deck(calculate_rules.clone()), "mod")
+        } else {
+            compile_joker(&joker(calculate_rules.clone()), "mod")
+        };
+        let context = if object == "deck" {"{main_eval=true}"} else {"{joker_main=true}"};
+        cases.push(json!({"kind":"joker_creation", "name":format!("create_joker_{object}_calculate_reserves_slots"),
+            "code":Emitter::new().emit_chunk(&chunk), "prepare":"G.jokers=joker_area(1,0)",
+            "invoke":format!("test_definition:calculate(actor,{context});test_definition:calculate(actor,{context});assert(#event_queue==1);assert(G.GAME.joker_buffer==1);assert(#created_cards==0);run_events()"),
+            "verify":"assert(#created_cards==1 and #G.jokers.cards==1);assert(G.GAME.joker_buffer==0);assert(created_cards[1].buffer_at_add==1)"}));
+    }
 }
 
 /// Exercise registration and the real generated callback, rather than duplicating
@@ -1022,6 +1095,7 @@ fn main() {
         cases.push(json!({"name": id, "kind": "planet", "code": Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"))}));
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
+    append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);
     append_global_lifecycle_case(&mut cases);

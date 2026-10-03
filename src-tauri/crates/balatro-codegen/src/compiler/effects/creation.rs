@@ -2,13 +2,13 @@ use crate::compiler::context::CompileContext;
 use crate::compiler::effects::utils::is_literal_one_param;
 use crate::compiler::effects::EffectOutput;
 use crate::lua_ast::*;
-use crate::types::{EffectDef, ParamValue};
+use crate::types::{EffectDef, ObjectType, ParamValue};
 
 /// Create Joker effect: spawns a joker card.
 ///
 /// This is one of the more complex effects: it needs pre-return code for
 /// the event manager, handles slot limits, editions: and stickers.
-pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
     let joker_type = get_str_param_any(effect, &["joker_type", "jokerType"]).unwrap_or("random");
     let rarity = get_str_param(effect, "rarity").unwrap_or("random");
     let edition = get_str_param(effect, "edition");
@@ -62,10 +62,11 @@ pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutpu
     let is_negative = edition.map(is_negative_edition).unwrap_or(false);
     let bypass_slot_check = ignore_slots || is_negative;
     let payload = card_params.join(", ");
+    let slot_guard = "G.jokers and G.jokers.cards and G.jokers.config and #G.jokers.cards + (G.GAME.joker_buffer or 0) < G.jokers.config.card_limit";
     let slot_open = if bypass_slot_check {
         "local created_joker = true".to_string()
     } else {
-        "local created_joker = false\nif G.jokers and G.jokers.cards and G.jokers.config and #G.jokers.cards + (G.GAME.joker_buffer or 0) < G.jokers.config.card_limit then\n    created_joker = true\n    G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1".to_string()
+        format!("local created_joker = false\nif {slot_guard} then\n    created_joker = true\n    G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1")
     };
     let slot_close = if bypass_slot_check {
         String::new()
@@ -78,15 +79,36 @@ pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutpu
         "\n            G.GAME.joker_buffer = math.max(0, (G.GAME.joker_buffer or 1) - 1)"
     };
 
-    let pre_return = vec![lua_raw_stmt(format!(
-        "{slot_open}\n\
-        G.E_MANAGER:add_event(Event({{\n\
-            func = function()\n\
-                local joker_card = SMODS.add_card({{ {payload} }}){buffer_reset}\n\
-                return true\n\
-            end\n\
-        }})){slot_close}",
-    ))];
+    let creation_code = if ctx.object_type == ObjectType::Deck
+        && trigger == "card_used"
+        && !bypass_slot_check
+    {
+        format!(
+            "local created_joker = false\n\
+            G.E_MANAGER:add_event(Event({{\n\
+                func = function()\n\
+                    if {slot_guard} then\n\
+                        created_joker = true\n\
+                        G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1\n\
+                        local joker_card = SMODS.add_card({{ {payload} }})\n\
+                        G.GAME.joker_buffer = math.max(0, (G.GAME.joker_buffer or 1) - 1)\n\
+                    end\n\
+                    return true\n\
+                end\n\
+            }}))"
+        )
+    } else {
+        format!(
+            "{slot_open}\n\
+            G.E_MANAGER:add_event(Event({{\n\
+                func = function()\n\
+                    local joker_card = SMODS.add_card({{ {payload} }}){buffer_reset}\n\
+                    return true\n\
+                end\n\
+            }})){slot_close}",
+        )
+    };
+    let pre_return = vec![lua_raw_stmt(creation_code)];
 
     // Message for the return
     let message = Some(lua_and(
