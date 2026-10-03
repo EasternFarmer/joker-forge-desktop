@@ -59,6 +59,8 @@ import {
 import { TemplatePickerDialog } from "@/components/templates/template-picker-dialog";
 import { pushGlobalAlert } from "@/lib/app/global-alerts-bus";
 import { EditJokerDialog } from "@/components/edit-dialogs";
+import { BulkEditItemsDialog } from "@/components/edit-dialogs/bulk-edit-items-dialog";
+import { applyBulkItemEdits, duplicateItem, type BulkItemEdits } from "@/lib/items/bulk-edit";
 import {
   getItemLocVarsFromUserVariables,
   getVariableDisplayValue,
@@ -71,6 +73,8 @@ export default function JokersPage() {
   const modName = useModName();
   const [searchParams, setSearchParams] = useSearchParams();
   const [editingItem, setEditingItem] = useState<JokerData | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkEditIds, setBulkEditIds] = useState<Set<string> | null>(null);
   const [ruleEditingItem, setRuleEditingItem] = useState<JokerData | null>(
     null,
   );
@@ -101,6 +105,18 @@ export default function JokersPage() {
     },
     [handleUpdate],
   );
+
+  const handleDuplicate = useCallback((joker: JokerData) => {
+    updateJokers((previous) => [...previous, duplicateItem(joker, previous)]);
+  }, [updateJokers]);
+
+  const handleBulkEdit = (edits: BulkItemEdits) => {
+    if (!bulkEditIds || edits.kind !== "joker") return;
+    updateJokers((previous) => applyBulkItemEdits(previous, bulkEditIds, edits));
+    setBulkEditIds(null);
+    setSelectedIds(new Set());
+  };
+  const bulkItems = bulkEditIds ? data.jokers.filter((item) => bulkEditIds.has(item.id)) : [];
 
   const handleRulesSave = useCallback(
     (rules: Rule[]) => {
@@ -312,19 +328,7 @@ export default function JokersPage() {
         overlayImage={joker.overlayImage}
         hasManualEdits={Boolean((joker as { customCode?: unknown }).customCode)}
         onUpdate={(updates) => handleUpdate(joker.id, updates)}
-        onDuplicate={() => {
-          const duplicatedJoker: JokerData = {
-            ...joker,
-            id: crypto.randomUUID(),
-            name: `${joker.name} (Copy)`,
-            objectKey: `${joker.objectKey}_copy`,
-            orderValue: 0,
-          };
-          updateJokers((previous) => [
-            ...previous,
-            { ...duplicatedJoker, orderValue: previous.length + 1 },
-          ]);
-        }}
+        onDuplicate={() => handleDuplicate(joker)}
         image={
           <div className="w-full h-full relative group cursor-pointer rounded-lg overflow-hidden flex items-center justify-center">
             {joker.image ? (
@@ -543,6 +547,7 @@ export default function JokersPage() {
     [
       createItemTemplate,
       handleExport,
+      handleDuplicate,
       handleUpdate,
       requestDelete,
       updateJokers,
@@ -621,19 +626,7 @@ export default function JokersPage() {
             id: "duplicate",
             label: "Duplicate",
             icon: <Copy weight="regular" />,
-            onClick: () => {
-              const duplicatedJoker: JokerData = {
-                ...joker,
-                id: crypto.randomUUID(),
-                name: `${joker.name} (Copy)`,
-                objectKey: `${joker.objectKey}_copy`,
-                orderValue: 0,
-              };
-              updateJokers((previous) => [
-                ...previous,
-                { ...duplicatedJoker, orderValue: previous.length + 1 },
-              ]);
-            },
+            onClick: () => handleDuplicate(joker),
             variant: "ghost",
           },
           {
@@ -649,6 +642,7 @@ export default function JokersPage() {
     [
       createItemTemplate,
       handleExport,
+      handleDuplicate,
       requestDelete,
       updateJokers,
     ],
@@ -660,6 +654,10 @@ export default function JokersPage() {
         title="Jokers"
         subtitle={modName}
         items={data.jokers}
+        selectedIds={selectedIds}
+        selectionScopeKey={data.metadata.id}
+        onSelectionChange={setSelectedIds}
+        onBulkEdit={() => setBulkEditIds(new Set(selectedIds))}
         isLoading={isHydrating}
         onAddNew={handleCreate}
         onAddFromTemplate={
@@ -675,6 +673,17 @@ export default function JokersPage() {
         renderCard={renderCard}
         renderCompactCard={renderCompactCard}
       />
+      {bulkItems.length > 0 && (
+        <BulkEditItemsDialog
+          kind="joker"
+          items={bulkItems}
+          rarityOptions={getRarityDropdownOptions(data.rarities)}
+          poolOptions={[...new Set(data.jokers.flatMap((item) => item.pools ?? []))]}
+          modPrefix={data.metadata.prefix}
+          onApply={handleBulkEdit}
+          onClose={() => setBulkEditIds(null)}
+        />
+      )}
       <TemplatePickerDialog
         open={isTemplatePickerOpen}
         onOpenChange={setIsTemplatePickerOpen}

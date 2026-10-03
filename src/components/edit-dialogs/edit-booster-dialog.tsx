@@ -6,8 +6,24 @@ import {
 } from "@/components/pages/generic-item-dialog";
 import { GenericDialogColorPicker } from "@/components/ui/generic-dialog-color-picker";
 import { processBalatroCardImage } from "@/lib/media/image-processing-utils";
-import type { BoosterData } from "@/lib/core/types";
-import { Gear, Image as ImageIcon, TextT } from "@phosphor-icons/react";
+import type { BoosterData, BoosterType } from "@/lib/core/types";
+import { Cards, Gear, Image as ImageIcon, TextT } from "@phosphor-icons/react";
+import { BoosterCardRulesEditor, getDefaultBoosterDescription } from "./booster-card-rules-editor";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const BOOSTER_TYPES: Array<{ value: BoosterType; label: string }> = [
+  { value: "joker", label: "Joker Pack" },
+  { value: "consumable", label: "Consumable Pack" },
+  { value: "playing_card", label: "Playing Card Pack" },
+  { value: "voucher", label: "Voucher Pack" },
+];
 
 interface EditBoosterDialogProps {
   editingItem: BoosterData | null;
@@ -58,19 +74,42 @@ export function EditBoosterDialog({
                 id: "objectKey",
                 type: "text",
                 label: "Object Key",
-                placeholder: "p_pack",
+                placeholder: "my_pack",
                 className: "col-span-2",
               },
               {
                 id: "booster_type",
-                type: "select",
+                type: "custom",
                 label: "Booster Type",
-                options: [
-                  { value: "joker", label: "Joker Pack" },
-                  { value: "consumable", label: "Consumable Pack" },
-                  { value: "playing_card", label: "Playing Card Pack" },
-                  { value: "voucher", label: "Voucher Pack" },
-                ],
+                description: "Changing pack type resets its content options.",
+                render: (value, onChange, item, setField) => (
+                  <Select
+                    value={value || "joker"}
+                    onValueChange={(nextType) => {
+                      if (nextType !== item.booster_type) {
+                        setField("card_rules", []);
+                        setField("draw_hand", nextType === "consumable");
+                        if (item.description === getDefaultBoosterDescription(item.booster_type)) {
+                          setField("description", getDefaultBoosterDescription(nextType as BoosterType));
+                        }
+                      }
+                      onChange(nextType);
+                    }}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BOOSTER_TYPES.map((type) => (
+                        <SelectItem key={type.value} value={type.value}>
+                          {type.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ),
+                validate: (value) => BOOSTER_TYPES.some((type) => type.value === value)
+                  ? null : "Choose a pack type.",
               },
               {
                 id: "cost",
@@ -96,13 +135,24 @@ export function EditBoosterDialog({
                 id: "config.extra",
                 type: "number",
                 label: "Cards in Pack",
-                min: 0,
+                min: 1,
+                step: 1,
+                validate: (value) => Number.isInteger(value) && value >= 1
+                  ? null : "Enter a whole number of at least 1.",
               },
               {
                 id: "config.choose",
                 type: "number",
                 label: "Cards to Choose",
-                min: 0,
+                min: 1,
+                step: 1,
+                validate: (value, item) => {
+                  if (!Number.isInteger(value) || value < 1) {
+                    return "Enter a whole number of at least 1.";
+                  }
+                  return value > (item.config.extra ?? 3)
+                    ? "Cannot choose more cards than the pack contains." : null;
+                },
               },
             ],
           },
@@ -112,11 +162,6 @@ export function EditBoosterDialog({
             className: "grid grid-cols-2 gap-6",
             fields: [
               {
-                id: "unlocked",
-                type: "switch",
-                label: "Unlocked by Default",
-              },
-              {
                 id: "discovered",
                 type: "switch",
                 label: "Discovered by Default",
@@ -124,12 +169,46 @@ export function EditBoosterDialog({
               {
                 id: "draw_hand",
                 type: "switch",
-                label: "Draw to Hand",
+                label: "Draw Your Hand When Opened",
               },
               {
                 id: "instant_use",
                 type: "switch",
-                label: "Instant Use",
+                label: "Use Selected Consumables Immediately",
+                hidden: (item) => item.booster_type !== "consumable",
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: "contents",
+        label: "Pack Contents",
+        icon: Cards,
+        groups: [
+          {
+            id: "card_rules",
+            className: "grid grid-cols-1",
+            fields: [
+              {
+                id: "card_rules",
+                type: "custom",
+                label: "Content Options",
+                render: (value, onChange, item) => (
+                  <BoosterCardRulesEditor
+                    type={item.booster_type}
+                    rules={Array.isArray(value) ? value : []}
+                    onChange={onChange}
+                  />
+                ),
+                validate: (value) => {
+                  if (!Array.isArray(value)) return null;
+                  if (value.some((rule) => !Number.isFinite(rule.weight ?? 1) || (rule.weight ?? 1) < 0)) {
+                    return "Content weights must be zero or greater.";
+                  }
+                  return value.length > 0 && !value.some((rule) => (rule.weight ?? 1) > 0)
+                    ? "At least one content option needs a weight greater than zero." : null;
+                },
               },
             ],
           },
@@ -170,10 +249,17 @@ export function EditBoosterDialog({
                 placeholder: "e.g. Ephemeral",
               },
               {
-                id: "group_key",
-                type: "text",
-                label: "Group Key",
-                placeholder: "k_booster_group_mystical",
+                id: "pack_group",
+                type: "custom",
+                label: "Pack Group Name",
+                description: "Optional display title shown when opening the pack. Defaults to the pack name.",
+                render: (_value, _onChange, item, setField) => (
+                  <Input
+                    value={item.group_key || ""}
+                    placeholder="e.g. Mystical Pack"
+                    onChange={(event) => setField("group_key", event.target.value)}
+                  />
+                ),
               },
               {
                 id: "hidden",
@@ -235,7 +321,7 @@ export function EditBoosterDialog({
       onOpenChange={(open) => !open && setEditingItem(null)}
       item={editingItem}
       title={`Edit ${editingItem?.name || "Booster"}`}
-      description="Modify booster properties."
+      description="Customize the pack's appearance, contents, and selection settings."
       tabs={boosterDialogTabs}
       onSave={onSave}
       showPlaceholderPicker

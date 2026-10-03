@@ -21,9 +21,9 @@ use vorbis_rs::VorbisEncoderBuilder;
 use super::{
     compiler::Compiler,
     export::{
-        AtlasPosInput, BatchConsumableEntry, BatchDeckEntry, BatchEditionEntry,
+        AtlasPosInput, BatchBoosterEntry, BatchConsumableEntry, BatchDeckEntry, BatchEditionEntry,
         BatchEnhancementEntry, BatchJokerEntry, BatchSealEntry, BatchVoucherEntry,
-        ConsumableDataInput, ConsumableSetDataInput, DeckDataInput, EditionDataInput,
+        BoosterDataInput, ConsumableDataInput, ConsumableSetDataInput, DeckDataInput, EditionDataInput,
         EnhancementDataInput, JokerDataInput, ModMetadataInput, RarityDataInput, SealDataInput,
         SoundDataInput, VoucherDataInput,
     },
@@ -417,6 +417,17 @@ fn compile_edition_lua_from_input(
     strip_export_comments(&format_lua_source(&LuaEmitter::new().emit_chunk(&chunk)))
 }
 
+fn compile_booster_lua_from_input(
+    item: &BoosterDataInput,
+    pos: AtlasPosInput,
+    mod_prefix: &str,
+    include_loc_txt: bool,
+) -> String {
+    let def = super::export::booster_data_to_def(item, pos);
+    let chunk = balatro_codegen::compiler::compile_booster_with_options(&def, mod_prefix, include_loc_txt);
+    strip_export_comments(&format_lua_source(&LuaEmitter::new().emit_chunk(&chunk)))
+}
+
 /// Compile a single joker from raw frontend data.
 ///
 /// Accepts the unmodified TypeScript `JokerData` object. The Rust `export`
@@ -536,6 +547,11 @@ pub fn compile_item_from_data(
                 &mapped_globals,
             ))
         }
+        "booster" => {
+            let parsed: BoosterDataInput = serde_json::from_value(item_data)
+                .map_err(|e| format!("Invalid booster data: {}", e))?;
+            Ok(compile_booster_lua_from_input(&parsed, base_pos, &mod_prefix, include_loc_txt))
+        }
         _ => Err(format!("Unsupported item type: {}", item_type)),
     }
 }
@@ -634,6 +650,13 @@ pub fn compile_item_from_data_with_segments(
             let chunk = compile_edition(&def, &mod_prefix);
             LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
         }
+        "booster" => {
+            let parsed: BoosterDataInput = serde_json::from_value(item_data)
+                .map_err(|e| format!("Invalid booster data: {}", e))?;
+            let def = super::export::booster_data_to_def(&parsed, base_pos);
+            let chunk = balatro_codegen::compiler::compile_booster_with_options(&def, &mod_prefix, include_loc_txt);
+            LuaEmitter::new().emit_chunk_with_field_bindings(&chunk)
+        }
         _ => return Err(format!("Unsupported item type: {}", item_type)),
     };
 
@@ -660,6 +683,35 @@ pub fn compile_item_from_data_with_segments(
 #[cfg(test)]
 mod live_code_preview_tests {
     use super::*;
+
+    #[test]
+    fn frontend_booster_contents_and_pack_settings_reach_preview_and_export() {
+        let input = serde_json::json!({
+            "objectKey": "royal_pack", "name": "Royal Pack", "description": "Choose #1# of #2#",
+            "booster_type": "playing_card", "cost": 6, "weight": 0.5,
+            "config": { "extra": 5, "choose": 2 }, "draw_hand": true,
+            "card_rules": [{ "weight": 1, "suit": "Hearts", "rank": "King",
+                "edition": "e_foil", "enhancement": "m_bonus", "seal": "Gold" }]
+        });
+        for include_loc_txt in [true, false] {
+            let preview = compile_item_from_data_with_segments(
+                "booster".into(), input.clone(), None, None, "forge".into(), include_loc_txt, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                "booster".into(), input.clone(), None, None, "forge".into(), include_loc_txt, None,
+            ).unwrap();
+            for code in [&preview.code, &exported] {
+                for expected in ["SMODS.Booster", "extra = 5", "choose = 2", "cost = 6", "weight = 0.5",
+                    "draw_hand = true", "create_card = function(self, card, i)", "set = 'Playing Card'",
+                    "suit = 'Hearts'", "rank = 'King'", "edition = 'e_foil'", "enhancement = 'm_bonus'", "seal = 'Gold'",
+                    "area = G.pack_cards"] {
+                    assert!(code.contains(expected), "Missing {expected}: {code}");
+                }
+                assert_eq!(code.contains("loc_txt ="), include_loc_txt, "{code}");
+                assert!(!code.contains("add_to_deck"), "Pack contents should be unowned: {code}");
+            }
+        }
+    }
 
     #[test]
     fn frontend_planet_parameters_reach_use_preview_and_export() {
@@ -1051,6 +1103,7 @@ pub fn export_mod_package(
     enhancements: Vec<BatchEnhancementEntry>,
     seals: Vec<BatchSealEntry>,
     editions: Vec<BatchEditionEntry>,
+    boosters: Vec<BatchBoosterEntry>,
     include_loc_txt: bool,
     use_localization_file: bool,
     localization_locale: Option<String>,
@@ -1070,6 +1123,8 @@ pub fn export_mod_package(
     seals_atlas_2x_png: Option<Vec<u8>>,
     decks_atlas_1x_png: Option<Vec<u8>>,
     decks_atlas_2x_png: Option<Vec<u8>>,
+    boosters_atlas_1x_png: Option<Vec<u8>>,
+    boosters_atlas_2x_png: Option<Vec<u8>>,
     remove_other_managed_mods: bool,
     managed_mod_folder_names: Option<Vec<String>>,
 ) -> Result<usize, String> {
@@ -1136,6 +1191,7 @@ pub fn export_mod_package(
         &seals,
         &editions,
         &metadata.prefix,
+        &boosters,
         mod_icon_1x_png.as_ref().is_some() || mod_icon_2x_png.as_ref().is_some(),
         game_logo_1x_png.as_ref().is_some() || game_logo_2x_png.as_ref().is_some(),
         !rarities.is_empty(),
@@ -1387,6 +1443,35 @@ pub fn export_mod_package(
         }
     }
 
+    if let Some(b) = boosters_atlas_1x_png {
+        write_atlas("1x", "CustomBoosters.png", b)?;
+        file_count += 1;
+    }
+    if let Some(b) = boosters_atlas_2x_png {
+        write_atlas("2x", "CustomBoosters.png", b)?;
+        file_count += 1;
+    }
+
+    // Write boosters
+    if !boosters.is_empty() {
+        let dir = root.join("boosters");
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+        for entry in &boosters {
+            let lua = entry.custom_lua.clone().unwrap_or_else(|| {
+                compile_booster_lua_from_input(
+                    &entry.booster_data,
+                    entry.pos.clone(),
+                    &metadata.prefix,
+                    include_loc_txt,
+                )
+            });
+            fs::write(dir.join(&entry.file_name), lua.as_bytes())
+                .map_err(|e| format!("Failed to write {}: {}", entry.file_name, e))?;
+            file_count += 1;
+        }
+    }
+
     // Write enhancements
     if !enhancements.is_empty() {
         let dir = root.join("enhancements");
@@ -1505,6 +1590,7 @@ pub fn export_mod_package(
             &enhancements,
             &seals,
             &editions,
+            &boosters,
         );
 
         for (locale_key, loc_contents) in localization_files {

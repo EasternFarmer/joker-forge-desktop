@@ -7,7 +7,7 @@
 //! updating Rust, not both the TypeScript mapper and the Rust codegen.
 
 use balatro_codegen::types::{
-    AppearanceDef, AtlasPos, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef, DescriptionVariableBinding,
+    AppearanceDef, AtlasPos, BoosterCardRuleDef, BoosterDef, ConditionDef, ConditionGroupDef, ConsumableDef, ConsumableTypeDef, DescriptionVariableBinding,
     DeckDef, DisplaySize, EditionDef, EffectDef, EnhancementDef, JokerDef, LogicOp, LoopGroupDef,
     ParamValue, RandomGroupDef, RarityDef, RuleDef, SealDef, TypedValue, UnlockDef, UserVarType,
     UserVariableDef, VoucherDef,
@@ -315,6 +315,56 @@ pub struct DeckDataInput {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BoosterDataInput {
+    #[serde(rename = "objectKey")]
+    pub object_key: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub localizations: Vec<LocalizationEntryInput>,
+    #[serde(default = "default_booster_type")]
+    pub booster_type: String,
+    #[serde(default)]
+    pub config: BoosterConfigInput,
+    #[serde(default)]
+    pub card_rules: Vec<BoosterCardRuleDef>,
+    #[serde(default)]
+    pub cost: Option<i32>,
+    #[serde(default)]
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub draw_hand: Option<bool>,
+    #[serde(default)]
+    pub instant_use: Option<bool>,
+    #[serde(default)]
+    pub unlocked: Option<bool>,
+    #[serde(default)]
+    pub discovered: Option<bool>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub group_key: Option<String>,
+    #[serde(default)]
+    pub background_colour: Option<String>,
+    #[serde(default)]
+    pub special_colour: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BoosterConfigInput {
+    #[serde(default)]
+    pub extra: Option<i32>,
+    #[serde(default)]
+    pub choose: Option<i32>,
+}
+
+fn default_booster_type() -> String {
+    "joker".to_string()
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RarityDataInput {
     pub key: String,
     pub name: String,
@@ -552,6 +602,16 @@ pub struct BatchSealEntry {
 #[serde(rename_all = "camelCase")]
 pub struct BatchEditionEntry {
     pub edition_data: EditionDataInput,
+    pub file_name: String,
+    #[serde(default)]
+    pub custom_lua: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchBoosterEntry {
+    pub booster_data: BoosterDataInput,
+    pub pos: AtlasPosInput,
     pub file_name: String,
     #[serde(default)]
     pub custom_lua: Option<String>,
@@ -807,6 +867,33 @@ pub fn deck_data_to_def(input: &DeckDataInput, mod_prefix: &str, pos: AtlasPosIn
         no_interest: input.no_interest,
         no_faces: input.no_faces,
         erratic_deck: input.erratic_deck,
+    }
+}
+
+pub fn booster_data_to_def(input: &BoosterDataInput, pos: AtlasPosInput) -> BoosterDef {
+    BoosterDef {
+        key: input.object_key.clone(),
+        name: input.name.clone(),
+        description: split_description(&input.description),
+        atlas: "CustomBoosters".to_string(),
+        pos: AtlasPos { x: pos.x, y: pos.y },
+        cost: input.cost,
+        weight: input.weight,
+        kind: input.kind.clone(),
+        draw: None,
+        extra: input.config.extra,
+        choose: input.config.choose,
+        booster_type: input.booster_type.clone(),
+        card_rules: input.card_rules.clone(),
+        draw_hand: input.draw_hand,
+        instant_use: input.instant_use,
+        unlocked: input.unlocked,
+        discovered: input.discovered,
+        hidden: input.hidden,
+        group_key: input.group_key.clone(),
+        background_colour: input.background_colour.clone(),
+        special_colour: input.special_colour.clone(),
+        rules: vec![],
     }
 }
 
@@ -1325,7 +1412,10 @@ fn insert_item_localizations(
     }
 }
 
-fn render_localization_lua(descriptions: &LocalizationDescriptions) -> String {
+fn render_localization_lua(
+    descriptions: &LocalizationDescriptions,
+    dictionary: Option<&BTreeMap<String, String>>,
+) -> String {
     let mut out = String::from("return {\n  descriptions = {\n");
 
     let mut set_iter = descriptions.iter().peekable();
@@ -1367,7 +1457,19 @@ fn render_localization_lua(descriptions: &LocalizationDescriptions) -> String {
         }
     }
 
-    out.push_str("  }\n}\n");
+    out.push_str("  }");
+    if let Some(dictionary) = dictionary.filter(|entries| !entries.is_empty()) {
+        out.push_str(",\n  misc = {\n    dictionary = {\n");
+        for (key, value) in dictionary {
+            out.push_str(&format!(
+                "      ['{}'] = '{}',\n",
+                escape_lua_string(key),
+                escape_lua_string(value)
+            ));
+        }
+        out.push_str("    }\n  }");
+    }
+    out.push_str("\n}\n");
     out
 }
 
@@ -1381,8 +1483,10 @@ pub fn build_localization_lua_files(
     enhancements: &[BatchEnhancementEntry],
     seals: &[BatchSealEntry],
     editions: &[BatchEditionEntry],
+    boosters: &[BatchBoosterEntry],
 ) -> BTreeMap<String, String> {
     let mut locales: LocalizationByLocale = BTreeMap::new();
+    let mut dictionaries: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for entry in jokers {
         let data = &entry.joker_data;
@@ -1490,9 +1594,59 @@ pub fn build_localization_lua_files(
         );
     }
 
+    for entry in boosters {
+        let data = &entry.booster_data;
+        let raw_key = data.object_key.trim();
+        let local_key = raw_key.strip_prefix("p_").unwrap_or(raw_key);
+        let local_key = if mod_prefix.trim().is_empty() {
+            local_key
+        } else {
+            local_key.strip_prefix(&format!("{}_", mod_prefix.trim())).unwrap_or(local_key)
+        };
+        let key = normalize_class_prefixed_key(mod_prefix, "p", local_key);
+        insert_item_localizations(
+            &mut locales,
+            base_locale,
+            "Other",
+            &key,
+            &data.name,
+            &data.description,
+            None,
+            &data.localizations,
+        );
+
+        // SMODS.Booster's pack opening screen reads this separate dictionary entry.
+        let dictionary_key = format!("k_booster_group_{}", key);
+        let group_name = data.group_key.as_deref().map(str::trim).filter(|name| !name.is_empty());
+        if !base_locale.trim().is_empty() {
+            dictionaries.entry(base_locale.trim().to_string()).or_default().insert(
+                dictionary_key.clone(),
+                group_name.unwrap_or(&data.name).to_string(),
+            );
+        }
+        for localization in &data.localizations {
+            let locale = localization.language.trim();
+            if locale.is_empty() {
+                continue;
+            }
+            let localized_name = if localization.name.trim().is_empty() {
+                &data.name
+            } else {
+                &localization.name
+            };
+            dictionaries.entry(locale.to_string()).or_default().insert(
+                dictionary_key.clone(),
+                group_name.unwrap_or(localized_name).to_string(),
+            );
+        }
+    }
+
     locales
         .into_iter()
-        .map(|(locale, descriptions)| (locale, render_localization_lua(&descriptions)))
+        .map(|(locale, descriptions)| {
+            let lua = render_localization_lua(&descriptions, dictionaries.get(&locale));
+            (locale, lua)
+        })
         .collect()
 }
 
@@ -1758,6 +1912,7 @@ pub fn build_main_lua(
     seals: &[BatchSealEntry],
     editions: &[BatchEditionEntry],
     mod_prefix: &str,
+    boosters: &[BatchBoosterEntry],
     has_mod_icon: bool,
     has_game_logo: bool,
     load_rarities: bool,
@@ -1780,6 +1935,8 @@ pub fn build_main_lua(
     let sorted_seals: Vec<&BatchSealEntry> = seals.iter().collect();
 
     let sorted_editions: Vec<&BatchEditionEntry> = editions.iter().collect();
+
+    let sorted_boosters: Vec<&BatchBoosterEntry> = boosters.iter().collect();
 
     let mut atlas_decls = String::new();
     if has_mod_icon {
@@ -1805,6 +1962,10 @@ pub fn build_main_lua(
     }
     if !sorted_decks.is_empty() {
         atlas_decls.push_str("SMODS.Atlas({\n    key = \"CustomDecks\",\n    path = \"CustomDecks.png\",\n    px = 71,\n    py = 95,\n    atlas_table = \"ASSET_ATLAS\"\n})\n\n");
+    }
+
+    if !sorted_boosters.is_empty() {
+        atlas_decls.push_str("SMODS.Atlas({\n    key = \"CustomBoosters\",\n    path = \"CustomBoosters.png\",\n    px = 71,\n    py = 95,\n    atlas_table = \"ASSET_ATLAS\"\n})\n\n");
     }
 
     let mut requires = String::new();
@@ -1858,6 +2019,13 @@ pub fn build_main_lua(
         requires.push_str(&format!(
             "assert(SMODS.load_file(\"decks/{}\"))()\n",
             d.file_name
+        ));
+    }
+
+    for booster in &sorted_boosters {
+        requires.push_str(&format!(
+            "assert(SMODS.load_file(\"boosters/{}\"))()\n",
+            booster.file_name
         ));
     }
 
@@ -2024,6 +2192,157 @@ pub fn build_mod_json(metadata: &ModMetadataInput) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_booster_entry() -> BatchBoosterEntry {
+        serde_json::from_value(serde_json::json!({
+            "boosterData": {
+                "objectKey": "new_pack",
+                "name": "Custom Pack",
+                "description": "Choose #1# of #2# cards.<br/>A custom pack.",
+                "booster_type": "playing_card",
+                "config": { "extra": 5, "choose": 2 },
+                "cost": 6,
+                "weight": 0.75,
+                "draw_hand": true,
+                "instant_use": false,
+                "discovered": true,
+                "hidden": false,
+                "kind": "Custom",
+                "background_colour": "102030",
+                "special_colour": "#405060",
+                "card_rules": [{
+                    "weight": 3,
+                    "rank": "Ace",
+                    "suit": "Spades",
+                    "enhancement": "m_glass",
+                    "edition": "e_foil",
+                    "seal": "Red"
+                }],
+                "localizations": [{
+                    "language": "fr",
+                    "name": "Paquet personnalisé",
+                    "description": "Choisissez #1# cartes parmi #2#."
+                }]
+            },
+            "pos": { "x": 3, "y": 2 },
+            "fileName": "new_pack.lua"
+        })).expect("saved frontend Booster data should deserialize")
+    }
+
+    #[test]
+    fn booster_mapping_keeps_pack_counts_and_card_contents() {
+        let entry = make_booster_entry();
+        let def = booster_data_to_def(&entry.booster_data, entry.pos);
+        assert_eq!(def.atlas, "CustomBoosters");
+        assert_eq!((def.pos.x, def.pos.y), (3, 2));
+        assert_eq!(def.extra, Some(5));
+        assert_eq!(def.choose, Some(2));
+        assert_eq!(def.booster_type, "playing_card");
+        assert_eq!(def.cost, Some(6));
+        assert_eq!(def.weight, Some(0.75));
+        assert_eq!(def.draw_hand, Some(true));
+        assert_eq!(def.instant_use, Some(false));
+        assert_eq!(def.description, vec!["Choose #1# of #2# cards.", "A custom pack."]);
+        assert_eq!(def.card_rules.len(), 1);
+        assert_eq!(def.card_rules[0].weight, 3.0);
+        assert_eq!(def.card_rules[0].rank.as_deref(), Some("Ace"));
+        assert_eq!(def.card_rules[0].suit.as_deref(), Some("Spades"));
+        assert_eq!(def.card_rules[0].enhancement.as_deref(), Some("m_glass"));
+        assert_eq!(def.card_rules[0].edition.as_deref(), Some("e_foil"));
+        assert_eq!(def.card_rules[0].seal.as_deref(), Some("Red"));
+        assert_eq!(def.background_colour.as_deref(), Some("102030"));
+        assert_eq!(def.special_colour.as_deref(), Some("#405060"));
+    }
+
+    #[test]
+    fn booster_mapping_accepts_old_projects_without_optional_pack_settings() {
+        let input: BoosterDataInput = serde_json::from_value(serde_json::json!({
+            "objectKey": "old_pack", "name": "Old Pack", "description": "Pack"
+        })).unwrap();
+        let def = booster_data_to_def(&input, AtlasPosInput { x: 0, y: 0 });
+        assert_eq!(def.booster_type, "joker");
+        assert_eq!(def.extra, None);
+        assert_eq!(def.choose, None);
+        assert!(def.card_rules.is_empty());
+    }
+
+    #[test]
+    fn booster_export_registers_atlas_and_loads_the_pack_file() {
+        let boosters = vec![make_booster_entry()];
+        let lua = build_main_lua(
+            &[], &[], &[], &[], &[], &[], &[], "mod", &boosters,
+            false, false, false, false, false, false, false, &[],
+        );
+        let atlas = lua.find("key = \"CustomBoosters\"").expect("pack atlas must be registered");
+        let load = lua.find("assert(SMODS.load_file(\"boosters/new_pack.lua\"))()").expect("pack file must be loaded");
+        assert!(atlas < load);
+        assert!(lua.contains("path = \"CustomBoosters.png\""));
+        assert!(lua.contains("px = 71,\n    py = 95"));
+    }
+
+    #[test]
+    fn booster_custom_pool_matches_the_project_joker_pool_registration() {
+        for pool in ["custom_pool", "mod_custom_pool"] {
+            let jokers = vec![make_joker_entry_with_pools(vec![], vec![pool.to_string()])];
+            let mut booster = make_booster_entry();
+            booster.booster_data.booster_type = "joker".to_string();
+            booster.booster_data.card_rules = serde_json::from_value(serde_json::json!([
+                { "pool": pool, "weight": 1 }
+            ])).unwrap();
+            let boosters = vec![booster];
+            let main = build_main_lua(
+                &jokers, &[], &[], &[], &[], &[], &[], "mod", &boosters,
+                false, false, false, false, false, false, false, &[],
+            );
+            let def = booster_data_to_def(&boosters[0].booster_data, boosters[0].pos.clone());
+            let chunk = balatro_codegen::compile_booster(&def, "mod");
+            let pack = balatro_codegen::Emitter::new().emit_chunk(&chunk);
+            let pack_pool = pack.lines().find_map(|line| {
+                line.trim().strip_prefix("set = '").and_then(|value| value.strip_suffix("',"))
+            }).expect("Joker Booster must create cards from a pool");
+
+            assert_eq!(pack_pool, "mod_custom_pool", "pool input {pool}");
+            assert!(main.contains(&format!("key = '{}',", pack_pool)),
+                "Booster pool must be registered in the same mod: {main}");
+            assert!(main.contains("['j_mod_test'] = true"));
+            assert!(main.find("key = 'mod_custom_pool'").unwrap()
+                < main.find("boosters/new_pack.lua").unwrap());
+        }
+    }
+
+    #[test]
+    fn booster_export_localizes_descriptions_and_the_pack_opening_title() {
+        let mut boosters = vec![make_booster_entry()];
+        let localized = build_localization_lua_files(
+            "mod", "en-us", &[], &[], &[], &[], &[], &[], &[], &boosters,
+        );
+        let english = &localized["en-us"];
+        let french = &localized["fr"];
+        assert!(english.contains("['Other']"));
+        assert!(english.contains("['p_mod_new_pack']"));
+        assert!(!english.contains("['Booster']"));
+        assert!(english.contains("['k_booster_group_p_mod_new_pack'] = 'Custom Pack'"));
+        assert!(french.contains("name = 'Paquet personnalisé'"));
+        assert!(french.contains("Choisissez #1# cartes parmi #2#."));
+        assert!(french.contains("['k_booster_group_p_mod_new_pack'] = 'Paquet personnalisé'"));
+
+        // Keys pasted from SMODS references resolve to the same local registration key.
+        for object_key in ["p_new_pack", "mod_new_pack", "p_mod_new_pack"] {
+            boosters[0].booster_data.object_key = object_key.to_string();
+            let localized = build_localization_lua_files(
+                "mod", "en-us", &[], &[], &[], &[], &[], &[], &[], &boosters,
+            );
+            assert!(localized["en-us"].contains("['p_mod_new_pack']"));
+            assert!(localized["en-us"].contains("['k_booster_group_p_mod_new_pack']"));
+        }
+
+        boosters[0].booster_data.group_key = Some("Custom ' Group".to_string());
+        let localized = build_localization_lua_files(
+            "mod", "en-us", &[], &[], &[], &[], &[], &[], &[], &boosters,
+        );
+        assert!(localized["en-us"].contains("['k_booster_group_p_mod_new_pack'] = 'Custom \\' Group'"));
+        assert!(localized["fr"].contains("['k_booster_group_p_mod_new_pack'] = 'Custom \\' Group'"));
+    }
 
     fn make_sound(key: &str, filename: &str) -> SoundDataInput {
         SoundDataInput {
@@ -2338,6 +2657,7 @@ mod tests {
             &[],
             &[],
             "mod",
+            &[],
             false,
             false,
             false,
@@ -2364,6 +2684,7 @@ mod tests {
             &[],
             &[],
             "mod",
+            &[],
             false,
             false,
             false,
@@ -2397,6 +2718,7 @@ mod tests {
             &[],
             &[],
             "overview",
+            &[],
             false,
             false,
             false,
@@ -2426,6 +2748,7 @@ mod tests {
             &[],
             &[],
             "overview",
+            &[],
             false,
             false,
             false,

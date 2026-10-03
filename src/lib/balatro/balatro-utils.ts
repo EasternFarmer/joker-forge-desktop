@@ -11,6 +11,17 @@ export const slugify = (text: string): string => {
   );
 };
 
+export const getRegisteredBoosterKey = (
+  objectKey: string,
+  modPrefix: string,
+): string => {
+  const prefix = modPrefix.trim();
+  let key = objectKey.trim();
+  if (key.startsWith("p_")) key = key.slice(2);
+  if (prefix && key.startsWith(`${prefix}_`)) key = key.slice(prefix.length + 1);
+  return prefix ? `p_${prefix}_${key}` : `p_${key}`;
+};
+
 export interface ModMetadata {
   id: string;
   name: string;
@@ -538,12 +549,13 @@ export const DataRegistry = {
     type: BoosterType;
   }> => {
     const custom = registryState.boosters.map((booster) => ({
-      value: `${registryState.modPrefix}_${
+      value: getRegisteredBoosterKey(
         booster.objectKey ||
-        (booster.name
-          ? booster.name.toLowerCase().replace(/\s+/g, "_")
-          : "unnamed_booster")
-      }`,
+          (booster.name
+            ? booster.name.toLowerCase().replace(/\s+/g, "_")
+            : "unnamed_booster"),
+        registryState.modPrefix,
+      ),
       label: booster.name || "Unnamed Booster",
       type: booster.booster_type,
     }));
@@ -921,12 +933,13 @@ export const getBoosterDropdownOptions = (
   customBoosters: BoosterData[] = registryState.boosters,
 ) => {
   return customBoosters.map((booster) => ({
-    value: `${registryState.modPrefix}_${
+    value: getRegisteredBoosterKey(
       booster.objectKey ||
-      (booster.name
-        ? booster.name.toLowerCase().replace(/\s+/g, "_")
-        : "unnamed_booster")
-    }`,
+        (booster.name
+          ? booster.name.toLowerCase().replace(/\s+/g, "_")
+          : "unnamed_booster"),
+      registryState.modPrefix,
+    ),
     label: booster.name || "Unnamed Booster",
   }));
 };
@@ -935,15 +948,14 @@ export const getBoosterByKey = (
   key: string,
   customBoosters: BoosterData[] = registryState.boosters,
 ): BoosterData | undefined => {
-  const searchKey = key.startsWith(`${registryState.modPrefix}_`)
-    ? key.substring(`${registryState.modPrefix}_`.length)
-    : key;
+  const searchKey = getRegisteredBoosterKey(key, registryState.modPrefix);
 
   return customBoosters.find(
     (booster) =>
-      booster.objectKey === searchKey ||
-      (booster.name &&
-        booster.name.toLowerCase().replace(/\s+/g, "_") === searchKey),
+      getRegisteredBoosterKey(
+        booster.objectKey || booster.name.toLowerCase().replace(/\s+/g, "_"),
+        registryState.modPrefix,
+      ) === searchKey,
   );
 };
 
@@ -952,15 +964,12 @@ export const isCustomBooster = (
   customBoosters: BoosterData[] = registryState.boosters,
   modPrefix: string = registryState.modPrefix,
 ): boolean => {
-  return (
-    key.includes("_") &&
-    customBoosters.some(
-      (b) =>
-        `${modPrefix}_${
-          b.objectKey ||
-          (b.name ? b.name.toLowerCase().replace(/\s+/g, "_") : "unnamed")
-        }` === key,
-    )
+  return customBoosters.some((booster) =>
+    getRegisteredBoosterKey(
+      booster.objectKey ||
+        (booster.name ? booster.name.toLowerCase().replace(/\s+/g, "_") : "unnamed"),
+      modPrefix,
+    ) === getRegisteredBoosterKey(key, modPrefix),
   );
 };
 

@@ -51,6 +51,8 @@ import {
 import { TemplatePickerDialog } from "@/components/templates/template-picker-dialog";
 import { pushGlobalAlert } from "@/lib/app/global-alerts-bus";
 import { EditConsumableDialog } from "@/components/edit-dialogs";
+import { BulkEditItemsDialog } from "@/components/edit-dialogs/bulk-edit-items-dialog";
+import { applyBulkItemEdits, duplicateItem, type BulkItemEdits } from "@/lib/items/bulk-edit";
 import { getItemLocVarsFromUserVariables } from "@/lib/description/description-loc-vars";
 
 export default function ConsumablesPage() {
@@ -60,6 +62,8 @@ export default function ConsumablesPage() {
   const modName = useModName();
   const [searchParams, setSearchParams] = useSearchParams();
   const [editingItem, setEditingItem] = useState<ConsumableData | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkEditIds, setBulkEditIds] = useState<Set<string> | null>(null);
   const [ruleEditingItem, setRuleEditingItem] = useState<ConsumableData | null>(
     null,
   );
@@ -89,6 +93,18 @@ export default function ConsumablesPage() {
     },
     [handleUpdate],
   );
+
+  const handleDuplicate = useCallback((item: ConsumableData) => {
+    updateConsumables((previous) => [...previous, duplicateItem(item, previous)]);
+  }, [updateConsumables]);
+
+  const handleBulkEdit = (edits: BulkItemEdits) => {
+    if (!bulkEditIds || edits.kind !== "consumable") return;
+    updateConsumables((previous) => applyBulkItemEdits(previous, bulkEditIds, edits));
+    setBulkEditIds(null);
+    setSelectedIds(new Set());
+  };
+  const bulkItems = bulkEditIds ? data.consumables.filter((item) => bulkEditIds.has(item.id)) : [];
 
   const handleRulesSave = useCallback(
     (rules: Rule[]) => {
@@ -295,19 +311,7 @@ export default function ConsumablesPage() {
         overlayImage={item.overlayImage}
         hasManualEdits={Boolean((item as { customCode?: unknown }).customCode)}
         onUpdate={(updates) => handleUpdate(item.id, updates)}
-        onDuplicate={() => {
-          const duplicatedItem: ConsumableData = {
-            ...item,
-            id: crypto.randomUUID(),
-            name: `${item.name} (Copy)`,
-            objectKey: `${item.objectKey}_copy`,
-            orderValue: 0,
-          };
-          updateConsumables((previous) => [
-            ...previous,
-            { ...duplicatedItem, orderValue: previous.length + 1 },
-          ]);
-        }}
+        onDuplicate={() => handleDuplicate(item)}
         image={
           item.image ? (
             <img
@@ -423,7 +427,7 @@ export default function ConsumablesPage() {
         ]}
       />
     ),
-    [createItemTemplate, handleUpdate, requestDelete, handleExport],
+    [createItemTemplate, handleUpdate, handleDuplicate, requestDelete, handleExport],
   );
 
   const renderCompactCard = useCallback(
@@ -498,19 +502,7 @@ export default function ConsumablesPage() {
             id: "duplicate",
             label: "Duplicate",
             icon: <Copy weight="regular" />,
-            onClick: () => {
-              const duplicatedConsumable: ConsumableData = {
-                ...item,
-                id: crypto.randomUUID(),
-                name: `${item.name} (Copy)`,
-                objectKey: `${item.objectKey}_copy`,
-                orderValue: 0,
-              };
-              updateConsumables((previous) => [
-                ...previous,
-                { ...duplicatedConsumable, orderValue: previous.length + 1 },
-              ]);
-            },
+            onClick: () => handleDuplicate(item),
             variant: "ghost",
           },
           {
@@ -527,6 +519,7 @@ export default function ConsumablesPage() {
       createItemTemplate,
       requestDelete,
       handleExport,
+      handleDuplicate,
       updateConsumables,
     ],
   );
@@ -537,6 +530,10 @@ export default function ConsumablesPage() {
         title="Consumables"
         subtitle={modName}
         items={data.consumables}
+        selectedIds={selectedIds}
+        selectionScopeKey={data.metadata.id}
+        onSelectionChange={setSelectedIds}
+        onBulkEdit={() => setBulkEditIds(new Set(selectedIds))}
         isLoading={isHydrating}
         onAddNew={handleCreate}
         onAddFromTemplate={
@@ -552,6 +549,15 @@ export default function ConsumablesPage() {
         renderCard={renderCard}
         renderCompactCard={renderCompactCard}
       />
+      {bulkItems.length > 0 && (
+        <BulkEditItemsDialog
+          kind="consumable"
+          items={bulkItems}
+          setOptions={getConsumableSetDropdownOptions(data.consumableSets)}
+          onApply={handleBulkEdit}
+          onClose={() => setBulkEditIds(null)}
+        />
+      )}
       <TemplatePickerDialog
         open={isTemplatePickerOpen}
         onOpenChange={setIsTemplatePickerOpen}

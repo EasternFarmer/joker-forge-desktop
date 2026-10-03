@@ -468,7 +468,81 @@ pub struct BoosterDef {
     pub extra: Option<i32>,
     #[serde(default)]
     pub discovered: Option<bool>,
+    #[serde(default = "default_booster_type")]
+    pub booster_type: String,
+    #[serde(default)]
+    pub choose: Option<i32>,
+    #[serde(default)]
+    pub draw_hand: Option<bool>,
+    #[serde(default)]
+    pub instant_use: Option<bool>,
+    #[serde(default)]
+    pub unlocked: Option<bool>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    /// Displayed group name; the compiler uses the pack's own localization key.
+    #[serde(default)]
+    pub group_key: Option<String>,
+    #[serde(default)]
+    pub background_colour: Option<String>,
+    #[serde(default)]
+    pub special_colour: Option<String>,
+    #[serde(default)]
+    pub card_rules: Vec<BoosterCardRuleDef>,
+    #[serde(default)]
     pub rules: Vec<RuleDef>,
+}
+
+fn default_booster_type() -> String {
+    "joker".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoosterCardRuleDef {
+    #[serde(default = "default_booster_card_weight")]
+    pub weight: f64,
+    #[serde(default)]
+    pub set: Option<String>,
+    #[serde(default)]
+    pub suit: Option<String>,
+    #[serde(default)]
+    pub rank: Option<String>,
+    #[serde(default)]
+    pub pool: Option<String>,
+    #[serde(default)]
+    pub rarity: Option<String>,
+    #[serde(default)]
+    pub edition: Option<String>,
+    #[serde(default)]
+    pub enhancement: Option<String>,
+    #[serde(default)]
+    pub seal: Option<String>,
+    #[serde(default)]
+    pub specific_type: Option<String>,
+    #[serde(default)]
+    pub specific_key: Option<String>,
+}
+
+fn default_booster_card_weight() -> f64 {
+    1.0
+}
+
+impl Default for BoosterCardRuleDef {
+    fn default() -> Self {
+        Self {
+            weight: 1.0,
+            set: None,
+            suit: None,
+            rank: None,
+            pool: None,
+            rarity: None,
+            edition: None,
+            enhancement: None,
+            seal: None,
+            specific_type: None,
+            specific_key: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

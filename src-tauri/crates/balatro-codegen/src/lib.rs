@@ -5,8 +5,8 @@ pub mod types;
 
 // Re-export key types for convenience
 pub use compiler::{
-    compile_booster, compile_consumable, compile_consumable_type, compile_deck, compile_edition,
-    compile_enhancement, compile_rarity, compile_seal, compile_voucher,
+    compile_booster, compile_booster_with_options, compile_consumable, compile_consumable_type,
+    compile_deck, compile_edition, compile_enhancement, compile_rarity, compile_seal, compile_voucher,
 };
 pub use compiler::{compile_joker, compile_joker_with_options, compile_node_snippet};
 pub use lua_ast::{format_lua_source, Chunk, Emitter, Expr, Stmt};

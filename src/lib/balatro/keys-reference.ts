@@ -4,6 +4,7 @@ import {
   BOSS_BLINDS,
   CUSTOM_SHADERS,
   JOKERS,
+  getRegisteredBoosterKey,
   PLANET_CARDS,
   POKER_HANDS,
   RANKS,
@@ -185,7 +186,9 @@ export const getKeyReferenceEntries = (
         category,
         item.id,
         item.name,
-        registeredKey(item.objectKey, modPrefix, classPrefix),
+        classPrefix === "p"
+          ? getRegisteredBoosterKey(item.objectKey, modPrefix)
+          : registeredKey(item.objectKey, modPrefix, classPrefix),
       );
     }
   };

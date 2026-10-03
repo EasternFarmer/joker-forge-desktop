@@ -36,6 +36,7 @@ import {
 import { TemplatePickerDialog } from "@/components/templates/template-picker-dialog";
 import { pushGlobalAlert } from "@/lib/app/global-alerts-bus";
 import { EditBoosterDialog } from "@/components/edit-dialogs";
+import { getDefaultBoosterDescription } from "@/components/edit-dialogs/booster-card-rules-editor";
 import { getItemLocVarsFromUserVariables } from "@/lib/description/description-loc-vars";
 
 export default function BoostersPage() {
@@ -91,15 +92,15 @@ export default function BoostersPage() {
     return {
       id: crypto.randomUUID(),
       objectType: "booster",
-      name: "Standard Pack",
-      description: "Choose 1 of 3",
+      name: "Custom Joker Pack",
+      description: getDefaultBoosterDescription("joker"),
       orderValue: data.boosters.length + 1,
       image: placeholder?.src || "",
       placeholderCreditIndex: placeholder?.index,
       placeholderCategory: placeholder?.category,
       cost: 4,
       weight: 1,
-      draw_hand: true,
+      draw_hand: false,
       instant_use: false,
       booster_type: "joker",
       config: { extra: 3, choose: 1 },
@@ -234,22 +235,22 @@ export default function BoostersPage() {
           },
           {
             id: "draw_hand",
-            label: item.draw_hand ? "Draws to Hand" : "Opens Normally",
+            label: item.draw_hand ? "Draws Your Hand" : "No Hand Draw",
             icon: <Hand className="h-4 w-4" weight="regular" />,
             isActive: item.draw_hand === true,
             variant: "success",
             onClick: () =>
               handleUpdate(item.id, { draw_hand: !item.draw_hand }),
           },
-          {
+          ...(item.booster_type === "consumable" ? [{
             id: "instant_use",
-            label: item.instant_use ? "Instant Use" : "Adds to Hand",
+            label: item.instant_use ? "Use Immediately" : "Keep Consumables",
             icon: <Play className="h-4 w-4" weight="regular" />,
             isActive: item.instant_use === true,
-            variant: "success",
+            variant: "success" as const,
             onClick: () =>
               handleUpdate(item.id, { instant_use: !item.instant_use }),
-          },
+          }] : []),
         ]}
         actions={[
           {
@@ -298,7 +299,7 @@ export default function BoostersPage() {
         ]}
       />
     ),
-    [createItemTemplate, handleUpdate, requestDelete],
+    [createItemTemplate, handleUpdate, requestDelete, updateBoosters],
   );
 
   const renderCompactCard = useCallback(

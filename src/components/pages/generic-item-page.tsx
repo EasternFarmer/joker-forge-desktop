@@ -5,7 +5,9 @@ import {
   useDeferredValue,
   useTransition,
   useRef,
+  useCallback,
   ReactNode,
+  type MouseEvent as ReactMouseEvent,
   memo,
 } from "react";
 import {
@@ -23,6 +25,8 @@ import {
   Spade,
   ProhibitInset,
   BookBookmark,
+  Check,
+  PencilSimple,
 } from "@phosphor-icons/react";
 import IconButton from "@/components/ui/icon-button";
 import { Button } from "@/components/ui/button";
@@ -63,6 +67,7 @@ const FAST_INITIAL_RENDER_ITEM_LIMIT = 12;
 const LOAD_MORE_SCROLL_THRESHOLD_PX = 900;
 
 type ColumnMode = "auto" | "1" | "2" | "3";
+const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
 const getItemKeyForSearch = (item: unknown): string | null => {
   if (!item || typeof item !== "object") return null;
@@ -113,6 +118,10 @@ interface GenericItemPageProps<T> {
   defaultCompactSize?: number;
   aceSelectorMode?: "none" | "enhancement" | "seal" | "enhancement_or_seal";
   defaultAceSelection?: AceSelection;
+  selectedIds?: ReadonlySet<string>;
+  onSelectionChange?: (ids: Set<string>) => void;
+  onBulkEdit?: () => void;
+  selectionScopeKey?: string;
 }
 
 export interface GenericItemPageRenderContext {
@@ -191,7 +200,49 @@ function GenericItemPageInternal<T extends { id: string }>({
   defaultCompactSize = 140,
   aceSelectorMode = "none",
   defaultAceSelection = DEFAULT_ACE_SELECTION,
+  selectedIds = EMPTY_SELECTION,
+  onSelectionChange,
+  onBulkEdit,
+  selectionScopeKey,
 }: GenericItemPageProps<T>) {
+  const selectionEnabled = !reforged && !!onSelectionChange;
+  const selectionAnchorRef = useRef<string | null>(null);
+  const previousSelectionScopeRef = useRef(selectionScopeKey);
+  const toggleSelection = useCallback(
+    (id: string) => {
+      if (!onSelectionChange) return;
+      selectionAnchorRef.current = id;
+      const next = new Set(selectedIds);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      onSelectionChange(next);
+    },
+    [onSelectionChange, selectedIds],
+  );
+  useEffect(() => {
+    const availableIds = new Set(items.map((item) => item.id));
+    if (
+      selectionAnchorRef.current &&
+      !availableIds.has(selectionAnchorRef.current)
+    ) {
+      selectionAnchorRef.current = null;
+    }
+    if (!onSelectionChange || selectedIds.size === 0) return;
+    const next = new Set([...selectedIds].filter((id) => availableIds.has(id)));
+    if (next.size !== selectedIds.size) onSelectionChange(next);
+  }, [items, onSelectionChange, selectedIds]);
+
+  useEffect(() => {
+    if (previousSelectionScopeRef.current === selectionScopeKey) return;
+    previousSelectionScopeRef.current = selectionScopeKey;
+    selectionAnchorRef.current = null;
+    onSelectionChange?.(new Set());
+  }, [onSelectionChange, selectionScopeKey]);
+
+  useEffect(() => {
+    selectionAnchorRef.current = null;
+  }, [title]);
+
   const [searchTerm, setSearchTerm] = useState("");
   const deferredSearchTerm = useDeferredValue(searchTerm);
   const [currentSort, setCurrentSort] = useState(
@@ -385,6 +436,63 @@ function GenericItemPageInternal<T extends { id: string }>({
     filterOptions,
     sortOptions,
   ]);
+
+  const processedItemIndexes = useMemo(
+    () => new Map(processedItems.map((item, index) => [item.id, index])),
+    [processedItems],
+  );
+
+  const selectRange = (id: string, additive: boolean) => {
+    if (!onSelectionChange) return;
+    const targetIndex = processedItemIndexes.get(id);
+    if (targetIndex === undefined) return;
+
+    let anchorIndex = selectionAnchorRef.current
+      ? processedItemIndexes.get(selectionAnchorRef.current)
+      : undefined;
+    if (anchorIndex === undefined) {
+      const lastVisibleSelection = [...selectedIds]
+        .reverse()
+        .find((selectedId) => processedItemIndexes.has(selectedId));
+      anchorIndex =
+        (lastVisibleSelection
+          ? processedItemIndexes.get(lastVisibleSelection)
+          : undefined) ?? targetIndex;
+      selectionAnchorRef.current = processedItems[anchorIndex].id;
+    }
+
+    const next = additive ? new Set(selectedIds) : new Set<string>();
+    for (
+      let index = Math.min(anchorIndex, targetIndex);
+      index <= Math.max(anchorIndex, targetIndex);
+      index += 1
+    ) {
+      next.add(processedItems[index].id);
+    }
+    onSelectionChange(next);
+  };
+
+  const isInteractiveSelectionTarget = (target: EventTarget) =>
+    target instanceof Element &&
+    !!target.closest(
+      "button, a, input, textarea, select, [contenteditable='true'], [data-item-selection-control]",
+    );
+
+  const handleSelectionClick = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    id: string,
+  ) => {
+    if (!selectionEnabled || isInteractiveSelectionTarget(event.target)) return;
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      selectionAnchorRef.current = id;
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.shiftKey) selectRange(id, event.ctrlKey || event.metaKey);
+    else toggleSelection(id);
+  };
 
   const activeFilterCount = Object.values(activeFilters).filter(
     (v) => v !== null,
@@ -1200,6 +1308,19 @@ function GenericItemPageInternal<T extends { id: string }>({
               </div>
             </div>
           )}
+          {selectionEnabled && selectedIds.size > 1 && onBulkEdit && (
+            <Button
+              size="sm"
+              onClick={onBulkEdit}
+              className="ml-auto h-9 gap-2 cursor-pointer"
+            >
+              <PencilSimple className="h-4 w-4" weight="bold" />
+              Edit selected
+              <span className="rounded-full bg-primary-foreground/15 px-2 py-0.5 text-xs">
+                {selectedIds.size}
+              </span>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1277,7 +1398,58 @@ function GenericItemPageInternal<T extends { id: string }>({
             style={viewMode === "compact" ? compactGridStyle : undefined}
           >
             {renderedItems.map((item) => (
-              <div key={item.id}>
+              <div
+                key={item.id}
+                data-item-id={item.id}
+                className={cn(
+                  "relative isolate group/item-selection rounded-2xl",
+                  selectionEnabled &&
+                    selectedIds.has(item.id) &&
+                    "ring-2 ring-primary ring-offset-2 ring-offset-background",
+                )}
+                onClickCapture={(event) => handleSelectionClick(event, item.id)}
+                onMouseDownCapture={(event) => {
+                  if (
+                    selectionEnabled &&
+                    (event.shiftKey || event.ctrlKey || event.metaKey) &&
+                    !isInteractiveSelectionTarget(event.target)
+                  ) {
+                    event.preventDefault();
+                  }
+                }}
+              >
+                {selectionEnabled && (
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={selectedIds.has(item.id)}
+                    data-item-selection-control
+                    aria-label={`Select ${
+                      (item as { name?: string }).name ||
+                      getItemKeyForSearch(item) ||
+                      item.id
+                    }`}
+                    className={cn(
+                      "absolute left-2 top-2 z-50 flex size-7 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-foreground shadow-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                      selectedIds.has(item.id) &&
+                        "border-primary bg-primary text-primary-foreground",
+                      selectedIds.size === 0 &&
+                        "opacity-0 group-hover/item-selection:opacity-100 group-focus-within/item-selection:opacity-100",
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (event.shiftKey) {
+                        selectRange(item.id, event.ctrlKey || event.metaKey);
+                      } else {
+                        toggleSelection(item.id);
+                      }
+                    }}
+                  >
+                    {selectedIds.has(item.id) && (
+                      <Check className="size-4" weight="bold" aria-hidden />
+                    )}
+                  </button>
+                )}
                 <CardRenderer
                   item={item}
                   viewMode={viewMode}

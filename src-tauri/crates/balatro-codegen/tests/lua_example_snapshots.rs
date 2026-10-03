@@ -2,13 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use balatro_codegen::types::{
-    ConsumableDef, ConsumableTypeDef, DeckDef, EditionDef, EnhancementDef, JokerDef, ObjectType,
-    RarityDef, SealDef, VoucherDef,
+    BoosterDef, ConsumableDef, ConsumableTypeDef, DeckDef, EditionDef, EnhancementDef, JokerDef,
+    ObjectType, RarityDef, SealDef, VoucherDef,
 };
 use balatro_codegen::{
-    compile_consumable, compile_consumable_type, compile_deck, compile_edition,
-    compile_enhancement, compile_joker_with_options, compile_rarity, compile_seal, compile_voucher,
-    Emitter,
+    compile_booster_with_options, compile_consumable, compile_consumable_type, compile_deck,
+    compile_edition, compile_enhancement, compile_joker_with_options, compile_rarity, compile_seal,
+    compile_voucher, Emitter,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -153,7 +153,9 @@ fn compile_example(spec: &ExampleSpec) -> String {
             compile_deck(&def, &spec.mod_prefix)
         }
         ObjectType::Booster => {
-            panic!("booster examples are not supported by this snapshot test yet");
+            let def: BoosterDef = serde_json::from_value(spec.definition.clone())
+                .expect("invalid booster example definition");
+            compile_booster_with_options(&def, &spec.mod_prefix, spec.include_loc_txt)
         }
     };
 

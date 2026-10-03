@@ -32,6 +32,7 @@ export interface DescriptionEditorItemContext {
   rules?: Rule[];
   userVariables?: UserVariable[];
   locVars?: { vars?: Array<string | number> };
+  config?: { choose?: number; extra?: number };
 }
 
 export interface DescriptionEditorProps {
