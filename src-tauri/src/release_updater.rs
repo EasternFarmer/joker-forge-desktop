@@ -519,6 +519,40 @@ fn windows_process_path(path: &Path) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+// Shared by the native preflight and both helper checks. tasklist applies the
+// same current-user/image-name scope as NSIS without terminating any process.
+const WINDOWS_SIBLING_GUARD: &str = r#"function Assert-NoSiblingApp {
+    $imageName = $env:JF_UPDATE_EXECUTABLE_NAME
+    $updatingParentId = [uint32]0
+    if ([string]::IsNullOrWhiteSpace($imageName) -or
+        -not [uint32]::TryParse($env:JF_UPDATE_PARENT_PID, [ref]$updatingParentId)) {
+        throw 'Could not check for other Joker Forge windows. Keep the app open and try again.'
+    }
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $tasklist = Join-Path $env:SystemRoot 'System32\tasklist.exe'
+    $rows = & $tasklist /FI ('IMAGENAME eq ' + $imageName) /FI ('USERNAME eq ' + $currentUser) /FO CSV /NH 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not check for other Joker Forge windows. Keep the app open and try again.'
+    }
+    foreach ($line in @($rows)) {
+        $text = [string]$line
+        # With no matches tasklist prints a localized informational line.
+        if (-not $text.StartsWith('"')) { continue }
+        $record = ConvertFrom-Csv -InputObject $text -Header ImageName,ProcessId,SessionName,SessionNumber,MemoryUsage
+        if (-not [string]::Equals($record.ImageName, $imageName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Could not validate the list of other Joker Forge windows. Keep the app open and try again.'
+        }
+        $otherProcessId = [uint32]0
+        if (-not [uint32]::TryParse($record.ProcessId, [ref]$otherProcessId)) {
+            throw 'Could not validate the list of other Joker Forge windows. Keep the app open and try again.'
+        }
+        if ($otherProcessId -ne $updatingParentId) {
+            throw 'Close any other Joker Forge windows, including the other release channel or development app, before updating.'
+        }
+    }
+}
+"#;
+
 // Paths are environment data, never interpolated into executable script source.
 const WINDOWS_HELPER: &str = r#"$ErrorActionPreference = 'Stop'
 $directory = $env:JF_UPDATE_DIRECTORY
@@ -530,6 +564,7 @@ $cancel = Join-Path $directory 'install.cancelled'
 $log = Join-Path $directory 'update-error.txt'
 try {
     $parentProcess = Get-Process -Id $parentId
+    Assert-NoSiblingApp
     [System.IO.File]::WriteAllText($ready, 'ready')
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     while (-not $parentProcess.HasExited) {
@@ -540,11 +575,23 @@ try {
         $parentProcess.WaitForExit(250) | Out-Null
     }
     if (Test-Path -LiteralPath $cancel) { exit 0 }
-    if ((Get-Item -LiteralPath $installer).Length -ne [long]$env:JF_UPDATE_SIZE -or
-        (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $env:JF_UPDATE_SHA256) {
-        throw 'The installer changed while waiting for the app to close. Download the update again.'
+    Assert-NoSiblingApp
+    # Get-FileHash is a script-module function and may be unavailable when the
+    # app inherits a PowerShell 7 PSModulePath. Use the framework directly.
+    $installerStream = [System.IO.File]::OpenRead($installer)
+    $sha256 = $null
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $actualHash = [System.BitConverter]::ToString($sha256.ComputeHash($installerStream)).Replace('-', '').ToLowerInvariant()
+        if ($installerStream.Length -ne [long]$env:JF_UPDATE_SIZE -or
+            -not [string]::Equals($actualHash, $env:JF_UPDATE_SHA256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The installer changed while waiting for the app to close. Download the update again.'
+        }
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        $installerStream.Dispose()
     }
-    $process = Start-Process -FilePath $installer -ArgumentList '/S' -WindowStyle Hidden -PassThru -Wait
+    $process = Start-Process -FilePath $installer -ArgumentList '/S /UPDATE' -WindowStyle Hidden -PassThru -Wait
     if ($process.ExitCode -ne 0) {
         throw ('The installer returned error code ' + $process.ExitCode + '. Install the update manually from the official release page.')
     }
@@ -564,6 +611,44 @@ try {
 "#;
 
 #[cfg(target_os = "windows")]
+fn windows_powershell() -> Result<PathBuf, String> {
+    Ok(PathBuf::from(
+        std::env::var_os("SystemRoot").ok_or("Windows system directory is unavailable.")?,
+    )
+    .join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+}
+
+#[cfg(target_os = "windows")]
+fn reject_sibling_instances(executable: &Path, parent_id: u32) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    let name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Could not identify the running Joker Forge executable.")?;
+    let script = format!(
+        "{WINDOWS_SIBLING_GUARD}\n$ErrorActionPreference = 'Stop'\ntry {{ Assert-NoSiblingApp }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
+    );
+    let result = Command::new(windows_powershell()?)
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(script)
+        .env("JF_UPDATE_EXECUTABLE_NAME", name)
+        .env("JF_UPDATE_PARENT_PID", parent_id.to_string())
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|error| format!("Could not check for other Joker Forge windows: {error}"))?;
+    if !result.status.success() {
+        let message = String::from_utf8_lossy(&result.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            "Could not check for other Joker Forge windows. Keep the app open and try again.".into()
+        } else {
+            message
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn launch_installer(target: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -572,6 +657,12 @@ fn launch_installer(target: &Path) -> Result<(), String> {
         &fs::read(directory.join(MANIFEST)).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    let executable =
+        windows_process_path(&std::env::current_exe().map_err(|error| error.to_string())?)?;
+    reject_sibling_instances(&executable, std::process::id())?;
+    let executable_name = executable
+        .file_name()
+        .ok_or("Could not identify the running Joker Forge executable.")?;
     let script = directory.join("install.ps1");
     let ready = directory.join("helper.ready");
     // A completed/failed handoff cannot be reused while its helper is running.
@@ -581,16 +672,13 @@ fn launch_installer(target: &Path) -> Result<(), String> {
         .open(&script)
         .map_err(|_| "An update handoff already exists. Download the update again.")?;
     output
-        .write_all(WINDOWS_HELPER.as_bytes())
+        .write_all(WINDOWS_SIBLING_GUARD.as_bytes())
+        .and_then(|_| output.write_all(WINDOWS_HELPER.as_bytes()))
         .map_err(|error| error.to_string())?;
     output.sync_all().map_err(|error| error.to_string())?;
-    let executable =
-        windows_process_path(&std::env::current_exe().map_err(|error| error.to_string())?)?;
-    let powershell = PathBuf::from(
-        std::env::var_os("SystemRoot").ok_or("Windows system directory is unavailable.")?,
-    )
-    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let result = Command::new(powershell)
+    // PowerShell cannot read a script while Windows still holds its writer open.
+    drop(output);
+    let result = Command::new(windows_powershell()?)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -601,7 +689,8 @@ fn launch_installer(target: &Path) -> Result<(), String> {
         .arg(windows_process_path(&script)?)
         .env("JF_UPDATE_DIRECTORY", windows_process_path(directory)?)
         .env("JF_UPDATE_INSTALLER", windows_process_path(target)?)
-        .env("JF_UPDATE_EXECUTABLE", executable)
+        .env("JF_UPDATE_EXECUTABLE_NAME", executable_name)
+        .env("JF_UPDATE_EXECUTABLE", &executable)
         .env("JF_UPDATE_SHA256", manifest.sha256)
         .env("JF_UPDATE_SIZE", manifest.size.to_string())
         .env("JF_UPDATE_PARENT_PID", std::process::id().to_string())
@@ -780,6 +869,205 @@ mod tests {
         fs::remove_dir(&marker).unwrap();
         fs::write(directory.0.join("install.ps1"), "cancelled helper record").unwrap();
         assert!(discard_download(directory.0.parent().unwrap(), &target).is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn real_helper_starts_and_cancels_without_executing_the_installer() {
+        struct StopHelperOnDrop(PathBuf);
+        impl Drop for StopHelperOnDrop {
+            fn drop(&mut self) {
+                // Always stop the exact helper before the test parent exits,
+                // including when an assertion unwinds this test.
+                let _ = fs::write(self.0.join("install.cancelled"), b"cancelled");
+                let _ = stop_registered_helper(&self.0);
+            }
+        }
+
+        let directory = TestDirectory::new();
+        // This 128-byte PE-header fixture cannot run as a Windows executable.
+        // The helper must wait for this still-running test process and cancel.
+        let target = fixture(&directory.0);
+        let original_bytes = fs::read(&target).unwrap();
+        let canonical_target = validate_download(directory.0.parent().unwrap(), &target).unwrap();
+        let canonical_directory = canonical_target.parent().unwrap().to_path_buf();
+        let _stop_helper = StopHelperOnDrop(canonical_directory.clone());
+
+        let launched = launch_installer(&canonical_target);
+        assert!(
+            launched.is_ok(),
+            "The real helper did not announce readiness: {launched:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.0.join("helper.ready")).unwrap(),
+            "ready"
+        );
+        assert!(directory.0.join("install.ps1").is_file());
+        cancel_download_handoff(directory.0.parent().unwrap(), &target).unwrap();
+        assert!(helper_was_cancelled(&canonical_directory));
+        let stopped = helper_handoffs()
+            .lock()
+            .unwrap()
+            .get(&canonical_directory)
+            .is_some_and(|handoff| handoff.child.is_none());
+        assert!(stopped);
+        assert_eq!(fs::read(&target).unwrap(), original_bytes);
+        assert!(directory.0.join(MANIFEST).is_file());
+        assert!(!directory.0.join("update-error.txt").exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sibling_guard_rejects_another_process_without_terminating_it() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        struct StopChildOnDrop(Child);
+        impl Drop for StopChildOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let directory = TestDirectory::new();
+        let command_path = directory.0.join("Guard Sibling.exe");
+        let system_command =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        fs::copy(system_command, &command_path).unwrap();
+        // An input pipe held open keeps this hidden cmd waiting. It executes no
+        // commands and creates no additional child process or real installer.
+        let mut sibling = StopChildOnDrop(
+            Command::new(&command_path)
+                .args(["/D", "/Q"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x08000000)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(sibling.0.try_wait().unwrap().is_none());
+        let error = reject_sibling_instances(&command_path, std::process::id()).unwrap_err();
+        assert!(
+            error.contains("Close any other Joker Forge windows"),
+            "{error}"
+        );
+        assert!(sibling.0.try_wait().unwrap().is_none());
+        // A matching image with the updating parent PID must be excluded.
+        assert!(reject_sibling_instances(&command_path, sibling.0.id()).is_ok());
+        sibling.0.kill().unwrap();
+        sibling.0.wait().unwrap();
+        assert!(reject_sibling_instances(&command_path, std::process::id()).is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn helper_validates_hash_after_parent_exit_without_powershell_modules() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        struct StopChildOnDrop(Child);
+        impl Drop for StopChildOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let directory = TestDirectory::new();
+        let target = fixture(&directory.0);
+        let manifest: DownloadManifest =
+            serde_json::from_slice(&fs::read(directory.0.join(MANIFEST)).unwrap()).unwrap();
+        let parent_path = directory.0.join("Hash Parent.exe");
+        fs::copy(
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe"),
+            &parent_path,
+        )
+        .unwrap();
+        let mut parent = StopChildOnDrop(
+            Command::new(&parent_path)
+                .args(["/D", "/Q"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x08000000)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(parent.0.try_wait().unwrap().is_none());
+
+        // Preserve the actual installer start attempt against the deliberately
+        // non-runnable PE fixture. Only add a boundary marker and redirect the
+        // test copy's failure dialog to stderr so this regression needs no UI.
+        let helper = WINDOWS_HELPER
+            .replace(
+                "$process = Start-Process -FilePath $installer",
+                "[System.IO.File]::WriteAllText((Join-Path $directory 'hash-verified.txt'), 'verified')\n    $process = Start-Process -FilePath $installer",
+            )
+            .replace(
+                "[System.Windows.Forms.MessageBox]::Show($message, 'Joker Forge update failed') | Out-Null",
+                "[Console]::Error.WriteLine($message)",
+            );
+        let script = directory.0.join("hash-helper.ps1");
+        fs::write(&script, format!("{WINDOWS_SIBLING_GUARD}{helper}")).unwrap();
+        let mut child = StopChildOnDrop(
+            Command::new(windows_powershell().unwrap())
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .env(
+                    "PSModulePath",
+                    directory.0.join("unavailable-powershell-modules"),
+                )
+                .env("JF_UPDATE_DIRECTORY", &directory.0)
+                .env("JF_UPDATE_INSTALLER", &target)
+                .env("JF_UPDATE_EXECUTABLE", &parent_path)
+                .env("JF_UPDATE_EXECUTABLE_NAME", "Hash Parent.exe")
+                .env("JF_UPDATE_PARENT_PID", parent.0.id().to_string())
+                .env("JF_UPDATE_SIZE", manifest.size.to_string())
+                .env("JF_UPDATE_SHA256", manifest.sha256)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x08000000)
+                .spawn()
+                .unwrap(),
+        );
+        let ready = directory.0.join("helper.ready");
+        for _ in 0..200 {
+            if ready.is_file() || child.0.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ready.is_file(), "The helper did not reach readiness.");
+        assert!(!directory.0.join("hash-verified.txt").exists());
+        parent.0.kill().unwrap();
+        parent.0.wait().unwrap();
+        let error_path = directory.0.join("update-error.txt");
+        for _ in 0..200 {
+            if error_path.is_file() || child.0.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            fs::read_to_string(directory.0.join("hash-verified.txt")).unwrap(),
+            "verified"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(
+            error.starts_with("Joker Forge could not finish updating:"),
+            "{error}"
+        );
+        assert!(!error.contains("Get-FileHash"), "{error}");
+        // Renaming succeeds only after the helper released its read stream.
+        fs::rename(&target, directory.0.join("Verified fixture.exe")).unwrap();
     }
 
     #[test]
@@ -973,5 +1261,17 @@ mod tests {
         );
         assert!(WINDOWS_HELPER.contains("-LiteralPath $installer"));
         assert!(!WINDOWS_HELPER.contains("-Recurse"));
+        assert_eq!(WINDOWS_HELPER.matches("Assert-NoSiblingApp").count(), 2);
+        assert!(
+            WINDOWS_HELPER.find("Assert-NoSiblingApp").unwrap()
+                < WINDOWS_HELPER.find("WriteAllText($ready").unwrap()
+        );
+        assert!(
+            WINDOWS_HELPER.rfind("Assert-NoSiblingApp").unwrap()
+                < WINDOWS_HELPER
+                    .find("Start-Process -FilePath $installer")
+                    .unwrap()
+        );
+        assert!(WINDOWS_HELPER.contains("-ArgumentList '/S /UPDATE'"));
     }
 }
