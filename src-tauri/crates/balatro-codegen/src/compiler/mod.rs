@@ -857,36 +857,36 @@ fn description_scoped_value(ctx: &CompileContext, name: &str, fallback: Expr) ->
     lua_or(lua_or(live, default), fallback)
 }
 
-/// Tooltip evaluation has no calculate `context`; only catalog IDs are allowed here.
+/// Tooltips share the numeric catalog, with fallbacks for scoring-only values.
 fn description_game_value(id: &str) -> Expr {
     let code = match id {
-        "hand_size" | "cards_in_hand" => "G.hand and G.hand.cards and #G.hand.cards",
-        "current_hand_size" => "G.hand and G.hand.config and G.hand.config.card_limit",
-        "joker_count" => "G.jokers and G.jokers.cards and #G.jokers.cards",
-        "hands_remaining" | "remaining_hands" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left",
-        "discards_remaining" | "remaining_discards" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left",
-        "deck_size" | "cards_in_deck" => "G.deck and G.deck.cards and #G.deck.cards",
-        "cards_in_discard" => "G.discard and G.discard.cards and #G.discard.cards",
-        "full_deck_size" | "total_playing_cards" => "G.playing_cards and #G.playing_cards",
-        "cards_removed_from_deck" => "G.GAME and G.GAME.starting_deck_size and (G.GAME.starting_deck_size - #(G.playing_cards or {}))",
-        "current_money" | "player_money" | "dollars" => "G.GAME and G.GAME.dollars",
-        "current_ante" | "ante_level" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante",
-        "blind_chips" | "blind_chip_req" => "G.GAME and G.GAME.blind and G.GAME.blind.chips",
-        "blind_mult" => "G.GAME and G.GAME.blind and G.GAME.blind.mult",
-        "consumable_count" => "G.consumeables and G.consumeables.cards and #G.consumeables.cards",
-        "interest" => "G.GAME and G.GAME.interest_amount",
-        "hands_played_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_played",
-        "discards_used_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_used",
-        "blinds_skipped" => "G.GAME and G.GAME.skips",
-        "base_hands_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.hands",
-        "base_discards_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.discards",
         "hand_level" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].level",
-        "times_hand_played" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].played",
+        "current_hand_played_count" | "times_hand_played" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].played",
         "scored_card_count" | "played_card_count" => "G.play and G.play.cards and #G.play.cards",
-        "poker_hand_count" => "(function() local count = 0; for _, hand in pairs((G.GAME and G.GAME.hands) or {}) do if hand.visible then count = count + 1 end end return count end)()",
-        _ => return lua_int(0),
+        "cumulative_chips" => "(function() local total = 0; for _, card in ipairs(G.play and G.play.cards or {}) do total = total + (card.base and card.base.nominal or 0) end; return total end)()",
+        _ => {
+            return values::game_var_lua_code(id)
+                .map(lua_raw_expr)
+                .unwrap_or_else(|| lua_int(0))
+        }
     };
     lua_raw_expr(format!("((G and ({code})) or 0)"))
+}
+
+fn description_game_reference(reference: &str) -> Expr {
+    if let Some(game) = values::parse_game_var(reference) {
+        if values::game_var_lua_code(&game.var_id).is_none() {
+            return lua_int(0);
+        }
+        return lua_add(
+            lua_num(game.starts_from),
+            lua_mul(description_game_value(&game.var_id), lua_num(game.multiplier)),
+        );
+    }
+    if reference.starts_with("GAMEVAR:") {
+        return lua_int(0);
+    }
+    description_game_value(reference)
 }
 
 fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
@@ -898,18 +898,19 @@ fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
             if ctx.has_user_var(value) {
                 return description_user_value(ctx, value).0;
             }
-            if let Some(game) = values::parse_game_var(value) {
-                return lua_mul(
-                    lua_add(
-                        description_game_value(&game.var_id),
-                        lua_num(game.starts_from),
-                    ),
-                    lua_num(game.multiplier),
-                );
+            if value.starts_with("GAMEVAR:") {
+                return description_game_reference(value);
             }
             lua_str(value)
         }
         ParamValue::Typed(value) => {
+            if values::is_game_variable_type(&value.value_type) {
+                return value
+                    .value
+                    .as_str()
+                    .map(description_game_reference)
+                    .unwrap_or_else(|| lua_int(0));
+            }
             if values::is_user_variable_type(&value.value_type) {
                 return description_user_value(ctx, value.value.as_str().unwrap_or("")).0;
             }

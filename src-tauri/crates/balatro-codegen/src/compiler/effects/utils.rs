@@ -71,6 +71,25 @@ pub fn value_to_lua_str(
     let var_name = ctx.unique_var_name(var_base, count);
     ctx.bind_preview_config_parameter(&var_name, param_key);
 
+    // Older projects can encode the reference as a plain string, while newer
+    // projects wrap it in a typed value. Both need the same checked resolver.
+    if let Some(value) = effect.params.get(param_key) {
+        let is_game_reference = match value {
+            ParamValue::Str(value) => value.starts_with("GAMEVAR:"),
+            ParamValue::Typed(value) => {
+                is_game_variable_type(&value.value_type)
+                    || value
+                        .value
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("GAMEVAR:"))
+            }
+            _ => false,
+        };
+        if is_game_reference {
+            return resolve_value(value, ctx.object_type, None).to_string();
+        }
+    }
+
     match effect.params.get(param_key) {
         Some(ParamValue::Int(n)) => {
             ctx.add_config_int(&var_name, *n);
@@ -81,14 +100,7 @@ pub fn value_to_lua_str(
             format!("{}.{}", ctx.ability_path(), var_name)
         }
         Some(ParamValue::Typed(t)) => {
-            if is_game_variable_type(&t.value_type) {
-                resolve_value(
-                    effect.params.get(param_key).expect("matched parameter must exist"),
-                    ctx.object_type,
-                    None,
-                )
-                .to_string()
-            } else if is_user_variable_type(&t.value_type) {
+            if is_user_variable_type(&t.value_type) {
                 if let Some(name) = t.value.as_str() {
                     ctx.user_var_path(name)
                 } else {
@@ -142,5 +154,72 @@ pub fn value_to_lua_str(
             }
         }
         _ => "1".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ObjectType, TypedValue};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn resolve_effect_value(value: ParamValue) -> String {
+        let effect = EffectDef {
+            id: "effect".to_string(),
+            effect_type: "edit_dollars".to_string(),
+            params: HashMap::from([("value".to_string(), value)]),
+        };
+        let mut ctx = CompileContext::new(
+            ObjectType::Joker,
+            "test".to_string(),
+            "test_joker".to_string(),
+            false,
+        );
+        value_to_lua_str(&effect, "value", &mut ctx, "dollars")
+    }
+
+    #[test]
+    fn raw_and_typed_game_references_use_the_same_checked_expression() {
+        let reference = "GAMEVAR:cards_in_deck|2|3";
+        let raw = resolve_effect_value(ParamValue::Str(reference.to_string()));
+        for value_type in ["gameVariable", "game_var", "specific"] {
+            let typed = resolve_effect_value(ParamValue::Typed(TypedValue {
+                value: json!(reference),
+                value_type: value_type.to_string(),
+            }));
+            assert_eq!(raw, typed, "value type: {value_type}");
+        }
+        assert!(raw.contains("G.deck"), "{raw}");
+        assert!(!raw.contains("GAMEVAR:"), "{raw}");
+        assert!(!raw.contains("cards_in_deck"), "{raw}");
+    }
+
+    #[test]
+    fn invalid_game_references_do_not_emit_undefined_variables() {
+        for reference in ["GAMEVAR:missing|1|0", "GAMEVAR:cards_in_deck"] {
+            assert_eq!(
+                resolve_effect_value(ParamValue::Str(reference.to_string())),
+                "0",
+                "raw reference: {reference}"
+            );
+            for value_type in ["gameVariable", "game_var", "specific"] {
+                assert_eq!(
+                    resolve_effect_value(ParamValue::Typed(TypedValue {
+                        value: json!(reference),
+                        value_type: value_type.to_string(),
+                    })),
+                    "0",
+                    "typed reference: {reference}, value type: {value_type}"
+                );
+            }
+        }
+        assert_eq!(
+            resolve_effect_value(ParamValue::Typed(TypedValue {
+                value: json!(17),
+                value_type: "gameVariable".to_string(),
+            })),
+            "0"
+        );
     }
 }

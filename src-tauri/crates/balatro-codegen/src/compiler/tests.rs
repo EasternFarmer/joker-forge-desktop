@@ -356,7 +356,7 @@ fn description_game_bindings_accept_current_catalog_ids_and_dynamic_parameters()
     assert!(code.contains("G.playing_cards"));
     assert!(code.contains("G.GAME.blind.chips"));
     assert!(code.contains("G.GAME.dollars"));
-    assert!(code.contains("+ 3"));
+    assert!(code.contains("3 +"));
     assert!(code.contains("* 2"));
     assert!(!code.contains("context."));
 }

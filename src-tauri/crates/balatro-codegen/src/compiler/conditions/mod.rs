@@ -46,7 +46,7 @@ pub fn compile_condition(
         "card_rank" => card::card_rank(condition)?,
         "card_suit" => card::card_suit(condition)?,
         "card_enhancement" => card::card_enhancement(condition)?,
-        "card_edition" => card::card_edition(condition)?,
+        "card_edition" => card::card_edition(condition, ctx)?,
         "card_seal" => card::card_seal(condition)?,
         "card_index" => card::card_index(condition, ctx)?,
 

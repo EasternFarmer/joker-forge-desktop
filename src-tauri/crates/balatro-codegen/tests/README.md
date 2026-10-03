@@ -1,6 +1,6 @@
 # balatro-codegen test layout
 
-This crate uses two complementary test layers:
+This crate uses three complementary test layers:
 
 1. `src/**/tests.rs` (unit tests)
 - Purpose: verify private/internal compiler behavior.
@@ -14,6 +14,13 @@ This crate uses two complementary test layers:
   - `tests/codegen_voucher.rs`
   - `tests/codegen_deck.rs`
   - `tests/codegen_card_objects.rs` (enhancement/seal/edition)
+
+3. `scripts/test-codegen-lua.py` (Lua runtime regressions)
+- Runs actual compiler output through a Lua 5.1/LuaJIT shared library.
+- Covers every editor game variable with absent, partial and populated game state,
+  tooltip callbacks, complete Joker calculations, and Card Edition matching.
+- Uses `examples/codegen_runtime_cases.rs` to generate fixtures, so the runner
+  evaluates the current compiler instead of hand-written copies of its output.
 
 ## Shared fixtures
 
@@ -41,6 +48,12 @@ This crate uses two complementary test layers:
 
 ## Commands
 
+- From the repository root, run compiler tests and export input checks:
+  - `npm run test:codegen`
+- Run generated Lua against the same LuaJIT runtime shipped with Balatro:
+  - `npm run test:codegen:lua -- --lua-library "C:/Program Files (x86)/Steam/steamapps/common/Balatro/lua51.dll"`
+  - Requires Python and a matching-architecture Lua 5.1/LuaJIT shared library.
+    Other installations can supply `--lua-library` or `BALATRO_LUA_LIBRARY`.
 - Run only crate tests:
   - `cargo test -p balatro-codegen`
 - Regenerate Lua snapshot bodies from JSON specs:

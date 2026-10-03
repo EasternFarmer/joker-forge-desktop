@@ -494,16 +494,16 @@ fn level_hand_pool(effect: &EffectDef) -> Expr {
 fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
     match expr {
         Expr::Raw(code) => {
+            let highlighted = "((G and G.hand and G.hand.highlighted) or {})";
             *code = code
+                // Replace the context guard together with its value. Leaving a
+                // bare `context and` here would hide valid use-hook values.
+                .replace("context and context.scoring_name", target_name)
+                .replace("context and context.full_hand", highlighted)
+                .replace("context and context.scoring_hand", highlighted)
                 .replace("context.scoring_name", target_name)
-                .replace(
-                    "context.full_hand",
-                    "((G.hand and G.hand.highlighted) or {})",
-                )
-                .replace(
-                    "context.scoring_hand",
-                    "((G.hand and G.hand.highlighted) or {})",
-                );
+                .replace("context.full_hand", highlighted)
+                .replace("context.scoring_hand", highlighted);
         }
         Expr::FieldBinding(inner, _) | Expr::UnaryOp(_, inner) => {
             scope_use_level_amount(inner, target_name)
@@ -518,6 +518,47 @@ fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod use_level_amount_tests {
+    use super::*;
+    use crate::compiler::values::resolve_value;
+
+    #[test]
+    fn use_level_amount_scopes_guarded_hand_values_and_cumulative_chips() {
+        for id in [
+            "hand_level",
+            "times_hand_played",
+            "current_hand_played_count",
+            "played_card_count",
+            "scored_card_count",
+            "cumulative_chips",
+        ] {
+            let reference = ParamValue::Str(format!("GAMEVAR:{id}|2|3"));
+            let mut expr = resolve_value(&reference, ObjectType::Consumable, None);
+            scope_use_level_amount(&mut expr, "level_hand0");
+            let code = expr.to_string();
+            assert!(
+                !code.contains("context"),
+                "use-hook amount cannot depend on calculate context: {code}"
+            );
+            if matches!(
+                id,
+                "hand_level" | "times_hand_played" | "current_hand_played_count"
+            ) {
+                assert!(
+                    code.contains("level_hand0 and G.GAME.hands[level_hand0]"),
+                    "{code}"
+                );
+            } else {
+                assert!(
+                    code.contains("G and G.hand and G.hand.highlighted"),
+                    "{code}"
+                );
+            }
+        }
     }
 }
 
