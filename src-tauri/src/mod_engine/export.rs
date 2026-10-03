@@ -2087,9 +2087,11 @@ end\n"
         }
         for variable in run_scoped_globals {
             body.push_str(&format!(
-                "    jf_run_globals['{}'] = {}\n",
-                escape_lua_string(&variable.name),
-                param_value_to_lua_literal(&variable.initial_value)
+                "    if run_start or jf_run_globals['{name}'] == nil then\n\
+        jf_run_globals['{name}'] = {initial}\n\
+    end\n",
+                name = escape_lua_string(&variable.name),
+                initial = param_value_to_lua_literal(&variable.initial_value)
             ));
         }
         format!(
@@ -2670,7 +2672,21 @@ mod tests {
 
         assert!(lua.contains("SMODS.current_mod.reset_game_globals = function(run_start)"));
         assert!(lua.contains("G.GAME.jf_global_vars = G.GAME.jf_global_vars or {}"));
+        assert!(lua.contains("if run_start or jf_run_globals['global_non_persistent'] == nil then"));
         assert!(lua.contains("jf_run_globals['global_non_persistent'] = 7"));
+    }
+
+    #[test]
+    fn persistent_globals_initialize_missing_values_without_registering_a_round_reset() {
+        let lua = build_main_lua(
+            &[], &[], &[], &[], &[], &[], &[], "mod", &[],
+            false, false, false, false, false, true, false, &[],
+        );
+        assert!(lua.contains("if jf_profile_globals[k] == nil then"));
+        assert!(lua.contains("if JF_GLOBALS[k] == nil then"));
+        assert!(lua.contains("__newindex = function(_, key, value)"));
+        assert!(lua.contains("jf_profile_globals[key] = value"));
+        assert!(!lua.contains("reset_game_globals"));
     }
 
     #[test]

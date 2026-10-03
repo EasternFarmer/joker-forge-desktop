@@ -5,7 +5,7 @@ use crate::lua_ast::*;
 use crate::types::ConditionDef;
 
 /// Hand Type condition: checks whether the scoring hand matches a poker hand.
-pub fn hand_type(condition: &ConditionDef) -> Option<Expr> {
+pub fn hand_type(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let hand_var = typed_user_var_name(condition, "value", "handType");
     let hand = match hand_var {
         Some(name) => name,
@@ -44,6 +44,7 @@ pub fn hand_type(condition: &ConditionDef) -> Option<Expr> {
         }
         _ => {
             let hand_ref = match hand_var {
+                Some(name) if ctx.user_var_is_global(name) => ctx.user_var_expr(name),
                 Some(name) => lua_raw_expr(format!("G.GAME.current_round.{}_hand", name)),
                 None => lua_str(hand),
             };
@@ -101,7 +102,7 @@ pub fn suit_count(condition: &ConditionDef, ctx: &mut CompileContext) -> Option<
             "context.scoring_hand"
         };
 
-        let suit_check = suit_check_expr(condition);
+        let suit_check = suit_check_expr(condition, ctx);
         let count_expr = lua_raw_expr(format!(
             "(function() local c = 0; for _, playing_card in pairs({} or {{}}) do \
              if {} then c = c + 1 end end return c end)()",
@@ -152,7 +153,7 @@ pub fn rank_count(condition: &ConditionDef, ctx: &mut CompileContext) -> Option<
             "context.scoring_hand"
         };
 
-        let rank_check = rank_check_expr(condition);
+        let rank_check = rank_check_expr(condition, ctx);
         let count_expr = lua_raw_expr(format!(
             "(function() local c = 0; for _, playing_card in pairs({} or {{}}) do \
              if {} then c = c + 1 end end return c end)()",
@@ -233,7 +234,7 @@ pub fn discarded_suit_count(condition: &ConditionDef, ctx: &mut CompileContext) 
         resolve_condition_value(&condition.params, "count", ctx, "discarded_suit_count")
             .unwrap_or_else(|| lua_int(1));
 
-    let suit_check = suit_check_expr_for(condition, "v");
+    let suit_check = suit_check_expr_for(condition, "v", ctx);
     let count_expr = lua_raw_expr(format!(
         "(function() local c = 0; for _, v in ipairs(context.full_hand or {{}}) do \
          if {} then c = c + 1 end end return c end)()",
@@ -255,7 +256,7 @@ pub fn discarded_rank_count(condition: &ConditionDef, ctx: &mut CompileContext) 
         resolve_condition_value(&condition.params, "count", ctx, "discarded_rank_count")
             .unwrap_or_else(|| lua_int(1));
 
-    let rank_check = rank_check_expr_for(condition, "v");
+    let rank_check = rank_check_expr_for(condition, "v", ctx);
     let count_expr = lua_raw_expr(format!(
         "(function() local c = 0; for _, v in ipairs(context.full_hand or {{}}) do \
          if {} then c = c + 1 end end return c end)()",
@@ -426,12 +427,15 @@ pub fn rank_id_from_name(rank: &str) -> String {
     rank_to_id(rank)
 }
 
-fn suit_check_expr(condition: &ConditionDef) -> String {
-    suit_check_expr_for(condition, "playing_card")
+fn suit_check_expr(condition: &ConditionDef, ctx: &CompileContext) -> String {
+    suit_check_expr_for(condition, "playing_card", ctx)
 }
 
-pub(crate) fn suit_check_expr_for(condition: &ConditionDef, card_ref: &str) -> String {
+pub(crate) fn suit_check_expr_for(condition: &ConditionDef, card_ref: &str, ctx: &CompileContext) -> String {
     if let Some(var_name) = suit_var_name(condition) {
+        if ctx.user_var_is_global(var_name) {
+            return format!("{card_ref}:is_suit({})", ctx.user_var_expr(var_name));
+        }
         return format!(
             "{card}:is_suit((G.GAME.current_round.{name}_card or {{}}).suit or 'Spades')",
             card = card_ref,
@@ -463,12 +467,18 @@ pub(crate) fn suit_check_expr_for(condition: &ConditionDef, card_ref: &str) -> S
     )
 }
 
-fn rank_check_expr(condition: &ConditionDef) -> String {
-    rank_check_expr_for(condition, "playing_card")
+fn rank_check_expr(condition: &ConditionDef, ctx: &CompileContext) -> String {
+    rank_check_expr_for(condition, "playing_card", ctx)
 }
 
-pub(crate) fn rank_check_expr_for(condition: &ConditionDef, card_ref: &str) -> String {
+pub(crate) fn rank_check_expr_for(condition: &ConditionDef, card_ref: &str, ctx: &CompileContext) -> String {
     if let Some(var_name) = rank_var_name(condition) {
+        if ctx.user_var_is_global(var_name) {
+            return format!(
+                "{card_ref}:get_id() == (function() local rank = {value}; local ids = {{A = 14, Ace = 14, K = 13, King = 13, Q = 12, Queen = 12, J = 11, Jack = 11, ['2'] = 2, ['3'] = 3, ['4'] = 4, ['5'] = 5, ['6'] = 6, ['7'] = 7, ['8'] = 8, ['9'] = 9, ['10'] = 10}}; return ids[rank] or (SMODS and SMODS.Ranks and SMODS.Ranks[rank] and SMODS.Ranks[rank].id) or 0 end)()",
+                value = ctx.user_var_expr(var_name),
+            );
+        }
         return format!(
             "{card}:get_id() == ((G.GAME.current_round.{name}_card or {{}}).id or 0)",
             card = card_ref,
@@ -528,5 +538,44 @@ fn quantifier_compare(
         "all" => comparison_op("equals", count_expr, total_expr),
         "none" => comparison_op("equals", count_expr, lua_int(0)),
         _ => comparison_op(quantifier_to_op(quantifier), count_expr, value_expr),
+    }
+}
+
+#[cfg(test)]
+mod global_scope_tests {
+    use super::*;
+    use crate::compiler::conditions::compile_condition;
+    use crate::types::{ObjectType, ParamValue, UserVarType, UserVariableDef};
+    use serde_json::json;
+
+    #[test]
+    fn card_and_hand_conditions_use_global_selector_values() {
+        for persistent in [false, true] {
+            let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+            ctx.set_user_vars(vec![UserVariableDef {
+                name: "chosen".into(), var_type: UserVarType::Suit,
+                initial_value: ParamValue::Str("Hearts".into()),
+                is_global: true, is_persistent: persistent,
+            }]);
+            for (kind, parameter) in [
+                ("hand_type", "value"),
+                ("suit_count", "suit_type"),
+                ("rank_count", "rank_type"),
+                ("discarded_suit_count", "suit_type"),
+                ("discarded_rank_count", "rank_type"),
+                ("card_suit", "suit_type"),
+                ("card_rank", "rank_type"),
+            ] {
+                let mut params = json!({"quantifier":"at_least","count":1});
+                params[parameter] = json!({"value":"chosen","valueType":"user_var"});
+                let condition: ConditionDef = serde_json::from_value(json!({
+                    "condition_type":kind,"params":params
+                })).unwrap();
+                let code = compile_condition(&condition, ObjectType::Joker, &mut ctx).unwrap().to_string();
+                let path = if persistent { "JF_GLOBALS.chosen" } else { "G.GAME.jf_global_vars.chosen" };
+                assert!(code.contains(path), "{kind}: {code}");
+                assert!(!code.contains("current_round"), "{kind}: {code}");
+            }
+        }
     }
 }

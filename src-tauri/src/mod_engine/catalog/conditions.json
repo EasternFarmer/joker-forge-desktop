@@ -1655,9 +1655,10 @@
   {
     "id": "internal_variable",
     "label": "Check Number Variable",
-    "description": "Check the value of an internal variable for this joker",
-    "objectUsers": ["joker", "card"],
+    "description": "Check the value of a number variable for this item",
+    "objectUsers": ["joker", "card", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -1727,9 +1728,10 @@
   {
     "id": "suit_variable",
     "label": "Check Suit Variable",
-    "description": "Check the suit of an Suit variable for this joker",
-    "objectUsers": ["joker", "card"],
+    "description": "Check the suit of a suit variable for this item",
+    "objectUsers": ["joker", "card", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -1769,9 +1771,10 @@
   {
     "id": "rank_variable",
     "label": "Check Rank Variable",
-    "description": "Check the rank of an Rank variable for this joker",
-    "objectUsers": ["joker", "card"],
+    "description": "Check the rank of a rank variable for this item",
+    "objectUsers": ["joker", "card", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -1811,9 +1814,10 @@
   {
     "id": "pokerhand_variable",
     "label": "Check Poker Hand Variable",
-    "description": "Check the hand of an Poker Hand variable for this joker",
-    "objectUsers": ["joker", "card"],
+    "description": "Check the hand of a poker hand variable for this item",
+    "objectUsers": ["joker", "card", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -1877,9 +1881,10 @@
   {
     "id": "text_variable",
     "label": "Check Text Variable",
-    "description": "Check the text of an Text variable for this joker",
-    "objectUsers": ["joker"],
+    "description": "Check the text of a text variable for this item",
+    "objectUsers": ["joker", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -1948,9 +1953,10 @@
   {
     "id": "key_variable",
     "label": "Check Key Variable",
-    "description": "Check the value of a key variable for this joker",
-    "objectUsers": ["joker"],
+    "description": "Check the value of a key variable for this item",
+    "objectUsers": ["joker", "consumable"],
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",

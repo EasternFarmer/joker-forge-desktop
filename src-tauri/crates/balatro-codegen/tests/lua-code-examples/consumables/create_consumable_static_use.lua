@@ -32,10 +32,10 @@ SMODS.Consumable {
     use = function(self, card, area, copier)
         do
             if #G.consumeables.cards + (G.GAME.consumeable_buffer or 0) < G.consumeables.config.card_limit then SMODS.add_card({ area = G.consumeables, key = 'c_fool', set = 'Tarot' }) end
-            return {
+            SMODS.calculate_effect({
                 message = localize('k_plus_consumable'),
                 colour = G.C.GREEN
-            }
+            }, card)
         end
     end,
     can_use = function(self, card)

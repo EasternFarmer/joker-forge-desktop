@@ -270,6 +270,7 @@ pub(crate) enum PassiveHookSpec {
 }
 
 pub(crate) fn compile_rules(rules: &[RuleDef], ctx: &mut CompileContext) -> Vec<RuleOutput> {
+    ctx.set_referenced_user_vars(collect_referenced_user_vars(rules));
     rules
         .iter()
         .enumerate()
@@ -1012,6 +1013,25 @@ fn description_user_value(ctx: &CompileContext, name: &str) -> (Expr, Option<Exp
     } else {
         description_scoped_value(ctx, name, initial)
     };
+    // Global typed variables use the same scalar store as other globals.
+    // A local variable with the same name must not override their tooltip value.
+    if variable.is_global {
+        return match variable.var_type {
+            UserVarType::Suit => (
+                lua_call("localize", vec![current.clone(), lua_str("suits_singular")]),
+                Some(lua_index(lua_raw_expr("G.C.SUITS"), current)),
+            ),
+            UserVarType::Rank => (
+                lua_call("localize", vec![current, lua_str("ranks")]),
+                None,
+            ),
+            UserVarType::PokerHand => (
+                lua_call("localize", vec![current, lua_str("poker_hands")]),
+                None,
+            ),
+            _ => (current, None),
+        };
+    }
     let round = guarded_description_path("G.GAME.current_round");
     let card_variable = lua_index(
         lua_raw_expr("G.GAME.current_round"),
@@ -1224,67 +1244,10 @@ fn build_loc_vars(
         if uv.is_global && !referenced_user_vars.contains(&uv.name) {
             continue;
         }
-        match uv.var_type {
-            crate::types::UserVarType::Suit => {
-                let default_suit = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_card or {{}}).suit or '{}', 'suits_singular')",
-                    uv.name, default_suit
-                ))));
-                colour_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "G.C.SUITS[(G.GAME.current_round.{}_card or {{}}).suit or '{}']",
-                    uv.name, default_suit
-                ))));
-            }
-            crate::types::UserVarType::Rank => {
-                let default_rank = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_card or {{}}).rank or '{}', 'ranks')",
-                    uv.name, default_rank
-                ))));
-            }
-            crate::types::UserVarType::PokerHand => {
-                let default_hand = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_hand or '{}'), 'poker_hands')",
-                    uv.name, default_hand
-                ))));
-            }
-            _ => {
-                if uv.is_global && uv.is_persistent {
-                    var_refs.push(TableEntry::Value(lua_field(
-                        lua_raw_expr("JF_GLOBALS"),
-                        &uv.name,
-                    )));
-                } else if uv.is_global {
-                    let default_lua = match uv.var_type {
-                        crate::types::UserVarType::Number => {
-                            let n = uv.initial_value.as_f64().unwrap_or(0.0);
-                            if n.fract() == 0.0 {
-                                format!("{}", n as i64)
-                            } else {
-                                format!("{}", n)
-                            }
-                        }
-                        _ => format!(
-                            "'{}'",
-                            uv.initial_value
-                                .to_string_lossy()
-                                .replace('\\', "\\\\")
-                                .replace('\'', "\\'")
-                        ),
-                    };
-                    var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                        "((G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars.{}) or {})",
-                        uv.name, default_lua
-                    ))));
-                } else {
-                    var_refs.push(TableEntry::Value(lua_field(
-                        lua_raw_expr("self.config.extra"),
-                        &uv.name,
-                    )));
-                }
-            }
+        let (value, colour) = description_user_value(ctx, &uv.name);
+        var_refs.push(TableEntry::Value(value));
+        if let Some(colour) = colour {
+            colour_refs.push(TableEntry::Value(colour));
         }
     }
 
@@ -1371,6 +1334,9 @@ fn build_set_ability(joker: &JokerDef) -> Option<Expr> {
 
     let mut needs_round_guard = false;
     for uv in &joker.user_variables {
+        if uv.is_global {
+            continue;
+        }
         match uv.var_type {
             crate::types::UserVarType::Suit => {
                 needs_round_guard = true;
@@ -1825,7 +1791,7 @@ fn build_ignore_slot_limit_stmts(ctx: &CompileContext) -> Vec<Stmt> {
 }
 
 /// Build the `in_pool` function for appearance restrictions.
-fn build_in_pool(appearance: &AppearanceDef, _ctx: &CompileContext) -> Option<Expr> {
+fn build_in_pool(appearance: &AppearanceDef, ctx: &CompileContext) -> Option<Expr> {
     if appearance.appears_in.is_empty()
         && appearance.not_appears_in.is_empty()
         && appearance.appear_flags.is_empty()
@@ -1856,6 +1822,15 @@ fn build_in_pool(appearance: &AppearanceDef, _ctx: &CompileContext) -> Option<Ex
             })
             .collect();
         conditions.push(lua_or_chain(appear_checks));
+    }
+
+    for flag in &appearance.appear_flags {
+        let flag = flag.trim();
+        let (name, negate) = flag
+            .strip_prefix("not ")
+            .map_or((flag, false), |name| (name.trim(), true));
+        let value = ctx.flag_value(name);
+        conditions.push(if negate { lua_not(value) } else { value });
     }
 
     let cond = if conditions.is_empty() {
@@ -2040,7 +2015,10 @@ pub(crate) fn build_shared_loc_vars(
         return Some(Expr::Function { params: vec!["self".into(), "info_queue".into(), "card".into()], body });
     }
     let vars = ctx.config_vars();
-    let has_user_vars = ctx.user_vars().iter().any(|uv| !uv.is_global);
+    let has_user_vars = ctx
+        .user_vars()
+        .iter()
+        .any(|uv| !uv.is_global || ctx.user_var_is_referenced(&uv.name));
 
     if vars.is_empty() && !has_user_vars {
         return None;
@@ -2049,69 +2027,13 @@ pub(crate) fn build_shared_loc_vars(
     let mut body: Vec<Stmt> = Vec::new();
 
     let mut var_refs: Vec<TableEntry> = Vec::new();
-    // User variables
-    for uv in ctx.user_vars() {
-        if uv.is_global {
-            continue;
-        }
-        match uv.var_type {
-            crate::types::UserVarType::Suit => {
-                let default_suit = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_card or {{}}).suit or '{}', 'suits_singular')",
-                    uv.name, default_suit
-                ))));
-            }
-            crate::types::UserVarType::Rank => {
-                let default_rank = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_card or {{}}).rank or '{}', 'ranks')",
-                    uv.name, default_rank
-                ))));
-            }
-            crate::types::UserVarType::PokerHand => {
-                let default_hand = uv.initial_value.to_string_lossy();
-                var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                    "localize((G.GAME.current_round.{}_hand or '{}'), 'poker_hands')",
-                    uv.name, default_hand
-                ))));
-            }
-            _ => {
-                if uv.is_global && uv.is_persistent {
-                    var_refs.push(TableEntry::Value(lua_field(
-                        lua_raw_expr("JF_GLOBALS"),
-                        &uv.name,
-                    )));
-                } else if uv.is_global {
-                    let default_lua = match uv.var_type {
-                        crate::types::UserVarType::Number => {
-                            let n = uv.initial_value.as_f64().unwrap_or(0.0);
-                            if n.fract() == 0.0 {
-                                format!("{}", n as i64)
-                            } else {
-                                format!("{}", n)
-                            }
-                        }
-                        _ => format!(
-                            "'{}'",
-                            uv.initial_value
-                                .to_string_lossy()
-                                .replace('\\', "\\\\")
-                                .replace('\'', "\\'")
-                        ),
-                    };
-                    var_refs.push(TableEntry::Value(lua_raw_expr(format!(
-                        "((G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars.{}) or {})",
-                        uv.name, default_lua
-                    ))));
-                } else {
-                    var_refs.push(TableEntry::Value(lua_field(
-                        lua_raw_expr("self.config.extra"),
-                        &uv.name,
-                    )));
-                }
-            }
-        }
+    // Use the card's current value, with definition defaults for collection previews.
+    for uv in ctx
+        .user_vars()
+        .iter()
+        .filter(|uv| !uv.is_global || ctx.user_var_is_referenced(&uv.name))
+    {
+        var_refs.push(TableEntry::Value(description_user_value(ctx, &uv.name).0));
     }
 
     var_refs.extend(

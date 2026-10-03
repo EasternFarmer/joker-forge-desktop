@@ -1,4 +1,8 @@
 //! Emit actual compiler output for the Lua 5.1 regression runner.
+#[allow(dead_code)]
+#[path = "../../../src/mod_engine/export.rs"]
+mod export;
+
 use balatro_codegen::compiler::conditions::compile_condition;
 use balatro_codegen::compiler::context::CompileContext;
 use balatro_codegen::compiler::effects::utils::value_to_lua_str;
@@ -6,7 +10,7 @@ use balatro_codegen::compiler::values::{
     game_var_lua_code, resolve_condition_value, resolve_value,
 };
 use balatro_codegen::types::{
-    ConditionDef, ConsumableDef, EffectDef, JokerDef, ObjectType, ParamValue, VoucherDef,
+    ConditionDef, ConsumableDef, EffectDef, JokerDef, ObjectType, ParamValue, UserVariableDef, VoucherDef,
 };
 use balatro_codegen::{compile_consumable, compile_joker, compile_voucher, Emitter};
 use serde_json::{json, Value};
@@ -681,6 +685,213 @@ fn append_rule_option_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_flag_and_variable_cases(cases: &mut Vec<Value>) {
+    let flag = "1 active-flag!";
+    let mut writer = joker(json!([{
+        "id":"set", "trigger":"hand_played", "effects":[{
+            "effect_type":"emit_flag", "params":{"flag_name":flag,"change":"true","display_message":"n"}
+        }]
+    }, {
+        "id":"following_effect", "trigger":"hand_played", "effects":[{"effect_type":"add_mult","params":{"value":10}}]
+    }]));
+    writer.appearance = Some(serde_json::from_value(json!({"appear_flags":[flag,"not blocked"]})).unwrap());
+    let writer_code = Emitter::new().emit_chunk(&compile_joker(&writer, "mod"));
+    let reader = joker(json!([{
+        "id":"read", "trigger":"hand_played", "condition_groups":[{"conditions":[{
+            "condition_type":"check_flag", "params":{"flag_name":flag}
+        }]}], "effects":[{"effect_type":"add_mult","params":{"value":7}}]
+    }]));
+    let reader_code = Emitter::new().emit_chunk(&compile_joker(&reader, "mod"));
+    cases.push(json!({"kind":"rule_options", "name":"flag_set_check_across_jokers_and_rounds",
+        "code":format!("{writer_code}\nwriter=test_definition\n{reader_code}\nreader=test_definition"),
+        "prepare":"writer_card={ability=writer.config};reader_card={ability=reader.config};G.GAME.pool_flags=nil",
+        "invoke":"assert(not writer:in_pool({}));assert(not reader:calculate(reader_card,{joker_main=true}));local result=writer:calculate(writer_card,{joker_main=true});assert(result.mult==10);assert(writer:in_pool({}));assert(reader:calculate(reader_card,{joker_main=true}).mult==7)",
+        "verify":"assert(#event_queue==0 and #status_messages==0);G.GAME.current_round={};assert(reader:calculate(reader_card,{joker_main=true}).mult==7);G.GAME.pool_flags.mod_blocked=true;assert(not writer:in_pool({}));G.GAME.pool_flags.mod_1_active_flag_=false;assert(not reader:calculate(reader_card,{joker_main=true}))"}));
+
+    let mut unset_reader = reader.clone();
+    unset_reader.appearance = Some(serde_json::from_value(json!({"appear_flags":["not blocked"]})).unwrap());
+    cases.push(json!({"kind":"rule_options", "name":"flag_unset_check_without_run",
+        "setup":"G=nil",
+        "code":Emitter::new().emit_chunk(&compile_joker(&unset_reader,"mod")),
+        "invoke":"assert(not test_definition:calculate(actor,{joker_main=true}));assert(test_definition:in_pool({}))",
+        "verify":"assert(#status_messages==0)"}));
+
+    for (change, initial, expected) in [("false",true,false),("invert",true,false),("invert",false,true)] {
+        rule_option_case(cases,&format!("flag_change_{change}_{initial}"),"joker","emit_flag",
+            json!({"flag_name":"enabled","change":change}),
+            &format!("G.GAME.pool_flags={{mod_enabled={initial}}}"),
+            &format!("assert(G.GAME.pool_flags.mod_enabled=={expected});assert(#event_queue==0 and #status_messages==0)"));
+    }
+
+    let input:Value=serde_json::from_str(include_str!("../tests/lua-code-examples/consumables/user_variables_use.json")).unwrap();
+    let mut consumable:ConsumableDef=serde_json::from_value(input["definition"].clone()).unwrap();
+    consumable.rules.push(serde_json::from_value(json!({
+        "id":"after_mutation","trigger":"card_used","condition_groups":[{"conditions":[{
+            "condition_type":"internal_variable","params":{"variable_name":"amount","operator":"greater_than","value":5}
+        }]}],"effects":[{"effect_type":"set_dollars","params":{"operation":"add","value":{"value":"amount","valueType":"user_var"}}}]
+    })).unwrap());
+    cases.push(json!({"kind":"rule_options","name":"consumable_variables_use_mutation_following_rule_and_tooltip",
+        "code":Emitter::new().emit_chunk(&compile_consumable(&consumable,"mod")),
+        "prepare":"G.GAME.dollars=0;test_definition:set_ability(actor,true);assert(test_definition:can_use(actor))",
+        "invoke":"test_definition:use(actor,nil,nil)",
+        "verify":"assert(actor.ability.extra.amount==6);assert(G.GAME.dollars==10);assert(test_definition:loc_vars({},actor).vars[1]==6);actor.ability.extra.label='Spent';assert(test_definition:can_use(actor));assert(test_definition:loc_vars({},actor).vars[3]=='Spent');actor.ability.extra.amount=0;assert(not test_definition:can_use(actor));G=nil;assert(test_definition:loc_vars({},nil).vars[1]==4)"}));
+
+    let global_consumable:ConsumableDef=serde_json::from_value(json!({
+        "key":"global_use","name":"Global Use","description":["#1#"],
+        "set":"Tarot","atlas":"Consumables","pos":{"x":0,"y":0},
+        "user_variables":[
+            {"name":"shared_amount","var_type":"number","initial_value":3,"is_global":true},
+            {"name":"unrelated","var_type":"number","initial_value":99,"is_global":true}
+        ],
+        "rules":[{"id":"change","trigger":"card_used","effects":[
+            {"effect_type":"modify_internal_variable","params":{"variable_name":"shared_amount","value":2,"operation":"increment"}}
+        ]},{"id":"use","trigger":"card_used","effects":[
+            {"effect_type":"set_dollars","params":{"operation":"add","value":{"value":"shared_amount","valueType":"user_var"}}}
+        ]}]
+    })).unwrap();
+    cases.push(json!({"kind":"rule_options","name":"consumable_global_use_and_legacy_tooltip",
+        "code":Emitter::new().emit_chunk(&compile_consumable(&global_consumable,"mod")),
+        "prepare":"G.GAME.dollars=0;G.GAME.jf_global_vars={shared_amount=12,unrelated=99}",
+        "invoke":"assert(test_definition:can_use(actor));test_definition:use(actor,nil,nil)",
+        "verify":"assert(G.GAME.jf_global_vars.shared_amount==14);assert(G.GAME.dollars==14);local tooltip=test_definition:loc_vars({},actor);assert(tooltip.vars[1]==14);assert(#tooltip.vars==2);G=nil;assert(test_definition:loc_vars({},nil).vars[1]==3)"}));
+
+    let grouped_input:Value=serde_json::from_str(include_str!("../tests/lua-code-examples/consumables/grouped_variables_use.json")).unwrap();
+    let grouped:ConsumableDef=serde_json::from_value(grouped_input["definition"].clone()).unwrap();
+    cases.push(json!({"kind":"rule_options","name":"consumable_variables_chance_and_loop",
+        "code":Emitter::new().emit_chunk(&compile_consumable(&grouped,"mod")),
+        "prepare":"G.GAME.dollars=0;SMODS.pseudorandom_probability=function() return true end",
+        "invoke":"test_definition:use(actor,nil,nil)",
+        "verify":"assert(actor.ability.extra.amount==11);assert(G.GAME.dollars==11);assert(test_definition:loc_vars({},actor).vars[1]==11)"}));
+}
+
+fn global_variables(persistent: bool) -> Vec<UserVariableDef> {
+    serde_json::from_value(json!([
+        {"name":"global_counter","var_type":"number","initial_value":7,"is_global":true,"is_persistent":persistent},
+        {"name":"global_text","var_type":"text","initial_value":"Ready","is_global":true,"is_persistent":persistent},
+        {"name":"global_key","var_type":"key","initial_value":"j_joker","is_global":true,"is_persistent":persistent},
+        {"name":"global_suit","var_type":"suit","initial_value":"Hearts","is_global":true,"is_persistent":persistent},
+        {"name":"global_rank","var_type":"rank","initial_value":"A","is_global":true,"is_persistent":persistent},
+        {"name":"global_hand","var_type":"poker_hand","initial_value":"Pair","is_global":true,"is_persistent":persistent}
+    ]))
+    .unwrap()
+}
+
+fn global_main(run_variables: &[UserVariableDef]) -> String {
+    export::build_main_lua(
+        &[], &[], &[], &[], &[], &[], &[], "mod", &[],
+        false, false, false, false, false, true, false, run_variables,
+    )
+}
+
+fn global_setup(persistent_variables: &[UserVariableDef]) -> String {
+    format!(
+        "package.preload.nativefs=function() return {{}} end\n\
+SMODS.current_mod={{}}\n\
+G.SETTINGS={{profile=1}}\n\
+G.PROFILES={{[1]={{jf_global_vars={{persistent_counter=41}}}}}}\n\
+G.save_progress=function() saves=(saves or 0)+1 end\n\
+SMODS.load_file=function(path) assert(path=='globals.lua',path);return function()\n{}end end\n",
+        export::build_globals_lua(persistent_variables)
+    )
+}
+
+fn append_global_lifecycle_case(cases: &mut Vec<Value>) {
+    let persistent_variables: Vec<UserVariableDef> = serde_json::from_value(json!([
+        {"name":"persistent_counter","var_type":"number","initial_value":3,"is_global":true,"is_persistent":true},
+        {"name":"persistent_text","var_type":"text","initial_value":"Initial","is_global":true,"is_persistent":true}
+    ])).unwrap();
+    let main = global_main(&global_variables(false));
+    cases.push(json!({
+        "kind":"rule_options", "name":"global_lifecycle_round_save_new_run", "object":"global",
+        "setup":global_setup(&persistent_variables),
+        "code":format!("local function load_mod()\n{main}\nend\nload_mod()\ntest_definition={{config={{extra={{}}}}}}"),
+        "invoke":r#"
+local reset=SMODS.current_mod.reset_game_globals
+reset(true)
+local values=G.GAME.jf_global_vars
+assert(values.global_counter==7 and values.global_rank=='A' and values.global_hand=='Pair')
+values.global_counter=23;values.global_text='Changed';values.global_key='j_mod_saved'
+values.global_suit='Clubs';values.global_rank='King';values.global_hand='Flush'
+reset(false);reset(nil)
+assert(values.global_counter==23 and values.global_text=='Changed' and values.global_key=='j_mod_saved')
+assert(values.global_suit=='Clubs' and values.global_rank=='King' and values.global_hand=='Flush')
+G.GAME.current_round={}
+reset(false)
+assert(values.global_counter==23 and values.global_rank=='King')
+local saved_values={}
+for key,value in pairs(values) do saved_values[key]=value end
+G.GAME={jf_global_vars=saved_values,current_round={}}
+load_mod()
+reset=SMODS.current_mod.reset_game_globals
+reset(false)
+assert(G.GAME.jf_global_vars.global_counter==23 and G.GAME.jf_global_vars.global_hand=='Flush')
+G.GAME.jf_global_vars.global_text=nil
+reset(false)
+assert(G.GAME.jf_global_vars.global_text=='Ready' and G.GAME.jf_global_vars.global_counter==23)
+assert(JF_GLOBALS.persistent_counter==41 and JF_GLOBALS.persistent_text=='Initial')
+JF_GLOBALS.persistent_counter=67
+JF_GLOBALS.persistent_text='Saved'
+local saved_progress_calls=saves
+G.GAME={current_round={}}
+reset(true)
+assert(G.GAME.jf_global_vars.global_counter==7 and G.GAME.jf_global_vars.global_hand=='Pair')
+assert(JF_GLOBALS.persistent_counter==67 and JF_GLOBALS.persistent_text=='Saved')
+load_mod()
+assert(JF_GLOBALS.persistent_counter==67 and JF_GLOBALS.persistent_text=='Saved')
+assert(saves==saved_progress_calls)
+G.GAME.jf_global_vars.global_counter=100
+SMODS.current_mod.reset_game_globals(true)
+assert(G.GAME.jf_global_vars.global_counter==7)
+"#,
+        "verify":"assert(G.PROFILES[1].jf_global_vars.persistent_counter==67 and G.PROFILES[1].jf_global_vars.persistent_text=='Saved');assert(saves>=3)",
+    }));
+}
+
+fn append_typed_global_cases(cases: &mut Vec<Value>) {
+    for persistent in [false, true] {
+        let definitions = global_variables(persistent);
+        let persistent_variables = if persistent { definitions.clone() } else { Vec::new() };
+        let run_variables = if persistent { Vec::new() } else { definitions.clone() };
+        for (effect, condition, variable, parameter, selection, expected) in [
+            ("change_rank_variable", "rank_variable", "global_rank", "specific_rank", "K", "King"),
+            ("change_suit_variable", "suit_variable", "global_suit", "specific_suit", "Clubs", "Clubs"),
+            ("change_pokerhand_variable", "poker_hand_variable", "global_hand", "specific_pokerhand", "Flush", "Flush"),
+        ] {
+            let mut params = json!({"variable_name":variable,"change_type":"specific"});
+            params[parameter] = json!(selection);
+            let joker: JokerDef = serde_json::from_value(json!({
+                "key":"global_test", "name":"Global Test", "description":["#1#"],
+                "cost":4,"rarity":"common","blueprint_compat":false,"eternal_compat":true,
+                "perishable_compat":true,"unlocked":true,"discovered":true,
+                "atlas":"CustomJokers","pos":{"x":0,"y":0},
+                "user_variables":definitions,
+                "description_variables":[{"kind":"user","name":variable}],
+                "rules":[{"id":"typed_global_change","trigger":"hand_played","effects":[{"effect_type":effect,"params":params}]}]
+            })).unwrap();
+            let mut check_params = json!({"variable_name":variable});
+            check_params[parameter] = json!(expected);
+            let check: ConditionDef = serde_json::from_value(json!({
+                "condition_type":condition,"params":check_params
+            })).unwrap();
+            let mut ctx = CompileContext::new(ObjectType::Joker,"mod".into(),"reader".into(),false);
+            ctx.set_user_vars(definitions.clone());
+            let condition_code = compile_condition(&check, ObjectType::Joker, &mut ctx).unwrap();
+            let main = global_main(&run_variables);
+            let code = format!("{main}\n{}", Emitter::new().emit_chunk(&compile_joker(&joker,"mod")));
+            let path = if persistent { "JF_GLOBALS" } else { "G.GAME.jf_global_vars" };
+            let reset = "if SMODS.current_mod.reset_game_globals then SMODS.current_mod.reset_game_globals(false) end";
+            let initial = match variable { "global_rank" => "A", "global_suit" => "Hearts", _ => "Pair" };
+            cases.push(json!({
+                "kind":"rule_options", "name":format!("typed_global_{variable}_persistent_{persistent}"),
+                "object":"joker", "setup":global_setup(&persistent_variables), "code":code,
+                "prepare":format!("if SMODS.current_mod.reset_game_globals then SMODS.current_mod.reset_game_globals(true) end;G.GAME.hands.Flush={{visible=true,played=0}};G.GAME.current_round={{global_rank_card={{rank='2',id=2}},global_suit_card={{suit='Spades'}},global_hand_hand='High Card'}};if test_definition.set_ability then test_definition:set_ability(actor,true) end;assert({path}.{variable}=='{initial}')"),
+                "invoke":"test_definition:calculate(actor,{joker_main=true})",
+                "verify":format!("assert({path}.{variable}=='{expected}');assert({condition_code});local tooltip=test_definition:loc_vars({{}},actor);assert(tooltip.vars[1]=='{expected}',tostring(tooltip.vars[1]));{reset};G.GAME.current_round={{}};{reset};assert({path}.{variable}=='{expected}');assert({condition_code})"),
+            }));
+        }
+    }
+}
+
 fn main() {
     let source = include_str!("../../../../src/lib/content/game-vars.ts");
     let mut cases = Vec::new();
@@ -812,5 +1023,8 @@ fn main() {
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_rule_option_cases(&mut cases);
+    append_flag_and_variable_cases(&mut cases);
+    append_global_lifecycle_case(&mut cases);
+    append_typed_global_cases(&mut cases);
     std::fs::write(output, serde_json::to_vec(&cases).unwrap()).unwrap();
 }

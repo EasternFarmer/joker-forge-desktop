@@ -2,30 +2,28 @@
 
 This crate uses three complementary test layers:
 
-1. `src/**/tests.rs` (unit tests)
+1. Test modules under `src/` (unit tests)
 - Purpose: verify private/internal compiler behavior.
-- Current example: `src/compiler/tests.rs` for trigger chaining and fallback ordering.
+- Examples: `src/compiler/tests.rs` for trigger chaining and fallback ordering,
+  and the test module in `src/compiler/consumable.rs` for consumable variable behavior.
 
-2. `tests/*.rs` (integration tests)
-- Purpose: verify public API outputs and end-to-end generation behavior.
-- Current suites:
-  - `tests/codegen_joker.rs`
-  - `tests/codegen_consumable.rs`
-  - `tests/codegen_voucher.rs`
-  - `tests/codegen_deck.rs`
-  - `tests/codegen_card_objects.rs` (enhancement/seal/edition)
+2. `tests/lua_example_snapshots.rs` (integration tests)
+- Purpose: verify public API outputs against JSON inputs and expected Lua snapshots
+  for each supported object family.
 
 3. `scripts/test-codegen-lua.py` (Lua runtime regressions)
 - Runs actual compiler output through a Lua 5.1/LuaJIT shared library.
 - Covers every editor game variable with absent, partial and populated game state,
   tooltip callbacks, complete Joker calculations, and Card Edition matching.
+- Covers flag changes/checks, consumable variable mutations including chance and
+  loop groups, and global state across rounds, saved-run loads and new runs.
+- Consumable effects use the bundled Steamodded effect resolver in these tests.
 - Uses `examples/codegen_runtime_cases.rs` to generate fixtures, so the runner
   evaluates the current compiler instead of hand-written copies of its output.
 
 ## Shared fixtures
 
-- Reusable test builders live in `tests/common/mod.rs`.
-- Add new helper constructors there before duplicating object/rule setup.
+- Reuse existing helpers within each test module before duplicating object/rule setup.
 - Snapshot-style Lua fixtures live in `tests/lua-code-examples/**`.
   - Each case uses a `*.json` input spec and a matching `*.lua` expected output.
   - The `*.lua` file starts with contributor comments, then expected generated Lua.
@@ -33,8 +31,7 @@ This crate uses three complementary test layers:
 
 ## Expansion guidelines
 
-- Add internal algorithm regressions under `src/compiler/tests.rs`.
-- Add output/contract tests under `tests/*.rs` per object family.
+- Add internal algorithm regressions under `src/compiler/tests.rs` or the relevant compiler module.
 - Prefer focused tests with one assertion theme each (branch order, trigger filtering, emitted section markers, etc.).
 - For broad output coverage, prefer adding a new case in `lua-code-examples` instead of adding another ad-hoc `contains(...)` assertion.
 
@@ -54,10 +51,10 @@ This crate uses three complementary test layers:
   - `npm run test:codegen:lua -- --lua-library "C:/Program Files (x86)/Steam/steamapps/common/Balatro/lua51.dll"`
   - Requires Python and a matching-architecture Lua 5.1/LuaJIT shared library.
     Other installations can supply `--lua-library` or `BALATRO_LUA_LIBRARY`.
-- Run only crate tests:
-  - `cargo test -p balatro-codegen`
+- Run only crate tests from the repository root:
+  - `cargo test --manifest-path src-tauri/Cargo.toml -p balatro-codegen`
 - Regenerate Lua snapshot bodies from JSON specs:
-  - PowerShell: `$env:UPDATE_LUA_EXAMPLES='1'; cargo test -p balatro-codegen lua_codegen_matches_examples`
-  - Bash: `UPDATE_LUA_EXAMPLES=1 cargo test -p balatro-codegen lua_codegen_matches_examples`
-- Run full workspace build (frontend + tauri side checks from workspace root):
+  - PowerShell: `$env:UPDATE_LUA_EXAMPLES='1'; cargo test --manifest-path src-tauri/Cargo.toml -p balatro-codegen lua_codegen_matches_examples`
+  - Bash: `UPDATE_LUA_EXAMPLES=1 cargo test --manifest-path src-tauri/Cargo.toml -p balatro-codegen lua_codegen_matches_examples`
+- Run the frontend build from the repository root:
   - `npm run build`

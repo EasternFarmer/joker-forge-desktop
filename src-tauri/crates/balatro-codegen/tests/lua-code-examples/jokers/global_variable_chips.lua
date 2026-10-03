@@ -23,7 +23,7 @@ SMODS.Joker {
     loc_vars = function(self, info_queue, card)
         return {
             vars = {
-                ((G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars.globalvariabletest) or 1)
+                G and G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars['globalvariabletest'] or 1
             }
         }
     end,

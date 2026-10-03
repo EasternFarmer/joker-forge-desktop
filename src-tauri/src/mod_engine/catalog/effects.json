@@ -5594,8 +5594,9 @@
   {
     "id": "modify_internal_variable",
     "label": "Change Number Variable",
-    "description": "Change an number variable value for this joker",
+    "description": "Change a number variable value for this item",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -5608,7 +5609,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker", "card"],
+    "objectUsers": ["joker", "card", "consumable"],
     "params": [
       {
         "id": "variable_name",
@@ -5772,6 +5773,7 @@
     "label": "Change Suit Variable",
     "description": "Change the value of a suit variable to a specific suit or random suit",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -5784,7 +5786,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker", "card"],
+    "objectUsers": ["joker", "card", "consumable"],
     "params": [
       {
         "id": "variable_name",
@@ -5869,6 +5871,7 @@
     "label": "Change Rank Variable",
     "description": "Change the value of a rank variable to a specific rank or random rank",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -5881,7 +5884,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker", "card"],
+    "objectUsers": ["joker", "card", "consumable"],
     "params": [
       {
         "id": "variable_name",
@@ -6029,6 +6032,7 @@
     "label": "Change Poker Hand Variable",
     "description": "Change the value of a poker hand variable to a specific poker hand or random poker hand",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -6041,7 +6045,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker", "card"],
+    "objectUsers": ["joker", "card", "consumable"],
     "params": [
       {
         "id": "variable_name",
@@ -6178,6 +6182,7 @@
     "label": "Change Text Variable",
     "description": "Change the value of a text variable",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -6190,7 +6195,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker"],
+    "objectUsers": ["joker", "consumable"],
     "params": [
       {
         "id": "variable_name",
@@ -6250,6 +6255,7 @@
     "label": "Change Key Variable",
     "description": "Change the value of a key variable to a specific object key",
     "applicableTriggers": [
+      "card_used",
       "hand_drawn",
       "first_hand_drawn",
       "card_discarded",
@@ -6262,7 +6268,7 @@
       "player_action",
       "blind_disabled"
     ],
-    "objectUsers": ["joker"],
+    "objectUsers": ["joker", "consumable"],
     "params": [
       {
         "id": "variable_name",

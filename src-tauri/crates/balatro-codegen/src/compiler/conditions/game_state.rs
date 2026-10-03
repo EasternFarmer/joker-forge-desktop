@@ -232,10 +232,14 @@ pub fn triggered_boss_blind(_condition: &ConditionDef) -> Option<Expr> {
 }
 
 /// Check Flag: check a game flag.
-pub fn check_flag(condition: &ConditionDef) -> Option<Expr> {
-    let flag_name = condition.params.get("flag_name")?.as_str()?;
+pub fn check_flag(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
+    let flag_name = condition
+        .params
+        .get("flag_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("custom_flag");
 
-    Some(lua_path(&["G", "GAME", "pool_flags", flag_name]))
+    Some(ctx.flag_value(flag_name))
 }
 
 /// Which Tag: check the tag type.
@@ -372,4 +376,65 @@ fn simple_compare(
     let value_expr = resolve_condition_value(&condition.params, "value", ctx, condition_type)?;
 
     Some(comparison_op(operator, game_expr, value_expr))
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+    use crate::compiler::conditions::compile_condition;
+    use crate::types::ObjectType;
+    use serde_json::json;
+
+    #[test]
+    fn flag_checks_share_the_sanitized_mod_key_across_object_types() {
+        let condition: ConditionDef = serde_json::from_value(json!({
+            "condition_type": "check_flag",
+            "params": {"flag_name": {"value": "  1 active-flag!  ", "valueType": "text"}}
+        }))
+        .unwrap();
+
+        for object_type in [
+            ObjectType::Joker,
+            ObjectType::Consumable,
+            ObjectType::Enhancement,
+            ObjectType::Voucher,
+            ObjectType::Deck,
+        ] {
+            let mut ctx = CompileContext::new(object_type, "testmod".into(), "reader".into(), false);
+            let code = compile_condition(&condition, object_type, &mut ctx)
+                .unwrap()
+                .to_string();
+            assert!(code.contains("G.GAME.pool_flags['testmod_1_active_flag_']"), "{code}");
+            assert!(code.contains("G and G.GAME and G.GAME.pool_flags"), "{code}");
+            assert!(code.ends_with("or false"), "{code}");
+            assert!(!code.contains("ability"), "{code}");
+        }
+    }
+
+    #[test]
+    fn inactive_flag_checks_negate_the_guarded_false_default() {
+        let condition: ConditionDef = serde_json::from_value(json!({
+            "condition_type": "check_flag", "negate": true,
+            "params": {"flag_name": "unlocked"}
+        }))
+        .unwrap();
+        let mut ctx = CompileContext::new(ObjectType::Joker, "testmod".into(), "reader".into(), false);
+        let code = compile_condition(&condition, ObjectType::Joker, &mut ctx)
+            .unwrap()
+            .to_string();
+        assert!(code.starts_with("not ("), "{code}");
+        assert!(code.contains("['testmod_unlocked'] or false)"), "{code}");
+    }
+
+    #[test]
+    fn missing_or_blank_flag_names_use_the_same_catalogue_default() {
+        let ctx = CompileContext::new(ObjectType::Joker, "testmod".into(), "reader".into(), false);
+        for params in [json!({}), json!({"flag_name": "  "})] {
+            let condition: ConditionDef = serde_json::from_value(json!({
+                "condition_type": "check_flag", "params": params
+            }))
+            .unwrap();
+            assert!(check_flag(&condition, &ctx).unwrap().to_string().contains("['testmod_custom_flag']"));
+        }
+    }
 }

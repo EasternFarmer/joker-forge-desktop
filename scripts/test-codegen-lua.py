@@ -52,6 +52,10 @@ def evaluate(lua, source):
 HELPERS = """
 function to_big(value) return value end
 function lenient_bignum(value) return value end
+function copy_table(value)
+ if type(value)~='table' then return value end
+ local copy={};for key,entry in pairs(value) do copy[key]=copy_table(entry) end;return copy
+end
 function numeric(value)
  assert(type(value)=='number', 'expected number, got '..type(value))
  assert(value==value and value~=math.huge and value~=-math.huge, 'nonfinite number')
@@ -61,6 +65,7 @@ SMODS = {
  Joker=function(definition) test_definition=definition end,
  Consumable=function(definition) test_definition=definition end,
  Voucher=function(definition) test_definition=definition end,
+ get_probability_vars=function(card,numerator,denominator) return numerator,denominator end,
  has_enhancement=function(card, key) return card.config and card.config.center and card.config.center.key==key end,
  get_enhancements=function(card)
   if card.config and card.config.center and card.config.center.key~='c_base' then
@@ -70,6 +75,33 @@ SMODS = {
  end
 }
 """
+
+
+def steamodded_effect_resolver():
+    """Use the bundled Steamodded implementation for consumable use effects."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    individual = source.split("SMODS.calculate_individual_effect = function", 1)[1]
+    individual = "SMODS.calculate_individual_effect = function" + individual.split(
+        "\n-- Used to calculate a table of effects", 1
+    )[0]
+    calculation = source.split("SMODS.calculate_effect = function", 1)[1]
+    calculation = "SMODS.calculate_effect = function" + calculation.split(
+        "\nSMODS.insert_repetitions", 1
+    )[0]
+    return individual + calculation + """
+SMODS.Scoring_Parameter_Calculation={}
+SMODS.calculation_keys=SMODS.other_calculation_keys
+SMODS.calculate_context=function() end
+function ease_dollars(amount) G.GAME.dollars=(G.GAME.dollars or 0)+amount end
+status_messages={}
+function card_eval_status_text(card, kind, amount, percent, dir, extra)
+ status_messages[#status_messages+1]={kind=kind,amount=amount,message=extra and extra.message}
+end
+function localize(key) return key end
+"""
+
+
+EFFECT_RESOLVER = steamodded_effect_resolver()
 RULE_OPTIONS_STATE = """
 Card={};Card.__index=Card
 function Card:set_cost()
@@ -97,7 +129,8 @@ local first={key='j_first',set='Joker',unlocked=false,rarity=1}
 local second={key='j_second',set='Joker',unlocked=true,rarity=3}
 local third={key='j_third',set='Joker',unlocked=true,rarity=2}
 G={GAME={current_round={},round_resets={ante=1},used_vouchers={}},
- C={FILTER=1,DARK_EDITION=1,MONEY=1,RED=1,SECONDARY_SET={Tarot=1}},
+ STATES={SHOP=1,SMODS_BOOSTER_OPENED=2,SMODS_REDEEM_VOUCHER=3,PLAY_TAROT=4,HAND_PLAYED=5},
+ C={FILTER=1,DARK_EDITION=1,MONEY=1,RED=1,GREEN=1,SUITS={Hearts=1,Spades=1,Diamonds=1,Clubs=1},SECONDARY_SET={Tarot=1}},
  jokers={cards=owned_jokers,highlighted={owned_jokers[2]}},
  consumeables={cards=owned_consumables},
  P_CENTER_POOLS={
@@ -202,8 +235,8 @@ def run_checks(lua, cases):
     checks = 0
     for case in cases:
         if case["kind"] == "rule_options":
-            source = HELPERS + RULE_OPTIONS_STATE + case.get("setup", "") + "\n" + case["code"]
-            source += "\nactor={ability=test_definition.config or {extra={}}};actor.ability.extra=actor.ability.extra or {};\n"
+            source = HELPERS + EFFECT_RESOLVER + RULE_OPTIONS_STATE + case.get("setup", "") + "\n" + case["code"]
+            source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"
             source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
             try:
                 evaluate(lua, source)
@@ -213,7 +246,7 @@ def run_checks(lua, cases):
             continue
         if case["kind"] == "planet":
             for highlighted in (True, False):
-                source = HELPERS + POPULATED + "\ncontext=nil;G.C={GREEN=1};G.GAME.hands['Flush']={level=2,played=3};"
+                source = HELPERS + EFFECT_RESOLVER + POPULATED + "\ncontext=nil;G.C={GREEN=1};G.GAME.hands['Flush']={level=2,played=3};"
                 source += "G.hand.highlighted=G.hand.cards;" if highlighted else "G.hand=nil;"
                 source += "function localize(key) return key end; SMODS.smart_level_up_hand=function(card,hand,instant,amount) captured_amount=amount end;"
                 source += case["code"] + "\ntest_definition:use({ability={extra={}}},nil,nil);return numeric(captured_amount)"

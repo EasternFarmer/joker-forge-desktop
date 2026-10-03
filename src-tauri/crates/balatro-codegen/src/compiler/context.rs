@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::lua_ast::{Expr, LuaFieldSource};
 use crate::types::{
@@ -33,6 +33,7 @@ pub struct CompileContext {
 
     /// User-defined variables.
     user_vars: Vec<UserVariableDef>,
+    referenced_user_vars: HashSet<String>,
 
     description_variables: Option<Vec<DescriptionVariableBinding>>,
     description_probabilities: HashMap<String, DescriptionProbability>,
@@ -71,6 +72,7 @@ impl CompileContext {
             effect_type_counts: HashMap::new(),
             config_vars: Vec::new(),
             user_vars: Vec::new(),
+            referenced_user_vars: HashSet::new(),
             description_variables: None,
             description_probabilities: HashMap::new(),
             effect_config_names: HashMap::new(),
@@ -96,6 +98,55 @@ impl CompileContext {
         use crate::lua_ast::*;
         let path = self.ability_path();
         lua_field(lua_raw_expr(path), var_name)
+    }
+
+    /// Flags are shared by all objects in this mod and use the same key for
+    /// writes, condition checks, and appearance restrictions.
+    pub fn flag_key(&self, flag_name: &str) -> String {
+        let name = flag_name.trim();
+        let name = if name.is_empty() { "custom_flag" } else { name };
+        let safe_name: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{}_{}", self.mod_prefix, safe_name)
+    }
+
+    pub fn flag_access(&self, flag_name: &str) -> Expr {
+        use crate::lua_ast::*;
+        lua_index(
+            lua_path(&["G", "GAME", "pool_flags"]),
+            lua_str(self.flag_key(flag_name)),
+        )
+    }
+
+    /// An unset flag is false, including when inspecting an object outside a run.
+    pub fn flag_value(&self, flag_name: &str) -> Expr {
+        use crate::lua_ast::*;
+        lua_or(
+            lua_and_chain(vec![
+                lua_ident("G"),
+                lua_path(&["G", "GAME"]),
+                lua_path(&["G", "GAME", "pool_flags"]),
+                self.flag_access(flag_name),
+            ]),
+            lua_bool(false),
+        )
+    }
+
+    /// Variables used by this object's rules, excluding unrelated merged globals.
+    pub(crate) fn set_referenced_user_vars(&mut self, names: HashSet<String>) {
+        self.referenced_user_vars = names;
+    }
+
+    pub(crate) fn user_var_is_referenced(&self, name: &str) -> bool {
+        self.referenced_user_vars.contains(name)
     }
 
     /// Whether the given user variable is marked global.

@@ -32,10 +32,10 @@ SMODS.Consumable {
     use = function(self, card, area, copier)
         do
             if G.hand and G.hand.cards and #G.hand.cards > 0 then local c = pseudorandom_element(G.hand.cards, pseudoseed('destroy_cards')); if c then SMODS.destroy_cards({c}) end end
-            return {
+            SMODS.calculate_effect({
                 message = 'Destroyed Cards!',
                 colour = G.C.RED
-            }
+            }, card)
         end
     end,
     can_use = function(self, card)

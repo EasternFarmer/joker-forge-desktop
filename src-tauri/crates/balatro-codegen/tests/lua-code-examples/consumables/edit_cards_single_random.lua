@@ -34,9 +34,9 @@ SMODS.Consumable {
             local _card = pseudorandom_element(G.hand.cards, pseudoseed('edit_cards'))
             if not _card then return end
             assert(SMODS.change_base(_card, nil, 'Ace'))
-            return {
+            SMODS.calculate_effect({
                 colour = G.C.SECONDARY_SET.Tarot
-            }
+            }, card)
         end
     end,
     can_use = function(self, card)

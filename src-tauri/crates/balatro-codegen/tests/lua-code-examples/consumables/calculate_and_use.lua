@@ -44,9 +44,9 @@ SMODS.Consumable {
     end,
     use = function(self, card, area, copier)
         do
-            return {
+            SMODS.calculate_effect({
                 mult = card.ability.extra.mult0
-            }
+            }, card)
         end
     end,
     can_use = function(self, card)

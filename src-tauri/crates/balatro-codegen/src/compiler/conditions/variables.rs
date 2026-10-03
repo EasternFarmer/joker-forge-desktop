@@ -54,15 +54,19 @@ pub fn text_variable(condition: &ConditionDef, ctx: &CompileContext) -> Option<E
     Some(lua_eq(ctx.user_var_expr(name), lua_str(text)))
 }
 
-pub fn poker_hand_variable(condition: &ConditionDef, _ctx: &CompileContext) -> Option<Expr> {
+pub fn poker_hand_variable(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let name = match variable_name(condition, "poker_hand_variable") {
         Ok(name) => name,
         Err(marker) => return Some(marker),
     };
-    let current = format!(
-        "(G and G.GAME and G.GAME.current_round and G.GAME.current_round[{}])",
-        lua_str(format!("{name}_hand"))
-    );
+    let current = if ctx.user_var_is_global(name) {
+        ctx.user_var_expr(name).to_string()
+    } else {
+        format!(
+            "(G and G.GAME and G.GAME.current_round and G.GAME.current_round[{}])",
+            lua_str(format!("{name}_hand"))
+        )
+    };
     let mode = str_param(condition, &["check_type", "checkType"]).unwrap_or("specific");
     match mode {
         "specific" => {
@@ -96,7 +100,7 @@ pub fn poker_hand_variable(condition: &ConditionDef, _ctx: &CompileContext) -> O
     }
 }
 
-pub fn rank_variable(condition: &ConditionDef, _ctx: &CompileContext) -> Option<Expr> {
+pub fn rank_variable(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let name = match variable_name(condition, "rank_variable") {
         Ok(name) => name,
         Err(marker) => return Some(marker),
@@ -123,20 +127,27 @@ pub fn rank_variable(condition: &ConditionDef, _ctx: &CompileContext) -> Option<
     // Initial values can contain A/J/Q/K, while a card's base.value contains
     // Ace/Jack/Queen/King. Both initialization and rank changes store the ID.
     // Keep the name fallback for older saves which did not include an ID.
+    let source = if ctx.user_var_is_global(name) {
+        ctx.user_var_expr(name).to_string()
+    } else {
+        format!("G and G.GAME and G.GAME.current_round and G.GAME.current_round[{}]", lua_str(format!("{name}_card")))
+    };
     Some(lua_raw_expr(format!(
-        "(function() local selected = G and G.GAME and G.GAME.current_round and G.GAME.current_round[{field}]; if not selected then return false end; local expected = {expected_id}; return (expected ~= nil and selected.id ~= nil and selected.id == expected) or (selected.id == nil and (selected.rank == {rank} or selected.rank == {canonical})) end)()",
-        field = lua_str(format!("{name}_card")),
+        "(function() local selected = {source}; if type(selected) == 'string' then local rank_names = {{A = 'Ace', K = 'King', Q = 'Queen', J = 'Jack'}}; local rank_ids = {{Ace = 14, King = 13, Queen = 12, Jack = 11, ['2'] = 2, ['3'] = 3, ['4'] = 4, ['5'] = 5, ['6'] = 6, ['7'] = 7, ['8'] = 8, ['9'] = 9, ['10'] = 10}}; local normalized = rank_names[selected] or selected; selected = {{rank = normalized, id = rank_ids[normalized] or (SMODS and SMODS.Ranks and SMODS.Ranks[normalized] and SMODS.Ranks[normalized].id)}} end; if type(selected) ~= 'table' then return false end; local expected = {expected_id}; return (expected ~= nil and selected.id ~= nil and selected.id == expected) or (selected.id == nil and (selected.rank == {rank} or selected.rank == {canonical})) end)()",
         rank = lua_str(rank),
         canonical = lua_str(canonical),
     )))
 }
 
-pub fn suit_variable(condition: &ConditionDef, _ctx: &CompileContext) -> Option<Expr> {
+pub fn suit_variable(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let name = match variable_name(condition, "suit_variable") {
         Ok(name) => name,
         Err(marker) => return Some(marker),
     };
     let suit = str_param(condition, &["specific_suit", "suit", "value"]).unwrap_or("Spades");
+    if ctx.user_var_is_global(name) {
+        return Some(lua_eq(ctx.user_var_expr(name), lua_str(suit)));
+    }
     let field = lua_str(format!("{name}_card")).to_string();
     Some(lua_raw_expr(format!(
         "(G and G.GAME and G.GAME.current_round and G.GAME.current_round[{field}] and G.GAME.current_round[{field}].suit == {suit})",
@@ -157,6 +168,35 @@ mod comparison_tests {
     fn condition(kind: &str, params: serde_json::Value) -> ConditionDef {
         serde_json::from_value(json!({"condition_type": kind, "negate": false, "params": params}))
             .unwrap()
+    }
+
+    #[test]
+    fn typed_global_conditions_read_the_same_scalar_store_as_global_effects() {
+        for persistent in [false, true] {
+            for (kind, var_type, expected_param, expected_value) in [
+                ("rank_variable", crate::types::UserVarType::Rank, "specific_rank", "K"),
+                ("suit_variable", crate::types::UserVarType::Suit, "specific_suit", "Clubs"),
+                ("poker_hand_variable", crate::types::UserVarType::PokerHand, "specific_pokerhand", "Flush"),
+            ] {
+                let mut ctx = context();
+                ctx.set_user_vars(vec![crate::types::UserVariableDef {
+                    name: "chosen".into(), var_type,
+                    initial_value: crate::types::ParamValue::Str(expected_value.into()),
+                    is_global: true, is_persistent: persistent,
+                }]);
+                let mut params = json!({"variable_name": "chosen"});
+                params[expected_param] = json!(expected_value);
+                let condition = condition(kind, params);
+                let code = match kind {
+                    "rank_variable" => rank_variable(&condition, &ctx),
+                    "suit_variable" => suit_variable(&condition, &ctx),
+                    _ => poker_hand_variable(&condition, &ctx),
+                }.unwrap().to_string();
+                let path = if persistent { "JF_GLOBALS.chosen" } else { "G.GAME.jf_global_vars.chosen" };
+                assert!(code.contains(path), "{code}");
+                assert!(!code.contains("current_round"), "{code}");
+            }
+        }
     }
 
     #[test]

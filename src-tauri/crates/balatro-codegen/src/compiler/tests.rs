@@ -895,6 +895,41 @@ fn create_playing_card_uses_live_suit_rank_and_scoped_key_variables() {
 }
 
 #[test]
+fn create_playing_card_global_suit_and_rank_do_not_read_local_round_state() {
+    for value_type in [Some("userVariable"), Some("user_var"), None] {
+        for (is_persistent, path) in [
+            (false, "G.GAME.jf_global_vars"),
+            (true, "JF_GLOBALS"),
+        ] {
+            let params: Vec<(&str, ParamValue)> = [
+                ("suit", "chosen_suit"), ("rank", "chosen_rank"),
+            ].into_iter().map(|(key, value)| (key, match value_type {
+                Some(value_type) => ParamValue::Typed(TypedValue {
+                    value: serde_json::json!(value), value_type: value_type.into(),
+                }),
+                None => ParamValue::Str(value.into()),
+            })).collect();
+            let vars = vec![
+                UserVariableDef {
+                    name: "chosen_suit".into(), var_type: UserVarType::Suit,
+                    initial_value: ParamValue::Str("Spades".into()), is_global: true, is_persistent,
+                },
+                UserVariableDef {
+                    name: "chosen_rank".into(), var_type: UserVarType::Rank,
+                    initial_value: ParamValue::Str("Ace".into()), is_global: true, is_persistent,
+                },
+            ];
+            let code = effect_code_with_user_vars("create_playing_card", &params, vars);
+            for name in ["chosen_suit", "chosen_rank"] {
+                assert!(code.contains(&format!("{path}.{name}")), "Global card property uses its declared scope: {code}");
+                assert!(!code.contains(&format!("current_round.{name}_card")), "Local round state cannot override a global: {code}");
+                assert!(!code.contains(&format!("card.ability.extra.{name}")), "Global card property cannot read a local variable: {code}");
+            }
+        }
+    }
+}
+
+#[test]
 fn create_playing_cards_resolves_pool_encodings_inside_the_count_loop() {
     for typed in [false, true] {
         let pool = |value: serde_json::Value| if typed {
@@ -1136,11 +1171,16 @@ fn level_up_hand_uses_current_round_hand_variables_and_scoped_level_amounts() {
             ];
             let code = Emitter::new().emit_chunk(&compile_consumable(&planet, "mod"));
             assert!(!code.contains("context"), "{code}");
-            assert!(code.contains("G.GAME.current_round.chosen_hand_hand"), "Changing poker-hand variables must affect the target: {code}");
+            if is_global {
+                assert!(!code.contains("G.GAME.current_round.chosen_hand_hand"), "Local round state cannot override a global hand: {code}");
+            } else {
+                assert!(code.contains("G.GAME.current_round.chosen_hand_hand"), "Changing a local poker-hand variable must affect the target: {code}");
+            }
             for name in ["chosen_hand", "chosen_levels"] {
                 assert!(code.contains(&format!("{path}.{name}")), "The initial hand/level amount must retain its scope: {code}");
             }
-            assert!(!code.contains("'chosen_hand'"), "Variable names are not poker hand keys: {code}");
+            let use_code = code.split("use = function").nth(1).unwrap();
+            assert!(!use_code.contains("'chosen_hand'"), "Variable names are not poker hand keys in the use effect: {code}");
             assert!(code.contains("G.GAME.hands["), "Invalid variable values must be skipped: {code}");
         }
     }

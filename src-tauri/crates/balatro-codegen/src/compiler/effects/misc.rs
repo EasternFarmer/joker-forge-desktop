@@ -281,17 +281,19 @@ pub fn level_up_hand(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str
         pre_return.push(lua_local(&target_name, lua_nil()));
         if is_variable {
             if ctx.has_user_var(selection) {
-                let record = lua_field(
-                    lua_raw_expr("G.GAME.current_round"),
-                    format!("{selection}_hand"),
-                );
-                pre_return.push(lua_assign(
-                    target.clone(),
+                let selected_hand = if ctx.user_var_is_global(selection) {
+                    ctx.user_var_expr(selection)
+                } else {
+                    let record = lua_field(
+                        lua_raw_expr("G.GAME.current_round"),
+                        format!("{selection}_hand"),
+                    );
                     lua_or(
                         lua_and(lua_raw_expr("G.GAME.current_round"), record),
                         ctx.user_var_expr(selection),
-                    ),
-                ));
+                    )
+                };
+                pre_return.push(lua_assign(target.clone(), selected_hand));
             }
         } else {
             match selection {
@@ -1370,65 +1372,154 @@ pub fn emit_flag(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
         .get("flag_name")
         .and_then(|v| v.as_str())
         .unwrap_or("custom_flag");
-    let change = effect
-        .params
-        .get("change")
-        .and_then(|v| v.as_str())
-        .unwrap_or("true");
+    let change = effect.params.get("change");
     let custom_message = effect
         .params
         .get("customMessage")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
-    // Sanitise flag name: replace non-alphanumeric chars with underscores
-    let safe_flag: String = flag_name
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-
-    let mod_prefix = ctx.mod_prefix.clone();
-    let full_flag = format!("{}_{}", mod_prefix, safe_flag);
-
-    let change_code = if change == "invert" {
-        format!("not (G.GAME.pool_flags.{} or false)", full_flag)
+    let change_value = if change.and_then(ParamValue::as_str) == Some("invert") {
+        lua_not(ctx.flag_value(flag_name))
     } else {
-        change.to_string()
+        let value = change.and_then(ParamValue::as_bool).unwrap_or_else(|| {
+            change.and_then(ParamValue::as_str) != Some("false")
+        });
+        lua_bool(value)
     };
 
-    let msg_text = custom_message.unwrap_or_else(|| safe_flag.clone());
+    // Commit the flag before later rules or other objects check it. Only the
+    // optional visual feedback belongs in the event queue.
+    let mut pre_return = vec![
+        lua_assign(
+            lua_path(&["G", "GAME", "pool_flags"]),
+            lua_or(lua_path(&["G", "GAME", "pool_flags"]), lua_table_raw(vec![])),
+        ),
+        lua_assign(ctx.flag_access(flag_name), change_value),
+    ];
 
-    let lua = format!(
-        "G.E_MANAGER:add_event(Event({{\n\
+    let display_message = effect.params.get("display_message");
+    let show_message = matches!(
+        display_message.and_then(ParamValue::as_str),
+        Some("y" | "true")
+    ) || display_message.and_then(ParamValue::as_bool) == Some(true);
+    if show_message {
+        let msg_text = custom_message.unwrap_or_else(|| {
+            ctx.flag_key(flag_name)
+                .strip_prefix(&format!("{}_", ctx.mod_prefix))
+                .unwrap_or("custom_flag")
+                .to_string()
+        });
+        let lua = format!(
+            "G.E_MANAGER:add_event(Event({{\n\
             trigger = 'after',\n\
             delay = 0.4,\n\
             func = function()\n\
-                card:juice_up(0.3, 0.5)\n\
-                card_eval_status_text(card, 'extra', nil, nil, nil, {{message = \"{msg}\", colour = G.C.BLUE}})\n\
-                G.GAME.pool_flags.{flag} = {change}\n\
+                if card and card.juice_up then\n\
+                    card:juice_up(0.3, 0.5)\n\
+                    card_eval_status_text(card, 'extra', nil, nil, nil, {{message = {msg}, colour = G.C.BLUE}})\n\
+                end\n\
                 return true\n\
             end\n\
         }}))",
-        msg = msg_text,
-        flag = full_flag,
-        change = change_code
-    );
+            msg = lua_str(msg_text),
+        );
+        pre_return.push(lua_raw_stmt(lua));
+    }
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![lua_raw_stmt(lua)],
+        pre_return,
         config_vars: vec![],
         message: None,
-        colour: Some(lua_raw_expr("G.C.BLUE")),
+        colour: None,
 
         segment_id: None,
+    }
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+    use crate::compiler::effects::build_return_block;
+    use serde_json::json;
+
+    fn generated(params: serde_json::Value, object_type: ObjectType) -> String {
+        let effect: EffectDef = serde_json::from_value(json!({
+            "effect_type": "emit_flag", "params": params
+        }))
+        .unwrap();
+        let mut ctx = CompileContext::new(object_type, "testmod".into(), "writer".into(), false);
+        Chunk {
+            stmts: build_return_block(&[emit_flag(&effect, &mut ctx)]),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn flags_update_immediately_and_silently_without_ending_the_rule_chain() {
+        for object_type in [
+            ObjectType::Joker,
+            ObjectType::Consumable,
+            ObjectType::Enhancement,
+            ObjectType::Voucher,
+            ObjectType::Deck,
+        ] {
+            for display in [json!({}), json!({"display_message": "n"})] {
+                let mut params = json!({
+                    "flag_name": {"value": " 1 active-flag! ", "valueType": "text"},
+                    "change": {"value": "true", "valueType": "text"}
+                });
+                params.as_object_mut().unwrap().extend(display.as_object().unwrap().clone());
+                let code = generated(params, object_type);
+                assert!(code.contains("G.GAME.pool_flags = G.GAME.pool_flags or {}"), "{code}");
+                assert!(code.contains("G.GAME.pool_flags['testmod_1_active_flag_'] = true"), "{code}");
+                assert!(!code.contains("add_event"), "{code}");
+                assert!(!code.contains("card_eval_status_text"), "{code}");
+                assert!(!code.contains("return"), "{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn flags_can_be_cleared_or_inverted_with_current_and_legacy_parameters() {
+        for change in [
+            json!("false"),
+            json!(false),
+            json!({"value": "false", "valueType": "text"}),
+            json!({"value": false, "valueType": "boolean"}),
+        ] {
+            let code = generated(json!({"flag_name": "ready", "change": change}), ObjectType::Joker);
+            assert!(code.contains("G.GAME.pool_flags['testmod_ready'] = false"), "{code}");
+        }
+
+        let code = generated(json!({"flag_name": "ready", "change": "invert"}), ObjectType::Joker);
+        assert!(code.contains("G.GAME.pool_flags['testmod_ready'] = not ("), "{code}");
+        assert!(code.contains("G.GAME.pool_flags['testmod_ready'] or false)"), "{code}");
+    }
+
+    #[test]
+    fn enabled_feedback_is_escaped_and_queued_after_the_state_update() {
+        let text = "Active: \"quote\", 'apostrophe', \\path\nnew line";
+        let code = generated(json!({
+            "flag_name": "ready", "display_message": {"value": "y", "valueType": "text"},
+            "customMessage": text
+        }), ObjectType::Joker);
+        let update = code.find("G.GAME.pool_flags['testmod_ready'] = true").unwrap();
+        let feedback = code.find("G.E_MANAGER:add_event").unwrap();
+        assert!(update < feedback, "{code}");
+        assert_eq!(code.matches("G.GAME.pool_flags['testmod_ready'] =").count(), 1, "{code}");
+        assert!(code.contains(&format!("message = {}", lua_str(text))), "{code}");
+        assert!(code.contains("if card and card.juice_up then"), "{code}");
+        assert!(!code.contains("return {"), "{code}");
+    }
+
+    #[test]
+    fn blank_names_and_non_ascii_identifiers_remain_valid_lua_keys() {
+        let code = generated(json!({"flag_name": "  "}), ObjectType::Joker);
+        assert!(code.contains("['testmod_custom_flag'] = true"), "{code}");
+        let code = generated(json!({"flag_name": "déjà ready"}), ObjectType::Joker);
+        assert!(code.contains("['testmod_d_j__ready'] = true"), "{code}");
     }
 }
 

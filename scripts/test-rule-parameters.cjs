@@ -6,7 +6,7 @@ const vm = require("node:vm");
 const { test } = require("node:test");
 const ts = require("typescript");
 
-function loadTypeScript(relativePath) {
+function loadTypeScript(relativePath, mockImports = {}) {
   const filePath = path.join(__dirname, "..", relativePath);
   const compiled = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -17,6 +17,9 @@ function loadTypeScript(relativePath) {
     module,
     exports: module.exports,
     require(name) {
+      if (Object.prototype.hasOwnProperty.call(mockImports, name)) {
+        return mockImports[name];
+      }
       throw new Error(`Unmocked import in rule parameter test: ${name}`);
     },
   }, { filename: filePath });
@@ -27,6 +30,64 @@ const { isParameterVisible } = loadTypeScript("src/components/rule-builder/param
 const effects = JSON.parse(fs.readFileSync(path.join(
   __dirname, "..", "src-tauri/src/mod_engine/catalog/effects.json",
 ), "utf8"));
+
+const variableCases = [
+  ["number", "modify_internal_variable", "internal_variable", "addNumberVariablesToOptions"],
+  ["suit", "change_suit_variable", "suit_variable", "addSuitVariablesToOptions"],
+  ["rank", "change_rank_variable", "rank_variable", "addRankVariablesToOptions"],
+  ["pokerhand", "change_pokerhand_variable", "pokerhand_variable", "addPokerHandVariablesToOptions"],
+  ["key", "change_key_variable", "key_variable", "addKeyVariablesToOptions"],
+  ["text", "change_text_variable", "text_variable", "addTextVariablesToOptions"],
+];
+
+test("consumable use rules expose variable checks and changes for every variable type", async () => {
+  const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
+  const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));
+  const common = readCatalog("common.json");
+  const catalog = loadTypeScript("src/components/rule-builder/rule-catalog.ts", {
+    "@phosphor-icons/react": {},
+    "@/lib/balatro/balatro-utils": {},
+    "@/lib/services/entity-bridge": { entityBridge: {
+      async getRulebuilderCatalog() {
+        return {
+          triggers: readCatalog("triggers.json"),
+          effects: readCatalog("effects.json"),
+          conditions: readCatalog("conditions.json"),
+          generic_triggers: common.genericTriggers,
+          all_objects: common.allObjects,
+          trigger_groups: common.triggerGroups,
+        };
+      },
+    } },
+  });
+  await catalog.initializeRuleCatalogFromRust();
+  assert.ok(catalog.getTriggers("consumable").some((trigger) => trigger.id === "card_used"));
+  const availableEffects = catalog.getEffectsForTrigger("card_used", "consumable");
+  const availableConditions = catalog.getConditionsForTrigger("card_used", "consumable");
+  for (const [type, effectId, conditionId] of variableCases) {
+    for (const [definitions, id] of [[availableEffects, effectId], [availableConditions, conditionId]]) {
+      const definition = definitions.find((entry) => entry.id === id);
+      assert.ok(definition, `Consumable use palette includes ${id}`);
+      const variableParameter = definition.params.find((entry) => entry.id === "variable_name");
+      assert.ok(variableParameter?.variableTypes.includes(type), `${id} selects ${type} variables`);
+      assert.equal(isParameterVisible(variableParameter, definition.params, {}), true, id);
+    }
+  }
+});
+
+test("consumable variable pickers retain the user variable type for every supported type", () => {
+  const variableUtils = loadTypeScript("src/lib/rules/user-variable-utils.ts");
+  const consumable = {
+    objectType: "consumable",
+    userVariables: variableCases.map(([type]) => ({ id: type, name: `local_${type}`, type })),
+  };
+  for (const [type, , , appendOptions] of variableCases) {
+    const options = variableUtils[appendOptions]([], consumable);
+    assert.equal(options.length, 1, `${type} excludes other variable types`);
+    assert.equal(options[0].value, `local_${type}`);
+    assert.equal(options[0].valueType, "user_var");
+  }
+});
 
 function consumableEffect(id) {
   const effect = effects.find((entry) => entry.id === id);

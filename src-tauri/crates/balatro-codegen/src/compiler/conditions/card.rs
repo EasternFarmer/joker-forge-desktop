@@ -5,14 +5,14 @@ use crate::lua_ast::*;
 use crate::types::ConditionDef;
 
 /// Card Rank condition: checks the rank of the currently evaluated card.
-pub fn card_rank(condition: &ConditionDef) -> Option<Expr> {
-    let check = rank_check_expr(condition);
+pub fn card_rank(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
+    let check = rank_check_expr(condition, ctx);
     Some(lua_raw_expr(check))
 }
 
 /// Card Suit condition: checks the suit of the currently evaluated card.
-pub fn card_suit(condition: &ConditionDef) -> Option<Expr> {
-    let check = suit_check_expr(condition);
+pub fn card_suit(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
+    let check = suit_check_expr(condition, ctx);
     Some(lua_raw_expr(check))
 }
 
@@ -96,12 +96,12 @@ pub fn card_index(condition: &ConditionDef, ctx: &mut CompileContext) -> Option<
     }
 }
 
-fn rank_check_expr(condition: &ConditionDef) -> String {
-    super::hand::rank_check_expr_for(condition, "context.other_card")
+fn rank_check_expr(condition: &ConditionDef, ctx: &CompileContext) -> String {
+    super::hand::rank_check_expr_for(condition, "context.other_card", ctx)
 }
 
-fn suit_check_expr(condition: &ConditionDef) -> String {
-    super::hand::suit_check_expr_for(condition, "context.other_card")
+fn suit_check_expr(condition: &ConditionDef, ctx: &CompileContext) -> String {
+    super::hand::suit_check_expr_for(condition, "context.other_card", ctx)
 }
 
 #[cfg(test)]

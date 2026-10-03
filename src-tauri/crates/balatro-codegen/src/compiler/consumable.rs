@@ -180,6 +180,10 @@ fn build_consumable_table(
         entries.push(TableEntry::KeyValue("loc_vars".to_string(), f));
     }
 
+    if let Some(f) = build_set_ability(consumable) {
+        entries.push(TableEntry::KeyValue("set_ability".to_string(), f));
+    }
+
     // calculate function (non-"card_used" triggers)
     if let Some(f) = build_shared_calculate_function(rule_outputs, ctx) {
         entries.push(TableEntry::KeyValue("calculate".to_string(), f));
@@ -221,9 +225,22 @@ fn build_use_function(rule_outputs: &[super::RuleOutput], _ctx: &CompileContext)
         ));
     }
 
-    super::append_rule_chain_with_fallback(&mut body, &use_rules, |ro| {
-        super::wrap_rule_segment(&ro.rule_id, ro.effect_stmts.clone())
-    });
+    for ro in &use_rules {
+        // Steamodded calls a consumable's use hook directly and ignores its
+        // return value. Resolve calculation effects here so func callbacks,
+        // dollars and messages are actually applied when the card is used.
+        let stmts = resolve_use_effect_stmts(ro.effect_stmts.clone());
+        let stmts = super::wrap_rule_segment(&ro.rule_id, stmts);
+        body.extend(super::build_rule_anchor_stmts(ro));
+        if let Some(condition) = &ro.condition_expr {
+            body.push(Stmt::If {
+                branches: vec![(condition.clone(), stmts)],
+                else_body: None,
+            });
+        } else {
+            body.push(Stmt::DoBlock(stmts));
+        }
+    }
 
     Some(Expr::Function {
         params: vec!["self".into(), "card".into(), "area".into(), "copier".into()],
@@ -244,7 +261,7 @@ fn build_can_use_function(rule_outputs: &[super::RuleOutput], _ctx: &CompileCont
         .filter_map(|ro| ro.condition_expr.clone())
         .collect();
 
-    let body = if conditions.is_empty() {
+    let body = if conditions.is_empty() || use_rules.iter().any(|ro| ro.condition_expr.is_none()) {
         vec![lua_return(lua_bool(true))]
     } else {
         let combined = lua_or_chain(conditions);
@@ -255,6 +272,96 @@ fn build_can_use_function(rule_outputs: &[super::RuleOutput], _ctx: &CompileCont
         params: vec!["self".into(), "card".into()],
         body,
     }
+}
+
+fn resolve_use_effect_stmts(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            Stmt::Return(Some(effect @ Expr::Table(_))) => lua_expr_stmt(lua_call(
+                "SMODS.calculate_effect",
+                vec![effect, lua_ident("card")],
+            )),
+            Stmt::If {
+                branches,
+                else_body,
+            } => Stmt::If {
+                branches: branches
+                    .into_iter()
+                    .map(|(condition, body)| (condition, resolve_use_effect_stmts(body)))
+                    .collect(),
+                else_body: else_body.map(resolve_use_effect_stmts),
+            },
+            Stmt::ForRange {
+                var,
+                start,
+                stop,
+                step,
+                body,
+            } => Stmt::ForRange {
+                var,
+                start,
+                stop,
+                step,
+                body: resolve_use_effect_stmts(body),
+            },
+            Stmt::ForIn {
+                vars,
+                iterators,
+                body,
+            } => Stmt::ForIn {
+                vars,
+                iterators,
+                body: resolve_use_effect_stmts(body),
+            },
+            Stmt::DoBlock(body) => Stmt::DoBlock(resolve_use_effect_stmts(body)),
+            // Do not descend into expression functions: their returns belong
+            // to callbacks such as func, not the consumable's use hook.
+            stmt => stmt,
+        })
+        .collect()
+}
+
+/// Typed card variables use the current-round storage shared by their
+/// conditions and change-variable effects, rather than ability.extra.
+fn build_set_ability(consumable: &ConsumableDef) -> Option<Expr> {
+    let mut body = Vec::new();
+    for variable in &consumable.user_variables {
+        if variable.is_global {
+            continue;
+        }
+        let initial = variable.initial_value.to_string_lossy();
+        let (field, value) = match variable.var_type {
+            UserVarType::Suit => (
+                format!("{}_card", variable.name),
+                lua_table(vec![("suit", lua_str(&initial))]),
+            ),
+            UserVarType::Rank => (
+                format!("{}_card", variable.name),
+                lua_table(vec![
+                    ("rank", lua_str(&initial)),
+                    ("id", lua_int(super::rank_to_id(&initial))),
+                ]),
+            ),
+            UserVarType::PokerHand => (format!("{}_hand", variable.name), lua_str(&initial)),
+            _ => continue,
+        };
+        body.push(lua_assign(
+            lua_index(lua_raw_expr("G.GAME.current_round"), lua_str(field)),
+            value,
+        ));
+    }
+    if body.is_empty() {
+        return None;
+    }
+    body.insert(
+        0,
+        lua_raw_stmt("if not (G and G.GAME and G.GAME.current_round) then return end"),
+    );
+    Some(Expr::Function {
+        params: vec!["self".into(), "card".into(), "initial".into()],
+        body,
+    })
 }
 
 fn kv(key: &str, val: Expr) -> TableEntry {
@@ -342,5 +449,199 @@ fn table_entry_references_used_card(entry: &TableEntry) -> bool {
             expr_references_used_card(k) || expr_references_used_card(v)
         }
         TableEntry::Comment(_) | TableEntry::SegmentStart(_) | TableEntry::SegmentEnd(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile_consumable;
+    use crate::types::ConsumableDef;
+    use crate::Emitter;
+    use serde_json::{json, Value};
+
+    fn consumable(rules: Value) -> ConsumableDef {
+        serde_json::from_value(json!({
+            "key": "variable_test", "name": "Variable Test", "description": ["Test"],
+            "set": "Tarot", "atlas": "Consumables", "pos": {"x": 0, "y": 0},
+            "user_variables": [{"name": "amount", "var_type": "number", "initial_value": 4}],
+            "rules": rules
+        }))
+        .unwrap()
+    }
+
+    fn code(definition: &ConsumableDef) -> String {
+        Emitter::new().emit_chunk(&compile_consumable(definition, "mod"))
+    }
+
+    #[test]
+    fn used_variable_effects_are_resolved_but_calculate_effects_remain_returned() {
+        let effect = json!({"effect_type": "modify_internal_variable", "params": {
+            "variable_name": "amount", "operation": "increment", "value": 2
+        }});
+        let output = code(&consumable(json!([
+            {"id": "calculate", "trigger": "round_end", "effects": [effect.clone()]},
+            {"id": "use", "trigger": "consumable_used", "effects": [effect]}
+        ])));
+        let calculate = output
+            .split("calculate = function")
+            .nth(1)
+            .unwrap()
+            .split("use = function")
+            .next()
+            .unwrap();
+        let use_hook = output
+            .split("use = function")
+            .nth(1)
+            .unwrap()
+            .split("can_use = function")
+            .next()
+            .unwrap();
+        assert!(calculate.contains("return {"), "{output}");
+        assert!(!calculate.contains("SMODS.calculate_effect"), "{output}");
+        assert!(use_hook.contains("SMODS.calculate_effect({"), "{output}");
+        assert!(
+            !use_hook.contains("return SMODS.calculate_effect"),
+            "{output}"
+        );
+        assert!(use_hook.contains("func = function()"), "{output}");
+        assert!(
+            use_hook.contains("card.ability.extra.amount = (card.ability.extra.amount) +"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn use_executes_matching_rules_independently_in_saved_order() {
+        let output = code(&consumable(json!([
+            {"id": "first", "trigger": "card_used", "effects": [
+                {"effect_type": "modify_internal_variable", "params": {
+                    "variable_name": "amount", "operation": "increment", "value": 2
+                }}
+            ]},
+            {"id": "second", "trigger": "card_used", "condition_groups": [{
+                "conditions": [{"condition_type": "internal_variable", "params": {
+                    "variable_name": "amount", "operator": "greater_than", "value": 4
+                }}]
+            }], "effects": [
+                {"effect_type": "set_dollars", "params": {
+                    "operation": "add", "value": {"value": "amount", "valueType": "user_var"}
+                }}
+            ]}
+        ])));
+        let use_hook = output
+            .split("use = function")
+            .nth(1)
+            .unwrap()
+            .split("can_use = function")
+            .next()
+            .unwrap();
+        let mutation = use_hook.find("card.ability.extra.amount =").unwrap();
+        let check = use_hook.find("if card.ability.extra.amount >").unwrap();
+        assert!(mutation < check, "{output}");
+        assert_eq!(
+            use_hook.matches("SMODS.calculate_effect({").count(),
+            2,
+            "{output}"
+        );
+        assert!(
+            !use_hook.contains("else") && !use_hook.contains("return SMODS.calculate_effect"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn chance_and_loop_groups_resolve_effects_without_returning_from_use() {
+        let input: Value = serde_json::from_str(include_str!(
+            "../../tests/lua-code-examples/consumables/grouped_variables_use.json"
+        ))
+        .unwrap();
+        let definition: ConsumableDef = serde_json::from_value(input["definition"].clone()).unwrap();
+        let output = code(&definition);
+        let use_hook = output
+            .split("use = function")
+            .nth(1)
+            .unwrap()
+            .split("can_use = function")
+            .next()
+            .unwrap();
+        assert!(output.contains("loop_count_0 = 3"), "{output}");
+        assert!(
+            use_hook.contains("if SMODS.pseudorandom_probability"),
+            "{output}"
+        );
+        assert!(
+            use_hook.contains("for i = 1, card.ability.extra.loop_count_0 do"),
+            "{output}"
+        );
+        assert_eq!(
+            use_hook.matches("SMODS.calculate_effect({").count(),
+            3,
+            "{output}"
+        );
+        assert!(!use_hook.contains("return {"), "{output}");
+        assert_eq!(
+            use_hook.matches("return true").count(),
+            2,
+            "callbacks keep their own returns: {output}"
+        );
+    }
+
+    #[test]
+    fn unconditional_use_rule_keeps_variable_condition_from_disabling_the_card() {
+        let output = code(&consumable(json!([
+            {"id": "conditional", "trigger": "card_used", "condition_groups": [{
+                "conditions": [{"condition_type": "internal_variable", "params": {
+                    "variable_name": "amount", "operator": "greater_than", "value": 10
+                }}]
+            }], "effects": [{"effect_type": "play_sound", "params": {"sound": "tarot1"}}]},
+            {"id": "fallback", "trigger": "card_used", "effects": [
+                {"effect_type": "play_sound", "params": {"sound": "tarot2"}}
+            ]}
+        ])));
+        let can_use = output.split("can_use = function").nth(1).unwrap();
+        assert!(can_use.contains("return true"), "{output}");
+        assert!(!can_use.contains("card.ability.extra.amount"), "{output}");
+    }
+
+    #[test]
+    fn typed_consumable_variables_receive_initial_state_for_their_conditions() {
+        let mut definition = consumable(json!([]));
+        definition.user_variables = serde_json::from_value(json!([
+            {"name": "suitvar", "var_type": "suit", "initial_value": "Hearts"},
+            {"name": "rankvar", "var_type": "rank", "initial_value": "K"},
+            {"name": "handvar", "var_type": "poker_hand", "initial_value": "Flush"}
+        ]))
+        .unwrap();
+        let output = code(&definition);
+        assert!(
+            output.contains("set_ability = function(self, card, initial)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("if not (G and G.GAME and G.GAME.current_round) then return end"),
+            "{output}"
+        );
+        assert!(
+            output.contains("G.GAME.current_round['suitvar_card'] = { suit = 'Hearts' }"),
+            "{output}"
+        );
+        let normalized = output.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("G.GAME.current_round['rankvar_card'] = { rank = 'K', id = 13 }"),
+            "{output}"
+        );
+        assert!(
+            output.contains("G.GAME.current_round['handvar_hand'] = 'Flush'"),
+            "{output}"
+        );
+
+        for variable in &mut definition.user_variables {
+            variable.is_global = true;
+        }
+        let global_output = code(&definition);
+        assert!(
+            !global_output.contains("set_ability = function"),
+            "{global_output}"
+        );
     }
 }

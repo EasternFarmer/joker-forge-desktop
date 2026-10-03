@@ -33,8 +33,7 @@ fn rank_to_id(rank: &str) -> &str {
 ///
 /// `target` is the Lua expression for the card to modify (e.g. `"card"` or
 /// `"context.other_card"`).
-/// `ability_path` is for user_var lookups (e.g. `"card.ability.extra"`).
-fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: &str) -> String {
+fn build_card_modification_code(effect: &EffectDef, target: &str, ctx: &CompileContext) -> String {
     let new_rank_val = get_typed_str(effect, "new_rank");
     let new_rank_type = get_typed_value_type(effect, "new_rank");
     let new_suit_val = get_typed_str(effect, "new_suit");
@@ -50,8 +49,12 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
 
     // Rank / suit change
     if new_rank_val != "none" || new_suit_val != "none" {
-        let suit_param = if new_suit_type == "user_var" {
-            format!("G.GAME.current_round.{}_card.suit", new_suit_val)
+        let suit_param = if crate::compiler::values::is_user_variable_type(&new_suit_type) {
+            if ctx.user_var_is_global(&new_suit_val) {
+                ctx.user_var_expr(&new_suit_val).to_string()
+            } else {
+                format!("G.GAME.current_round.{}_card.suit", new_suit_val)
+            }
         } else if new_suit_val == "random" {
             "pseudorandom_element(SMODS.Suits, 'edit_card_suit').key".to_string()
         } else if new_suit_val != "none" {
@@ -60,8 +63,12 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
             "nil".to_string()
         };
 
-        let rank_param = if new_rank_type == "user_var" {
-            format!("G.GAME.current_round.{}_card.rank", new_rank_val)
+        let rank_param = if crate::compiler::values::is_user_variable_type(&new_rank_type) {
+            if ctx.user_var_is_global(&new_rank_val) {
+                format!("(function() local rank = {}; local names = {{A = 'Ace', K = 'King', Q = 'Queen', J = 'Jack'}}; return names[rank] or rank end)()", ctx.user_var_expr(&new_rank_val))
+            } else {
+                format!("G.GAME.current_round.{}_card.rank", new_rank_val)
+            }
         } else if new_rank_val == "random" {
             "pseudorandom_element(SMODS.Ranks, 'edit_card_rank').key".to_string()
         } else if new_rank_val != "none" {
@@ -88,10 +95,10 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
             \n        if random_enhancement then {}:set_ability(G.P_CENTERS[random_enhancement]) end",
             target
         ));
-    } else if new_enhancement_type == "user_var" && new_enhancement_val != "none" {
+    } else if crate::compiler::values::is_user_variable_type(&new_enhancement_type) && new_enhancement_val != "none" {
         code.push_str(&format!(
-            "\n        {}:set_ability(G.P_CENTERS[{}.{}])",
-            target, ability_path, new_enhancement_val
+            "\n        {}:set_ability(G.P_CENTERS[{}])",
+            target, ctx.user_var_path(&new_enhancement_val)
         ));
     } else if new_enhancement_val != "none" {
         code.push_str(&format!(
@@ -111,10 +118,10 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
             \n        end",
             target
         ));
-    } else if new_seal_type == "user_var" && new_seal_val != "none" {
+    } else if crate::compiler::values::is_user_variable_type(&new_seal_type) && new_seal_val != "none" {
         code.push_str(&format!(
-            "\n        {}:set_seal({}.{}, true)",
-            target, ability_path, new_seal_val
+            "\n        {}:set_seal({}, true)",
+            target, ctx.user_var_path(&new_seal_val)
         ));
     } else if new_seal_val != "none" {
         code.push_str(&format!(
@@ -134,10 +141,10 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
             \n        end",
             target
         ));
-    } else if new_edition_type == "user_var" && new_edition_val != "none" {
+    } else if crate::compiler::values::is_user_variable_type(&new_edition_type) && new_edition_val != "none" {
         code.push_str(&format!(
-            "\n        {}:set_edition({}.{}, true)",
-            target, ability_path, new_edition_val
+            "\n        {}:set_edition({}, true)",
+            target, ctx.user_var_path(&new_edition_val)
         ));
     } else if new_edition_val != "none" {
         let key = if new_edition_val.starts_with("e_") {
@@ -154,6 +161,41 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
     code
 }
 
+#[cfg(test)]
+mod global_scope_tests {
+    use super::*;
+    use crate::types::{ObjectType, UserVarType, UserVariableDef};
+    use serde_json::json;
+
+    #[test]
+    fn card_modifications_resolve_global_typed_and_key_variables_in_their_scope() {
+        for persistent in [false, true] {
+            let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+            ctx.set_user_vars([("rank", UserVarType::Rank), ("suit", UserVarType::Suit),
+                ("enhancement", UserVarType::Key), ("seal", UserVarType::Key), ("edition", UserVarType::Key)]
+                .iter().map(|(property, var_type)| UserVariableDef {
+                    name: format!("chosen_{property}"), var_type: *var_type,
+                    initial_value: ParamValue::Str("value".into()),
+                    is_global: true, is_persistent: persistent,
+                }).collect());
+            let mut params = json!({});
+            for property in ["rank", "suit", "enhancement", "seal", "edition"] {
+                params[format!("new_{property}")] = json!({
+                    "value":format!("chosen_{property}"),"valueType":"userVariable"
+                });
+            }
+            let effect: EffectDef = serde_json::from_value(json!({"effect_type":"edit_card","params":params})).unwrap();
+            let code = build_card_modification_code(&effect, "target", &ctx);
+            for property in ["rank", "suit", "enhancement", "seal", "edition"] {
+                let prefix = if persistent { "JF_GLOBALS" } else { "G.GAME.jf_global_vars" };
+                assert!(code.contains(&format!("{prefix}.chosen_{property}")), "{code}");
+            }
+            assert!(!code.contains("current_round") && !code.contains("ability.extra"), "{code}");
+            assert!(code.contains("names[rank] or rank"), "{code}");
+        }
+    }
+}
+
 /// Edit Card effect: modifies a card's rank, suit, enhancement, seal, and/or edition.
 ///
 /// For joker context with `card_scored` trigger: wraps in an event manager call.
@@ -162,13 +204,12 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ability_path: 
 pub fn edit_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
     let custom_message =
         get_str(effect, "customMessage").unwrap_or_else(|| "Card Modified!".to_string());
-    let ability_path = ctx.ability_path().to_string();
     let scoring = is_scoring_trigger(trigger);
 
     // For joker context
     let target = "context.other_card";
 
-    let mod_code = build_card_modification_code(effect, target, &ability_path);
+    let mod_code = build_card_modification_code(effect, target, ctx);
 
     if scoring {
         // Wrap in event manager with pre_return

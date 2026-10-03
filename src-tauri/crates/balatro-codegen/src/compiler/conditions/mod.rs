@@ -21,7 +21,7 @@ pub fn compile_condition(
 ) -> Option<Expr> {
     let expr = match condition.condition_type.as_str() {
         // Hand conditions
-        "hand_type" => hand::hand_type(condition)?,
+        "hand_type" => hand::hand_type(condition, ctx)?,
         "hand_count" => hand::hand_count(condition, ctx)?,
         "hand_size" => hand::hand_size(condition, ctx)?,
         "suit_count" => hand::suit_count(condition, ctx)?,
@@ -43,8 +43,8 @@ pub fn compile_condition(
         "hand_drawn" => hand::hand_drawn(condition)?,
 
         // Card conditions
-        "card_rank" => card::card_rank(condition)?,
-        "card_suit" => card::card_suit(condition)?,
+        "card_rank" => card::card_rank(condition, ctx)?,
+        "card_suit" => card::card_suit(condition, ctx)?,
         "card_enhancement" => card::card_enhancement(condition)?,
         "card_edition" => card::card_edition(condition, ctx)?,
         "card_seal" => card::card_seal(condition)?,
@@ -87,7 +87,7 @@ pub fn compile_condition(
         "in_blind" => game_state::in_blind(condition)?,
         "game_speed" => game_state::game_speed(condition)?,
         "triggered_boss_blind" => game_state::triggered_boss_blind(condition)?,
-        "check_flag" => game_state::check_flag(condition)?,
+        "check_flag" => game_state::check_flag(condition, ctx)?,
         "which_tag" => game_state::which_tag(condition)?,
         "consumable_type" => game_state::consumable_type(condition)?,
         "voucher_redeemed" => game_state::voucher_redeemed(condition)?,

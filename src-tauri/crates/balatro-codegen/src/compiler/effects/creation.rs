@@ -352,7 +352,9 @@ fn playing_card_property(effect: &EffectDef, ctx: &CompileContext, key: &str) ->
         if !ctx.has_user_var(value) {
             return None;
         }
-        return Some(if matches!(key, "rank" | "suit") {
+        return Some(if matches!(key, "rank" | "suit") && ctx.user_var_is_global(value) {
+            ctx.user_var_expr(value)
+        } else if matches!(key, "rank" | "suit") {
             let record = lua_field(
                 lua_raw_expr("G.GAME.current_round"),
                 format!("{value}_card"),

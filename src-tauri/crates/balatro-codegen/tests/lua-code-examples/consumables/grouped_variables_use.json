@@ -1,0 +1,41 @@
+{
+  "object_type": "consumable",
+  "mod_prefix": "modprefix",
+  "definition": {
+    "key": "grouped_variable_test",
+    "name": "Grouped Variable Test",
+    "description": ["Uses variables in chance groups and repeated effects."],
+    "set": "Tarot",
+    "atlas": "Consumables",
+    "pos": { "x": 0, "y": 0 },
+    "user_variables": [{ "name": "amount", "var_type": "number", "initial_value": 4 }],
+    "rules": [
+      {
+        "id": "groups",
+        "trigger": "card_used",
+        "random_groups": [{
+          "id": "certain",
+          "chance_numerator": 1,
+          "chance_denominator": 1,
+          "effects": [{ "effect_type": "modify_internal_variable", "params": {
+            "variable_name": "amount", "operation": "increment", "value": 1
+          } }]
+        }],
+        "loop_groups": [{
+          "id": "repeat_three",
+          "count": 3,
+          "effects": [{ "effect_type": "modify_internal_variable", "params": {
+            "variable_name": "amount", "operation": "increment", "value": 2
+          } }]
+        }]
+      },
+      {
+        "id": "following",
+        "trigger": "card_used",
+        "effects": [{ "effect_type": "set_dollars", "params": {
+          "operation": "add", "value": { "value": "amount", "valueType": "user_var" }
+        } }]
+      }
+    ]
+  }
+}

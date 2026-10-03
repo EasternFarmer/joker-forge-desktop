@@ -633,13 +633,13 @@ pub fn change_text_variable(effect: &EffectDef, ctx: &mut CompileContext) -> Eff
 // ---------------------------------------------------------------------------
 
 /// Change Rank Variable: changes a rank-type user variable.
-pub fn change_rank_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    change_card_variable(effect, "rank")
+pub fn change_rank_variable(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+    change_card_variable(effect, ctx, "rank")
 }
 
 /// Change Suit Variable: changes a suit-type user variable.
-pub fn change_suit_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    change_card_variable(effect, "suit")
+pub fn change_suit_variable(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+    change_card_variable(effect, ctx, "suit")
 }
 
 const RANK_ORDER: &[&str] = &[
@@ -691,7 +691,24 @@ fn round_variable_source(name: &str, field: &str) -> String {
     )
 }
 
-fn change_card_variable(effect: &EffectDef, property: &str) -> EffectOutput {
+fn typed_variable_source(ctx: &CompileContext, name: &str, field: &str) -> String {
+    if ctx.user_var_is_global(name) {
+        ctx.user_var_expr(name).to_string()
+    } else {
+        round_variable_source(name, field)
+    }
+}
+
+fn global_typed_assignment(ctx: &CompileContext, name: &str, guard: &str, value: &str) -> String {
+    let path = ctx.user_var_path(name);
+    if ctx.user_var_is_persistent(name) {
+        format!("if {guard} and JF_GLOBALS then {path} = {value} end")
+    } else {
+        format!("if {guard} and G and G.GAME then\n    G.GAME.jf_global_vars = G.GAME.jf_global_vars or {{}}\n    {path} = {value}\nend")
+    }
+}
+
+fn change_card_variable(effect: &EffectDef, ctx: &CompileContext, property: &str) -> EffectOutput {
     let Some(variable) = key_string_param(effect, &["variable_name", "variableName", "variable"])
     else {
         return EffectOutput::default();
@@ -721,8 +738,12 @@ fn change_card_variable(effect: &EffectDef, property: &str) -> EffectOutput {
                 return EffectOutput::default();
             };
             if matches!(value, ParamValue::Typed(value) if crate::compiler::values::is_user_variable_type(&value.value_type)) {
-                let source = round_variable_source(name, "card");
-                format!("local source = {source}\nselected_value = source and source.{property}\n{id}", id = if property == "rank" { "selected_id = source and source.id" } else { "" })
+                let source = typed_variable_source(ctx, name, "card");
+                if ctx.user_var_is_global(name) {
+                    format!("selected_value = {source}")
+                } else {
+                    format!("local source = {source}\nselected_value = source and source.{property}\n{id}", id = if property == "rank" { "selected_id = source and source.id" } else { "" })
+                }
             } else {
                 format!("selected_value = {}", lua_str(name))
             }
@@ -751,13 +772,18 @@ fn change_card_variable(effect: &EffectDef, property: &str) -> EffectOutput {
     } else {
         "type(selected_value) == 'string' and selected_value ~= ''"
     };
-    let assign = if property == "rank" {
-        "target.rank = selected_value\ntarget.id = selected_id"
+    let assignment = if ctx.user_var_is_global(variable) {
+        global_typed_assignment(ctx, variable, guard, "selected_value")
     } else {
-        "target.suit = selected_value"
+        let assign = if property == "rank" {
+            "target.rank = selected_value\ntarget.id = selected_id"
+        } else {
+            "target.suit = selected_value"
+        };
+        format!("if {guard} and G and G.GAME and G.GAME.current_round then\n    local target = G.GAME.current_round[{field}]\n    if type(target) ~= 'table' then target = {{}}; G.GAME.current_round[{field}] = target end\n    {assign}\nend")
     };
     variable_effect_output(effect, format!(
-        "do\nlocal selected_value, selected_id\n{selection}\n{normalize}if {guard} and G and G.GAME and G.GAME.current_round then\n    local target = G.GAME.current_round[{field}]\n    if type(target) ~= 'table' then target = {{}}; G.GAME.current_round[{field}] = target end\n    {assign}\nend\nend"
+        "do\nlocal selected_value, selected_id\n{selection}\n{normalize}{assignment}\nend"
     ))
 }
 
@@ -771,7 +797,7 @@ fn variable_effect_output(effect: &EffectDef, code: String) -> EffectOutput {
 }
 
 /// Change Poker Hand Variable: changes a poker-hand-type user variable.
-pub fn change_poker_hand_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
+pub fn change_poker_hand_variable(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     let Some(variable) = key_string_param(effect, &["variable_name", "variableName", "variable"])
     else {
         return EffectOutput::default();
@@ -815,16 +841,21 @@ pub fn change_poker_hand_variable(effect: &EffectDef, _ctx: &mut CompileContext)
             };
             if matches!(value, ParamValue::Typed(value) if crate::compiler::values::is_user_variable_type(&value.value_type))
             {
-                format!("selected = {}", round_variable_source(name, "hand"))
+                format!("selected = {}", typed_variable_source(ctx, name, "hand"))
             } else {
                 format!("selected = {}", lua_str(name))
             }
         }
         _ => return EffectOutput::default(),
     };
+    let guard = "type(selected) == 'string' and hands[selected]";
+    let assignment = if ctx.user_var_is_global(variable) {
+        global_typed_assignment(ctx, variable, guard, "selected")
+    } else {
+        format!("if {guard} and G and G.GAME and G.GAME.current_round then G.GAME.current_round[{field}] = selected end", field = lua_str(format!("{variable}_hand")))
+    };
     variable_effect_output(effect, format!(
-        "do\nlocal hands = (G and G.GAME and G.GAME.hands) or {{}}\nlocal selected\n{selection}\nif type(selected) == 'string' and hands[selected] and G and G.GAME and G.GAME.current_round then G.GAME.current_round[{field}] = selected end\nend",
-        field = lua_str(format!("{variable}_hand")),
+        "do\nlocal hands = (G and G.GAME and G.GAME.hands) or {{}}\nlocal selected\n{selection}\n{assignment}\nend"
     ))
 }
 
@@ -862,6 +893,52 @@ mod variable_option_tests {
             stmts: output.pre_return,
         }
         .to_string()
+    }
+
+    #[test]
+    fn typed_global_changes_use_the_global_scope_instead_of_round_fields() {
+        for persistent in [false, true] {
+            for (kind, var_type, parameter, value) in [
+                ("change_rank_variable", crate::types::UserVarType::Rank, "specific_rank", "K"),
+                ("change_suit_variable", crate::types::UserVarType::Suit, "specific_suit", "Clubs"),
+                ("change_pokerhand_variable", crate::types::UserVarType::PokerHand, "specific_pokerhand", "Flush"),
+            ] {
+                let mut ctx = context();
+                ctx.set_user_vars(vec![crate::types::UserVariableDef {
+                    name: "chosen".into(), var_type, initial_value: ParamValue::Str(value.into()),
+                    is_global: true, is_persistent: persistent,
+                }]);
+                let mut params = json!({"variable_name": "chosen", "change_type": "specific"});
+                params[parameter] = json!(value);
+                let effect = effect(kind, params);
+                let output = match kind {
+                    "change_rank_variable" => change_rank_variable(&effect, &mut ctx),
+                    "change_suit_variable" => change_suit_variable(&effect, &mut ctx),
+                    _ => change_poker_hand_variable(&effect, &mut ctx),
+                };
+                let code = Chunk { stmts: output.pre_return }.to_string();
+                let path = if persistent { "JF_GLOBALS.chosen" } else { "G.GAME.jf_global_vars.chosen" };
+                assert!(code.contains(&format!("{path} = selected")), "{code}");
+                assert!(!code.contains("current_round"), "{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_global_values_can_be_copied_into_local_selectors() {
+        let mut ctx = context();
+        ctx.set_user_vars(vec![crate::types::UserVariableDef {
+            name: "source".into(), var_type: crate::types::UserVarType::Suit,
+            initial_value: ParamValue::Str("Hearts".into()), is_global: true, is_persistent: false,
+        }]);
+        let effect = effect("change_suit_variable", json!({
+            "variable_name": "chosen", "change_type": "specific",
+            "specific_suit": {"value": "source", "valueType": "user_var"},
+        }));
+        let code = Chunk { stmts: change_suit_variable(&effect, &mut ctx).pre_return }.to_string();
+        assert!(code.contains("selected_value = (G.GAME and G.GAME.jf_global_vars and G.GAME.jf_global_vars.source)"), "{code}");
+        assert!(code.contains("G.GAME.current_round['chosen_card']"), "{code}");
+        assert!(!code.contains("source_card"), "{code}");
     }
 
     #[test]
