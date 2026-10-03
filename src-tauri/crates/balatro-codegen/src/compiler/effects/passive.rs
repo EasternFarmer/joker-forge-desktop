@@ -295,6 +295,22 @@ pub fn copy_joker_ability(effect: &EffectDef, ctx: &mut CompileContext) -> Passi
     }
 }
 
+/// Price refreshes must run after the Joker enters/leaves its card area, so
+/// the price hook sees the current inventory instead of the previous one.
+pub fn discount_items(_effect: &EffectDef, _ctx: &mut CompileContext) -> PassiveEffectOutput {
+    let refresh = super::economy::refresh_prices();
+    let code = format!(
+        "if G and G.E_MANAGER and Event then\n\
+            G.E_MANAGER:add_event(Event({{ func = function()\n{refresh}\nreturn true\nend }}))\n\
+        else\n{refresh}\nend"
+    );
+    PassiveEffectOutput {
+        add_to_deck: vec![lua_raw_stmt(&code)],
+        remove_from_deck: vec![lua_raw_stmt(code)],
+        ..Default::default()
+    }
+}
+
 /// Dispatch a passive effect by type.
 pub fn compile_passive(
     effect: &EffectDef,
@@ -304,6 +320,7 @@ pub fn compile_passive(
         "splash" | "splash_effect" => Some(splash(effect, ctx)),
         "free_rerolls" => Some(free_rerolls(effect, ctx)),
         "allow_debt" => Some(allow_debt(effect, ctx)),
+        "discount_items" => Some(discount_items(effect, ctx)),
 
         // Slot management passives (delegated to slot_management module)
         "edit_joker_slots" => {

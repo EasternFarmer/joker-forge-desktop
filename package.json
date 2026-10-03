@@ -15,6 +15,7 @@
     "build-nightly": "npm run prepare:nightly && npx tauri build",
     "preview": "vite preview",
     "test:storage": "node --test scripts/test-project-storage.cjs",
+    "test:rules": "node --test scripts/test-rule-parameters.cjs",
     "test:codegen": "node --test scripts/test-codegen-inputs.cjs && cargo test --manifest-path src-tauri/Cargo.toml -p balatro-codegen",
     "test:codegen:lua": "python scripts/test-codegen-lua.py",
     "tauri": "tauri",

@@ -60,6 +60,7 @@ end
 SMODS = {
  Joker=function(definition) test_definition=definition end,
  Consumable=function(definition) test_definition=definition end,
+ Voucher=function(definition) test_definition=definition end,
  has_enhancement=function(card, key) return card.config and card.config.center and card.config.center.key==key end,
  get_enhancements=function(card)
   if card.config and card.config.center and card.config.center.key~='c_base' then
@@ -68,6 +69,89 @@ SMODS = {
   return {}
  end
 }
+"""
+RULE_OPTIONS_STATE = """
+Card={};Card.__index=Card
+function Card:set_cost()
+ self.cost_calls=(self.cost_calls or 0)+1
+ self.cost=math.max(0,math.floor(self.base_cost*(1-(G.GAME.discount_percent or 0)/100)))
+ self.sell_cost=math.max(1,math.floor(self.cost/2))+(self.ability.extra_value or 0)
+ self.sell_cost_label=self.facing=='back' and '?' or self.sell_cost
+end
+function option_card(key,set)
+ local center={key=key,set=set,consumeable=set=='Tarot' or set=='Planet' or set=='Spectral',unlocked=true}
+ local c={config={center=center},ability={set=set,extra={}},facing='front',base_cost=20,cost=20}
+ function c:set_edition(edition) self.edition=edition;self.edition_calls=(self.edition_calls or 0)+1 end
+ function c:add_sticker(sticker) self.ability[sticker]=true end
+ function c:remove_sticker(sticker) self.ability[sticker]=false end
+ function c:set_sell_value()
+  self.sell_update_calls=(self.sell_update_calls or 0)+1
+  self.sell_cost=math.max(1,math.floor(self.cost/2))+(self.ability.extra_value or 0)
+  self.sell_cost_label=self.facing=='back' and '?' or self.sell_cost
+ end
+ return setmetatable(c,Card)
+end
+owned_jokers={option_card('j_first','Joker'),option_card('j_second','Joker'),option_card('j_third','Joker')}
+owned_consumables={option_card('c_first','Tarot'),option_card('c_second','Planet'),option_card('c_third','Spectral'),option_card('c_mod_custom','Tarot')}
+local first={key='j_first',set='Joker',unlocked=false,rarity=1}
+local second={key='j_second',set='Joker',unlocked=true,rarity=3}
+local third={key='j_third',set='Joker',unlocked=true,rarity=2}
+G={GAME={current_round={},round_resets={ante=1},used_vouchers={}},
+ C={FILTER=1,DARK_EDITION=1,MONEY=1,RED=1,SECONDARY_SET={Tarot=1}},
+ jokers={cards=owned_jokers,highlighted={owned_jokers[2]}},
+ consumeables={cards=owned_consumables},
+ P_CENTER_POOLS={
+  Joker={first,second,third},mod_chosen_pool={second,third},
+  Consumeables={owned_consumables[1].config.center,owned_consumables[2].config.center,owned_consumables[3].config.center},
+  Tarot={owned_consumables[1].config.center},Planet={owned_consumables[2].config.center},Spectral={owned_consumables[3].config.center},
+  Enhanced={{key='m_bonus',set='Enhanced'},{key='m_mult',set='Enhanced'}},
+  Edition={{key='e_foil',set='Edition'},{key='e_holo',set='Edition'}},
+  Seal={{key='Gold',set='Seal'},{key='Red',set='Seal'}},
+  Voucher={{key='v_first',set='Voucher'},{key='v_second',set='Voucher'}},
+  Booster={{key='p_first',set='Booster',kind='Arcana',config={extra=3,choose=1}},{key='p_second',set='Booster',kind='Celestial',config={extra=5,choose=2}}},
+  Tag={{key='tag_first',set='Tag'},{key='tag_second',set='Tag'}}
+ },P_CENTERS={m_bonus={key='m_bonus'},e_foil={key='e_foil'}},P_TAGS={},I={CARD={}}}
+G.GAME.hands={['High Card']={visible=true,played=1},['Pair']={visible=true,played=3},['Flush Five']={visible=false,played=0}}
+G.handlist={'High Card','Pair','Flush Five'}
+event_queue={}
+function Event(event) return event end
+G.E_MANAGER={add_event=function(self,event) event_queue[#event_queue+1]=event end}
+function run_events()
+ while #event_queue>0 do local event=table.remove(event_queue,1);assert(event.func()) end
+end
+for _,pool in pairs(G.P_CENTER_POOLS) do
+ for _,center in ipairs(pool) do G.P_CENTERS[center.key]=center end
+end
+SMODS.Stickers={eternal={},rental={},perishable={}}
+SMODS.Rarities={rare={key='rare',original_key=3},common={key='common',original_key=1}}
+SMODS.ConsumableTypes={Tarot={},Planet={},Spectral={},mod_customset={}}
+SMODS.Seals={Gold={key='Gold'},Red={key='Red'}}
+SMODS.Tags={}
+function SMODS.poll_edition() return 'e_holo' end
+function SMODS.find_card(key)
+ local result={};for _,c in ipairs((G.jokers and G.jokers.cards) or {}) do if c.config.center.key==key and not c.debuff then result[#result+1]=c end end;return result
+end
+function get_current_pool(kind) return kind=='Voucher' and {'UNAVAILABLE','v_second'} or G.P_CENTER_POOLS[kind] end
+function pseudoseed(seed) return seed end
+function pseudorandom_element(pool)
+ if pool[1] then return pool[1] end
+ local keys={};for k in pairs(pool) do keys[#keys+1]=k end;table.sort(keys);return keys[1] and pool[keys[1]] or nil
+end
+destroyed={}
+function SMODS.destroy_cards(cards) for _,c in ipairs(cards) do destroyed[#destroyed+1]=c.config.center.key end end
+observed_card={config={center={key='m_bonus'}}}
+observed_joker=owned_jokers[2]
+context={other_joker=observed_joker}
+shop_cards={}
+for _,spec in ipairs({{'planet','Planet'},{'tarot','Tarot'},{'spectral','Spectral'},
+ {'enhanced','Enhanced'},{'plain','Default'},{'joker','Joker'},{'voucher','Voucher'},
+ {'arcana','Booster','Arcana'},{'celestial','Booster','Celestial'},{'spectral_pack','Booster','Spectral'},
+ {'standard_pack','Booster','Standard'},{'buffoon','Booster','Buffoon'},{'custom','mod_Runes'}}) do
+ local c=option_card(spec[1],spec[2]);c.config.center.kind=spec[3]
+ if spec[1]=='custom' then c.config.center.consumeable=true end
+ shop_cards[#shop_cards+1]=c
+end
+G.I.CARD=shop_cards
 """
 POPULATED = """
 local c1={base={id=2,suit='Hearts',nominal=2},config={center={key='m_bonus',rarity=1}},edition={key='e_foil',foil=true},seal='Gold',sell_cost=4}
@@ -117,6 +201,16 @@ KNOWN_VALUES = {
 def run_checks(lua, cases):
     checks = 0
     for case in cases:
+        if case["kind"] == "rule_options":
+            source = HELPERS + RULE_OPTIONS_STATE + case.get("setup", "") + "\n" + case["code"]
+            source += "\nactor={ability=test_definition.config or {extra={}}};actor.ability.extra=actor.ability.extra or {};\n"
+            source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
+            try:
+                evaluate(lua, source)
+            except AssertionError as error:
+                raise AssertionError(f"rule option {case['name']}: {error}") from error
+            checks += 1
+            continue
         if case["kind"] == "planet":
             for highlighted in (True, False):
                 source = HELPERS + POPULATED + "\ncontext=nil;G.C={GREEN=1};G.GAME.hands['Flush']={level=2,played=3};"
@@ -182,6 +276,7 @@ def run_checks(lua, cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lua-library", default=os.environ.get("BALATRO_LUA_LIBRARY"))
+    parser.add_argument("--filter", help="Run only compiler fixtures whose names contain this text")
     args = parser.parse_args()
     library = args.lua_library or ctypes.util.find_library("lua5.1") or ctypes.util.find_library("luajit-5.1")
     if not library:
@@ -193,7 +288,12 @@ def main():
             "cargo", "run", "--offline", "--quiet", "--manifest-path", str(ROOT / "src-tauri/Cargo.toml"),
             "-p", "balatro-codegen", "--example", "codegen_runtime_cases", "--", str(fixtures),
         ], cwd=ROOT, check=True)
-        run_checks(lua, json.loads(fixtures.read_text(encoding="utf-8")))
+        cases = json.loads(fixtures.read_text(encoding="utf-8"))
+        if args.filter:
+            cases = [case for case in cases if args.filter in case["name"]]
+            if not cases:
+                parser.error("No compiler fixture names matched --filter")
+        run_checks(lua, cases)
 
 
 if __name__ == "__main__":

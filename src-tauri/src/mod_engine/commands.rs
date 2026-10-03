@@ -685,6 +685,86 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn current_rule_options_reach_both_editor_preview_and_mod_export() {
+        let cases = [
+            ("joker", "blind_selected", serde_json::json!({
+                "type": "change_key_variable", "params": {
+                    "variable_name": {"value": "chosen_key", "valueType": "user_var"},
+                    "key_type": {"value": "joker", "valueType": "text"},
+                    "joker_change_type": {"value": "specific", "valueType": "text"},
+                    "specific_joker": {"value": "j_smiley", "valueType": "text"}
+                }
+            }), "local new_key = 'j_smiley'"),
+            ("joker", "blind_selected", serde_json::json!({
+                "type": "destroy_consumable", "params": {
+                    "consumable_type": {"value": "Tarot", "valueType": "text"},
+                    "specific_card": {"value": "c_fool", "valueType": "text"}
+                }
+            }), "center.key == 'c_fool'"),
+            ("consumable", "card_used", serde_json::json!({
+                "type": "edit_joker", "params": {
+                    "target": {"value": "selected_joker", "valueType": "context"},
+                    "edition": {"value": "foil", "valueType": "text"}
+                }
+            }), "G.jokers.highlighted and G.jokers.highlighted[1]"),
+            ("voucher", "card_used", serde_json::json!({
+                "type": "discount_items", "params": {
+                    "discount_type": {"value": "jokers", "valueType": "text"},
+                    "discount_method": {"value": "flat_reduction", "valueType": "text"},
+                    "discount_amount": {"value": "3", "valueType": "number"}
+                }
+            }), "item_type = 'jokers'"),
+            ("voucher", "passive", serde_json::json!({
+                "type": "discount_items", "params": {
+                    "discount_type": {"value": "tarot", "valueType": "text"},
+                    "discount_method": {"value": "make_free", "valueType": "text"}
+                }
+            }), "item_type = 'tarot'"),
+        ];
+        for (item_type, trigger, mut effect, expected) in cases {
+            effect["id"] = serde_json::json!("effect");
+            let input = serde_json::json!({
+                "objectKey": "options", "name": "Options", "description": "Test", "set": "Tarot", "cost": 4, "rarity": "common",
+                "userVariables": [{"name": "chosen_key", "type": "key", "initialKey": "j_joker"}],
+                "rules": [{"id": "rule", "trigger": trigger, "effects": [effect]}]
+            });
+            let preview = compile_item_from_data_with_segments(
+                item_type.into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            assert!(preview.code.contains(expected), "{item_type}/{trigger}: {}", preview.code);
+            assert!(exported.contains(expected), "{item_type}/{trigger}: {exported}");
+        }
+        let input = serde_json::json!({
+            "objectKey": "comparisons", "name": "Comparisons", "description": "Test", "cost": 4, "rarity": "common",
+            "rules": [{"id": "rule", "trigger": "hand_played", "conditionGroups": [{
+                "operator": "and", "conditions": [
+                    {"id": "rank", "type": "rank_variable", "params": {
+                        "variable_name": {"value": "chosen_rank", "valueType": "user_var"},
+                        "specific_rank": {"value": "Q", "valueType": "text"}
+                    }},
+                    {"id": "suit", "type": "suit_variable", "params": {
+                        "variable_name": {"value": "chosen_suit", "valueType": "user_var"},
+                        "specific_suit": {"value": "Hearts", "valueType": "text"}
+                    }}
+                ]
+            }], "effects": [{"id": "mult", "type": "add_mult", "params": {"value": {"value": 2}}}]}]
+        });
+        let preview = compile_item_from_data_with_segments(
+            "joker".into(), input.clone(), None, None, "mod".into(), true, None,
+        ).unwrap();
+        let exported = compile_item_from_data(
+            "joker".into(), input, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for code in [&preview.code, &exported] {
+            assert!(code.contains("local expected = 12"), "{code}");
+            assert!(code.contains(".suit == 'Hearts'"), "{code}");
+        }
+    }
+
+    #[test]
     fn frontend_booster_contents_and_pack_settings_reach_preview_and_export() {
         let input = serde_json::json!({
             "objectKey": "royal_pack", "name": "Royal Pack", "description": "Choose #1# of #2#",

@@ -260,8 +260,9 @@ fn lua_codegen_matches_examples() {
         let (_, expected_body) = split_header_and_body(&existing);
         let expected_normalized = normalize_lua(&extract_comparable_body(&expected_body));
 
-        let should_write =
-            update || !lua_path.exists() || expected_normalized != generated_normalized;
+        // A failing comparison must leave the expected fixture intact. Update
+        // only changed examples when regeneration is explicitly requested.
+        let should_write = update && (!lua_path.exists() || expected_normalized != generated_normalized);
         if should_write {
             let next_header = curated_header_or_default(&existing, &spec_path, &spec);
             let rendered = format!(

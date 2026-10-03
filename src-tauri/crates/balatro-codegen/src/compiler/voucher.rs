@@ -25,9 +25,20 @@ pub fn compile_voucher(voucher: &VoucherDef, mod_prefix: &str) -> Chunk {
         },
     ));
 
-    Chunk {
-        stmts: vec![lua_comment(format!(" {}", voucher.name)), smods_call],
+    let mut stmts = vec![lua_comment(format!(" {}", voucher.name)), smods_call];
+    let has_targeted_discounts = voucher.rules.iter().any(|rule| {
+        rule.effects.iter()
+            .chain(rule.random_groups.iter().flat_map(|group| &group.effects))
+            .chain(rule.loop_groups.iter().flat_map(|group| &group.effects))
+            .any(|effect| effect.effect_type == "discount_items"
+                && super::effects::economy::has_targeted_discount_params(effect))
+    });
+    if has_targeted_discounts {
+        // The hook must exist at mod load as well as redemption: saved runs
+        // restore their discount records without redeeming the voucher again.
+        stmts.push(lua_raw_stmt(super::effects::economy::persistent_discount_hook()));
     }
+    Chunk { stmts }
 }
 
 fn build_voucher_table(
@@ -161,17 +172,29 @@ fn build_voucher_table(
 fn build_redeem_function(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -> Option<Expr> {
     let redeem_rules: Vec<&RuleOutput> = rule_outputs
         .iter()
-        .filter(|r| r.trigger == "card_used" && !r.effect_stmts.is_empty())
+        .filter(|r| (r.trigger == "card_used" || r.is_passive) && !r.effect_stmts.is_empty())
         .collect();
 
     if redeem_rules.is_empty() {
         return None;
     }
 
-    let mut body: Vec<Stmt> = Vec::new();
-    super::append_rule_chain_with_fallback(&mut body, &redeem_rules, |ro| {
-        super::wrap_rule_segment(&ro.rule_id, ro.effect_stmts.clone())
-    });
+    let mut body: Vec<Stmt> = vec![Stmt::Local("redeem_result".into(), None)];
+    for trigger in ["card_used", "passive"] {
+        let rules = redeem_rules.iter().copied().filter(|r| r.trigger == trigger).collect::<Vec<_>>();
+        super::append_rule_chain_with_fallback(&mut body, &rules, |ro| {
+            // Effect return tables end an individual rule, not redemption.
+            // This lets all unconditional rules and both trigger groups run.
+            vec![
+                lua_local("apply_rule", Expr::Function {
+                    params: vec![],
+                    body: super::wrap_rule_segment(&ro.rule_id, ro.effect_stmts.clone()),
+                }),
+                lua_assign(lua_ident("redeem_result"), lua_call("apply_rule", vec![])),
+            ]
+        });
+    }
+    body.push(lua_return(lua_ident("redeem_result")));
 
     Some(Expr::Function {
         params: vec!["self".into(), "card".into()],

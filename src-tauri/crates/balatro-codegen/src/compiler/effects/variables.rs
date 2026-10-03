@@ -1,9 +1,8 @@
-use crate::compiler::conditions::utils::rank_to_id;
 use crate::compiler::context::CompileContext;
 use crate::compiler::effects::utils::{get_str, get_str_default};
 use crate::compiler::effects::EffectOutput;
 use crate::lua_ast::*;
-use crate::types::EffectDef;
+use crate::types::{EffectDef, ParamValue};
 
 fn is_scoring_trigger(trigger: &str) -> bool {
     matches!(trigger, "hand_played" | "card_scored")
@@ -214,103 +213,368 @@ pub fn modify_internal_variable(
 
 /// Change Key Variable: changes a key-type user variable.
 pub fn change_key_variable(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let variable_name = get_str_default(effect, "variable_name", "keyvar");
-    let change_type = get_str_default(effect, "change_type", "specific");
-    let key_type = get_str_default(effect, "key_type", "joker");
-    let specific_key = get_str_default(effect, "specific_key", "j_joker");
-    let custom_message = get_str(effect, "customMessage");
-
-    let variable_path = ctx.user_var_path(&variable_name);
-    let code = match change_type.as_str() {
-        "random" => match key_type.as_str() {
-            "joker" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Joker, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "consumable" | "tarot" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Tarot, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "planet" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Planet, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "spectral" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Spectral, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "enhancement" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Enhanced, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "seal" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Seal, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "edition" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Edition, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "voucher" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Voucher, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "tag" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Tag, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            "booster" => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Booster, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
-            _ => format!(
-                "{path} = pseudorandom_element(G.P_CENTER_POOLS.Joker, pseudoseed('{seed}')).key",
-                path = variable_path,
-                seed = variable_name
-            ),
+    let Some(variable_name) =
+        key_string_param(effect, &["variable_name", "variableName", "variable"])
+    else {
+        return EffectOutput::default();
+    };
+    let key_type = key_string_param(effect, &["key_type", "keyType"]).unwrap_or("joker");
+    let pool_name = match key_type {
+        "joker" => "Joker",
+        "consumable" => "Consumeables",
+        "tarot" => "Tarot",
+        "planet" => "Planet",
+        "spectral" => "Spectral",
+        "enhancement" => "Enhanced",
+        "seal" => "Seal",
+        "edition" => "Edition",
+        "voucher" => "Voucher",
+        "tag" => "Tag",
+        "booster" => "Booster",
+        _ => return EffectOutput::default(),
+    };
+    // The editor has a separate change selector for every key type. Read the
+    // original generic fields only when the current fields are absent.
+    let selector_key = format!("{key_type}_change_type");
+    let selector = effect
+        .params
+        .get(&selector_key)
+        .or_else(|| effect.params.get("change_type"));
+    let change_type = match selector {
+        None => "specific",
+        Some(value) => match value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => value,
+            None => return EffectOutput::default(),
         },
-        "scored_card" => format!(
-            "{path} = context.other_card.config.center.key",
-            path = variable_path
-        ),
-        "evaled_joker" => format!(
-            "{path} = context.other_joker.config.center.key",
-            path = variable_path
-        ),
-        "selected_joker" => format!(
-            "if G.jokers.highlighted[1] then\n\
-                {path} = G.jokers.highlighted[1].config.center.key\n\
-            end",
-            path = variable_path
-        ),
-        _ => format!(
-            "{path} = '{key}'",
-            path = variable_path,
-            key = specific_key
-        ),
+    };
+    let custom_message = get_str(effect, "customMessage");
+    let variable_path = ctx.user_var_path(&variable_name);
+    let is_user_reference = selector.is_some_and(|value| match value {
+        ParamValue::Typed(value) => {
+            crate::compiler::values::is_user_variable_type(&value.value_type)
+        }
+        ParamValue::Str(name) => ctx.has_user_var(name),
+        _ => false,
+    });
+    let code = if is_user_reference {
+        guarded_key_assignment(&variable_path, &ctx.user_var_path(change_type))
+    } else if let Some(context_key) = key_context_value(change_type, key_type) {
+        guarded_key_assignment(&variable_path, &context_key)
+    } else {
+        match change_type {
+            "specific" => {
+                let specific = format!("specific_{key_type}");
+                let Some(value) = effect
+                    .params
+                    .get(&specific)
+                    .or_else(|| effect.params.get("specific_key"))
+                else {
+                    return EffectOutput::default();
+                };
+                let Some(key) = value.as_str().map(str::trim).filter(|key| !key.is_empty()) else {
+                    return EffectOutput::default();
+                };
+                let value = match value {
+                    ParamValue::Typed(value)
+                        if crate::compiler::values::is_user_variable_type(&value.value_type) =>
+                    {
+                        ctx.user_var_path(key)
+                    }
+                    _ => key_literal_value(key, key_type, &ctx.mod_prefix),
+                };
+                guarded_key_assignment(&variable_path, &value)
+            }
+            "random" | "increment" => {
+                let Some((pool, filter)) = key_variable_pool(effect, key_type, pool_name, ctx)
+                else {
+                    return EffectOutput::default();
+                };
+                let build_pool = format!(
+                    "local source = {pool}\nlocal candidates = {{}}\nfor _, entry in ipairs(source or {{}}) do\n    local item = type(entry) == 'string' and ((G and G.P_CENTERS and G.P_CENTERS[entry]) or (G and G.P_SEALS and G.P_SEALS[entry]) or (G and G.P_TAGS and G.P_TAGS[entry])) or entry\n    if type(item) == 'table' and type(item.key) == 'string' and ({filter}) then candidates[#candidates + 1] = item end\nend"
+                );
+                let pick = if change_type == "random" {
+                    format!(
+                        "if #candidates > 0 then\n    local chosen = pseudorandom_element(candidates, pseudoseed({seed}))\n    if chosen and chosen.key then {variable_path} = chosen.key end\nend",
+                        seed = lua_str(variable_name),
+                    )
+                } else {
+                    let count_key = format!("{key_type}_increment_count");
+                    let count = effect
+                        .params
+                        .get(&count_key)
+                        .or_else(|| effect.params.get("increment_count"));
+                    let amount = count
+                        .map(|value| key_numeric_value(value, ctx))
+                        .unwrap_or_else(|| "1".to_string());
+                    format!(
+                        "local step = tonumber({amount})\nif #candidates > 0 and step and step == step and step ~= math.huge and step ~= -math.huge then\n    for index, item in ipairs(candidates) do\n        if item.key == {variable_path} then\n            {variable_path} = candidates[((index - 1 + math.floor(step)) % #candidates) + 1].key\n            break\n        end\n    end\nend"
+                    )
+                };
+                format!("{build_pool}\n{pick}")
+            }
+            _ => return EffectOutput::default(),
+        }
     };
 
     let message = custom_message.map(lua_str);
 
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![lua_raw_stmt(code)],
+        pre_return: vec![lua_raw_stmt(format!("do\n{code}\nend"))],
         config_vars: vec![],
         message,
         colour: Some(lua_raw_expr("G.C.FILTER")),
 
         segment_id: None,
     }
+}
+
+fn key_string_param<'a>(effect: &'a EffectDef, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        effect
+            .params
+            .get(*key)
+            .and_then(ParamValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn guarded_key_assignment(path: &str, value: &str) -> String {
+    format!("local new_key = {value}\nif type(new_key) == 'string' and new_key ~= '' then {path} = new_key end")
+}
+
+/// Selectors can copy a key variable or the object supplied by the trigger.
+/// Every context is optional, so an absent source preserves the current key.
+fn key_context_value(mode: &str, key_type: &str) -> Option<String> {
+    let source = match mode {
+        "evaled_joker" | "evaluated_joker" => "(context and context.other_joker)",
+        "selected_joker" => "(G and G.jokers and G.jokers.highlighted and G.jokers.highlighted[1])",
+        "scored_card" | "held_card" | "card_held_in_hand" | "discarded_card" => "(context and context.other_card)",
+        "destroyed_card" => "(context and (context.other_card or context.destroy_card or (context.removed and context.removed[1])))",
+        "added_card" => "(context and (context.other_card or context.card or (context.cards and context.cards[1])))",
+        "used_consumable" => "(context and (context.consumeable or context.consumable))",
+        "redeemed_voucher" => "(context and (context.voucher or context.card))",
+        "opened_booster" | "skipped_booster" | "exited_booster" => "(context and (context.booster or context.card))",
+        "added_tag" => "(context and context.tag_added)",
+        "blind_tag" => "(G and G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_tag)",
+        _ => return None,
+    };
+    let value = match key_type {
+        "seal" => "(source and source.seal)",
+        "edition" => "(source and source.edition and source.edition.key)",
+        _ => "(source and ((source.config and source.config.center and source.config.center.key) or source.key))",
+    };
+    Some(format!(
+        "(function() local source = {source}; return {value} end)()"
+    ))
+}
+
+fn key_literal_value(key: &str, key_type: &str, mod_prefix: &str) -> String {
+    let class_prefix = match key_type {
+        "joker" => "j_",
+        "consumable" | "tarot" | "planet" | "spectral" => "c_",
+        "enhancement" => "m_",
+        "edition" => "e_",
+        "voucher" => "v_",
+        "booster" => "p_",
+        "tag" => "tag_",
+        _ => "",
+    };
+    if !class_prefix.is_empty() && key.starts_with(class_prefix) {
+        return lua_str(key).to_string();
+    }
+    // These selectors supply vanilla short aliases rather than registry keys.
+    // Preserve their meaning even when no run/registry is loaded yet.
+    let vanilla_alias = match key_type {
+        "tag" => matches!(
+            key,
+            "uncommon"
+                | "rare"
+                | "negative"
+                | "foil"
+                | "holo"
+                | "polychrome"
+                | "investment"
+                | "voucher"
+                | "boss"
+                | "standard"
+                | "charm"
+                | "meteor"
+                | "buffoon"
+                | "handy"
+                | "garbage"
+                | "ethereal"
+                | "coupon"
+                | "double"
+                | "juggle"
+                | "d_six"
+                | "top_up"
+                | "skip"
+                | "orbital"
+                | "economy"
+        ),
+        "edition" => matches!(key, "foil" | "holo" | "polychrome" | "negative"),
+        "enhancement" => matches!(
+            key,
+            "bonus" | "mult" | "wild" | "glass" | "steel" | "stone" | "gold" | "lucky"
+        ),
+        _ => false,
+    };
+    if vanilla_alias {
+        return lua_str(format!("{class_prefix}{key}")).to_string();
+    }
+    // Seals have no class prefix; registered keys and fully mod-prefixed
+    // selector values should be used verbatim.
+    if key_type == "seal" && matches!(key, "Gold" | "Red" | "Blue" | "Purple") {
+        return lua_str(key).to_string();
+    }
+    let bare = format!("{class_prefix}{key}");
+    let local = if mod_prefix.is_empty() || key.starts_with(&format!("{mod_prefix}_")) {
+        bare.clone()
+    } else {
+        format!("{class_prefix}{mod_prefix}_{key}")
+    };
+    let registry = match key_type {
+        "seal" => "G.P_SEALS",
+        "tag" => "G.P_TAGS",
+        _ => "G.P_CENTERS",
+    };
+    format!(
+        "(function() local registry = G and {registry}; if registry and registry[{key}] then return {key} end; if registry and registry[{bare}] then return {bare} end; return {local} end)()",
+        key = lua_str(key), bare = lua_str(bare), local = lua_str(local),
+    )
+}
+
+fn key_numeric_value(value: &ParamValue, ctx: &CompileContext) -> String {
+    if let ParamValue::Typed(value) = value {
+        if crate::compiler::values::is_user_variable_type(&value.value_type) {
+            return value
+                .value
+                .as_str()
+                .map(|name| ctx.user_var_path(name))
+                .unwrap_or_else(|| "nil".into());
+        }
+    }
+    if let ParamValue::Str(value) = value {
+        if ctx.has_user_var(value) {
+            return ctx.user_var_path(value);
+        }
+    }
+    crate::compiler::values::resolve_value(value, ctx.object_type, None).to_string()
+}
+
+/// Return the source and selection predicate for the live catalog's random
+/// options. Increment always uses the whole collection, in collection order.
+fn key_variable_pool(
+    effect: &EffectDef,
+    key_type: &str,
+    pool_name: &str,
+    ctx: &CompileContext,
+) -> Option<(String, String)> {
+    let mode_key = format!("{key_type}_change_type");
+    let random_key = format!("{key_type}_random_type");
+    let mode = key_string_param(effect, &[&mode_key, "change_type"]).unwrap_or("specific");
+    let selection = if mode == "increment" {
+        "all"
+    } else {
+        key_string_param(effect, &[&random_key, "random_type"]).unwrap_or("all")
+    };
+    let pool = format!(
+        "(G and G.P_CENTER_POOLS and G.P_CENTER_POOLS[{}])",
+        lua_str(pool_name)
+    );
+    let result = match (key_type, selection) {
+        (_, "all") => (pool, "true".to_string()),
+        ("joker", "unlocked") => (pool, "item.unlocked ~= false".to_string()),
+        ("joker", "locked") => (pool, "item.unlocked == false".to_string()),
+        ("joker" | "consumable", "owned") => {
+            let area = if key_type == "joker" {
+                "jokers"
+            } else {
+                "consumeables"
+            };
+            (format!("(function() local owned = {{}}; for _, card in ipairs((G and G.{area} and G.{area}.cards) or {{}}) do local center = card.config and card.config.center; if center then owned[#owned + 1] = center end end; return owned end)()"), "true".to_string())
+        }
+        ("joker", "pool") => {
+            let name = key_string_param(effect, &["joker_pool", "pool"])?;
+            let prefixed =
+                if ctx.mod_prefix.is_empty() || name.starts_with(&format!("{}_", ctx.mod_prefix)) {
+                    name.to_string()
+                } else {
+                    format!("{}_{name}", ctx.mod_prefix)
+                };
+            (format!("(G and G.P_CENTER_POOLS and (G.P_CENTER_POOLS[{name}] or G.P_CENTER_POOLS[{prefixed}]))", name = lua_str(name), prefixed = lua_str(prefixed)), "true".to_string())
+        }
+        ("joker", "rarity") => {
+            let rarity = key_string_param(effect, &["joker_rarity", "rarity"])?;
+            let (value, alias) = match rarity.to_ascii_lowercase().as_str() {
+                "common" | "1" => ("1".into(), "Common".into()),
+                "uncommon" | "2" => ("2".into(), "Uncommon".into()),
+                "rare" | "3" => ("3".into(), "Rare".into()),
+                "legendary" | "4" => ("4".into(), "Legendary".into()),
+                _ => {
+                    let custom = if ctx.mod_prefix.is_empty()
+                        || rarity.starts_with(&format!("{}_", ctx.mod_prefix))
+                    {
+                        rarity.to_string()
+                    } else {
+                        format!("{}_{rarity}", ctx.mod_prefix)
+                    };
+                    (lua_str(&custom).to_string(), rarity.to_string())
+                }
+            };
+            (
+                pool,
+                format!(
+                    "(item.rarity == {value} or item.rarity == {alias})",
+                    alias = lua_str(alias)
+                ),
+            )
+        }
+        ("consumable", "set") => {
+            let set = key_string_param(effect, &["consumable_set", "set"])?;
+            if set == "all" {
+                (pool, "true".into())
+            } else {
+                let prefixed = if ctx.mod_prefix.is_empty()
+                    || set.starts_with(&format!("{}_", ctx.mod_prefix))
+                {
+                    set.to_string()
+                } else {
+                    format!("{}_{set}", ctx.mod_prefix)
+                };
+                (
+                    pool,
+                    format!(
+                        "(item.set == {set} or item.set == {prefixed})",
+                        set = lua_str(set),
+                        prefixed = lua_str(prefixed)
+                    ),
+                )
+            }
+        }
+        ("voucher", "possible") => (
+            "(get_current_pool and get_current_pool('Voucher'))".into(),
+            "true".into(),
+        ),
+        ("booster", "category") => {
+            let category =
+                key_string_param(effect, &["booster_category", "category"]).unwrap_or("Arcana");
+            (pool, format!("item.kind == {}", lua_str(category)))
+        }
+        ("booster", "size") => {
+            let extra = key_numeric_value(effect.params.get("booster_size_extra")?, ctx);
+            let choose = key_numeric_value(effect.params.get("booster_size_choose")?, ctx);
+            (pool, format!("(item.config and item.config.extra == tonumber({extra}) and item.config.choose == tonumber({choose}))"))
+        }
+        _ => return None,
+    };
+    Some(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -370,177 +634,550 @@ pub fn change_text_variable(effect: &EffectDef, ctx: &mut CompileContext) -> Eff
 
 /// Change Rank Variable: changes a rank-type user variable.
 pub fn change_rank_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    let variable_name = get_str_default(effect, "variable_name", "rankvar");
-    let change_type = get_str_default(effect, "change_type", "random");
-    let specific_rank = get_str_default(effect, "specific_rank", "A");
-    let custom_message = get_str(effect, "customMessage");
-
-    let code = match change_type.as_str() {
-        "random" => format!(
-            "if G.playing_cards then\n\
-                local valid_{v}_cards = {{}}\n\
-                for _, v in ipairs(G.playing_cards) do\n\
-                    if not SMODS.has_no_rank(v) then\n\
-                        valid_{v}_cards[#valid_{v}_cards + 1] = v\n\
-                    end\n\
-                end\n\
-                if valid_{v}_cards[1] then\n\
-                    local {v}_card = pseudorandom_element(valid_{v}_cards, pseudoseed('{v}' .. G.GAME.round_resets.ante))\n\
-                    G.GAME.current_round.{v}_card.rank = {v}_card.base.value\n\
-                    G.GAME.current_round.{v}_card.id = {v}_card.base.id\n\
-                end\n\
-            end",
-            v = variable_name
-        ),
-        "scored_card" | "destroyed_card" | "added_card" | "card_held_in_hand"
-        | "discarded_card" => format!(
-            "G.GAME.current_round.{v}_card.rank = context.other_card.base.value\n\
-            G.GAME.current_round.{v}_card.id = context.other_card.base.id",
-            v = variable_name
-        ),
-        _ => {
-            let rank_id = rank_to_id(&specific_rank);
-            format!(
-                "G.GAME.current_round.{v}_card.rank = '{r}'\n\
-                G.GAME.current_round.{v}_card.id = {id}",
-                v = variable_name,
-                r = specific_rank,
-                id = rank_id
-            )
-        }
-    };
-
-    let message = custom_message.map(lua_str);
-
-    EffectOutput {
-        return_fields: vec![],
-        pre_return: vec![lua_raw_stmt(code)],
-        config_vars: vec![],
-        message,
-        colour: Some(lua_raw_expr("G.C.FILTER")),
-
-        segment_id: None,
-    }
+    change_card_variable(effect, "rank")
 }
-
-// ---------------------------------------------------------------------------
-// change_suit_variable
-// ---------------------------------------------------------------------------
 
 /// Change Suit Variable: changes a suit-type user variable.
 pub fn change_suit_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    let variable_name = get_str_default(effect, "variable_name", "suitvar");
-    let change_type = get_str_default(effect, "change_type", "random");
-    let specific_suit = get_str_default(effect, "specific_suit", "Spades");
-    let custom_message = get_str(effect, "customMessage");
+    change_card_variable(effect, "suit")
+}
 
-    let code = match change_type.as_str() {
-        "random" => format!(
-            "if G.playing_cards then\n\
-                local valid_{v}_cards = {{}}\n\
-                for _, v in ipairs(G.playing_cards) do\n\
-                    if not SMODS.has_no_suit(v) then\n\
-                        valid_{v}_cards[#valid_{v}_cards + 1] = v\n\
-                    end\n\
-                end\n\
-                if valid_{v}_cards[1] then\n\
-                    local {v}_card = pseudorandom_element(valid_{v}_cards, pseudoseed('{v}' .. G.GAME.round_resets.ante))\n\
-                    G.GAME.current_round.{v}_card.suit = {v}_card.base.suit\n\
-                end\n\
-            end",
-            v = variable_name
-        ),
-        "scored_card" | "destroyed_card" | "added_card" | "card_held_in_hand"
-        | "discarded_card" => format!(
-            "G.GAME.current_round.{v}_card.suit = context.other_card.base.suit",
-            v = variable_name
-        ),
-        _ => format!(
-            "G.GAME.current_round.{v}_card.suit = '{s}'",
-            v = variable_name,
-            s = specific_suit
-        ),
+const RANK_ORDER: &[&str] = &[
+    "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A",
+];
+const SUIT_ORDER: &[&str] = &["Spades", "Hearts", "Diamonds", "Clubs"];
+const HAND_ORDER: &[&str] = &[
+    "High Card",
+    "Pair",
+    "Two Pair",
+    "Three of a Kind",
+    "Straight",
+    "Flush",
+    "Full House",
+    "Four of a Kind",
+    "Five of a Kind",
+    "Straight Flush",
+    "Flush House",
+    "Flush Five",
+];
+
+/// Checkbox pools are positional in the editor, and older projects serialize
+/// them as JSON strings. Also accept named values to preserve custom options.
+fn selected_variable_pool(effect: &EffectDef, parameter: &str, order: &[&str]) -> Option<String> {
+    let values = match effect.params.get(parameter)? {
+        ParamValue::Typed(value) => value.value.as_array()?.clone(),
+        ParamValue::Str(value) => serde_json::from_str::<Vec<serde_json::Value>>(value).ok()?,
+        _ => return None,
     };
+    let selected: Vec<String> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let selected = match value {
+                serde_json::Value::Bool(true) => order.get(index).copied(),
+                serde_json::Value::String(value) if !value.trim().is_empty() => Some(value.trim()),
+                _ => None,
+            }?;
+            Some(lua_str(selected).to_string())
+        })
+        .collect();
+    Some(format!("{{{}}}", selected.join(", ")))
+}
 
-    let message = custom_message.map(lua_str);
+fn round_variable_source(name: &str, field: &str) -> String {
+    format!(
+        "(G and G.GAME and G.GAME.current_round and G.GAME.current_round[{}])",
+        lua_str(format!("{name}_{field}"))
+    )
+}
 
+fn change_card_variable(effect: &EffectDef, property: &str) -> EffectOutput {
+    let Some(variable) = key_string_param(effect, &["variable_name", "variableName", "variable"])
+    else {
+        return EffectOutput::default();
+    };
+    let mode = key_string_param(effect, &["change_type", "changeType"]).unwrap_or("random");
+    let pool_parameter = format!("{property}_pool");
+    let specific_parameter = format!("specific_{property}");
+    let selection = match mode {
+        "random" => format!(
+            "local candidates = {{}}\nfor _, playing_card in ipairs((G and G.playing_cards) or {{}}) do\n    if playing_card.base and playing_card.base.{value} and not (SMODS and SMODS.has_no_{property} and SMODS.has_no_{property}(playing_card)) then candidates[#candidates + 1] = playing_card end\nend\nif #candidates > 0 then\n    local source = pseudorandom_element(candidates, pseudoseed({seed}))\n    selected_value = source.base.{value}\n    {id}\nend",
+            value = if property == "rank" { "value" } else { "suit" },
+            id = if property == "rank" { "selected_id = source.base.id" } else { "" },
+            seed = lua_str(variable),
+        ),
+        "pool" => {
+            let order = if property == "rank" { RANK_ORDER } else { SUIT_ORDER };
+            let Some(pool) = selected_variable_pool(effect, &pool_parameter, order) else {
+                return EffectOutput::default();
+            };
+            format!("local candidates = {pool}\nif #candidates > 0 then selected_value = pseudorandom_element(candidates, pseudoseed({seed})) end", seed = lua_str(variable))
+        }
+        "specific" => {
+            let Some(value) = effect.params.get(&specific_parameter).or_else(|| effect.params.get(property)) else {
+                return EffectOutput::default();
+            };
+            let Some(name) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                return EffectOutput::default();
+            };
+            if matches!(value, ParamValue::Typed(value) if crate::compiler::values::is_user_variable_type(&value.value_type)) {
+                let source = round_variable_source(name, "card");
+                format!("local source = {source}\nselected_value = source and source.{property}\n{id}", id = if property == "rank" { "selected_id = source and source.id" } else { "" })
+            } else {
+                format!("selected_value = {}", lua_str(name))
+            }
+        }
+        "scored_card" | "held_card" | "card_held_in_hand" | "discarded_card" | "destroyed_card" | "added_card" => {
+            let source = match mode {
+                "destroyed_card" => "(context and (context.other_card or context.destroy_card or (context.removed and context.removed[1])))",
+                "added_card" => "(context and (context.other_card or context.card or (context.cards and context.cards[1])))",
+                _ => "(context and context.other_card)",
+            };
+            format!("local source = {source}\nif source and source.base and not (SMODS and SMODS.has_no_{property} and SMODS.has_no_{property}(source)) then\n    selected_value = source.base.{value}\n    {id}\nend",
+                value = if property == "rank" { "value" } else { "suit" },
+                id = if property == "rank" { "selected_id = source.base.id" } else { "" },
+            )
+        }
+        _ => return EffectOutput::default(),
+    };
+    let normalize = if property == "rank" {
+        "local rank_names = {A = 'Ace', K = 'King', Q = 'Queen', J = 'Jack'}\nselected_value = rank_names[selected_value] or selected_value\nlocal rank_ids = {Ace = 14, King = 13, Queen = 12, Jack = 11, ['2'] = 2, ['3'] = 3, ['4'] = 4, ['5'] = 5, ['6'] = 6, ['7'] = 7, ['8'] = 8, ['9'] = 9, ['10'] = 10}\nselected_id = selected_id or rank_ids[selected_value] or (SMODS and SMODS.Ranks and SMODS.Ranks[selected_value] and SMODS.Ranks[selected_value].id)\n"
+    } else {
+        ""
+    };
+    let field = lua_str(format!("{variable}_card"));
+    let guard = if property == "rank" {
+        "type(selected_value) == 'string' and selected_value ~= '' and selected_id ~= nil"
+    } else {
+        "type(selected_value) == 'string' and selected_value ~= ''"
+    };
+    let assign = if property == "rank" {
+        "target.rank = selected_value\ntarget.id = selected_id"
+    } else {
+        "target.suit = selected_value"
+    };
+    variable_effect_output(effect, format!(
+        "do\nlocal selected_value, selected_id\n{selection}\n{normalize}if {guard} and G and G.GAME and G.GAME.current_round then\n    local target = G.GAME.current_round[{field}]\n    if type(target) ~= 'table' then target = {{}}; G.GAME.current_round[{field}] = target end\n    {assign}\nend\nend"
+    ))
+}
+
+fn variable_effect_output(effect: &EffectDef, code: String) -> EffectOutput {
     EffectOutput {
-        return_fields: vec![],
         pre_return: vec![lua_raw_stmt(code)],
-        config_vars: vec![],
-        message,
+        message: get_str(effect, "customMessage").map(lua_str),
         colour: Some(lua_raw_expr("G.C.FILTER")),
-
-        segment_id: None,
+        ..EffectOutput::default()
     }
 }
 
-// ---------------------------------------------------------------------------
-// change_poker_hand_variable
-// ---------------------------------------------------------------------------
-
 /// Change Poker Hand Variable: changes a poker-hand-type user variable.
 pub fn change_poker_hand_variable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    let variable_name = get_str_default(effect, "variable_name", "pokerhandvar");
-    let change_type = get_str_default(effect, "change_type", "random");
-    let specific = get_str_default(effect, "specific_pokerhand", "High Card");
-    let custom_message = get_str(effect, "customMessage");
-
-    let code = match change_type.as_str() {
-        "random" => format!(
-            "local {v}_hands = {{}}\n\
-            for handname, _ in pairs(G.GAME.hands) do\n\
-                if G.GAME.hands[handname].visible then\n\
-                    {v}_hands[#{v}_hands + 1] = handname\n\
-                end\n\
-            end\n\
-            if {v}_hands[1] then\n\
-                G.GAME.current_round.{v}_hand = pseudorandom_element({v}_hands, pseudoseed('{v}' .. G.GAME.round_resets.ante))\n\
-            end",
-            v = variable_name
-        ),
-        "most_played" => format!(
-            "local {v}_hand, {v}_tally = nil, 0\n\
-            for k, v in ipairs(G.handlist) do\n\
-                if G.GAME.hands[v].visible and G.GAME.hands[v].played > {v}_tally then\n\
-                    {v}_hand = v\n\
-                    {v}_tally = G.GAME.hands[v].played\n\
-                end\n\
-            end\n\
-            if {v}_hand then\n\
-                G.GAME.current_round.{v}_hand = {v}_hand\n\
-            end",
-            v = variable_name
-        ),
-        "least_played" => format!(
-            "local {v}_hand, {v}_tally = nil, math.huge\n\
-            for k, v in ipairs(G.handlist) do\n\
-                if G.GAME.hands[v].visible and G.GAME.hands[v].played < {v}_tally then\n\
-                    {v}_hand = v\n\
-                    {v}_tally = G.GAME.hands[v].played\n\
-                end\n\
-            end\n\
-            if {v}_hand then\n\
-                G.GAME.current_round.{v}_hand = {v}_hand\n\
-            end",
-            v = variable_name
-        ),
-        _ => format!(
-            "G.GAME.current_round.{v}_hand = '{h}'",
-            v = variable_name,
-            h = specific
-        ),
+    let Some(variable) = key_string_param(effect, &["variable_name", "variableName", "variable"])
+    else {
+        return EffectOutput::default();
     };
+    let mode = key_string_param(effect, &["change_type", "changeType"]).unwrap_or("random");
+    let selection = match mode {
+        "random" | "pool" => {
+            let source = if mode == "pool" {
+                let Some(pool) = selected_variable_pool(effect, "pokerhand_pool", HAND_ORDER)
+                else {
+                    return EffectOutput::default();
+                };
+                pool
+            } else {
+                "(function() local keys = {}; for key, _ in pairs(hands) do keys[#keys + 1] = key end; return (G and G.handlist) or keys end)()".into()
+            };
+            format!("local candidates = {{}}\nfor _, hand_name in ipairs({source}) do\n    if hands[hand_name] and hands[hand_name].visible then candidates[#candidates + 1] = hand_name end\nend\nif #candidates > 0 then selected = pseudorandom_element(candidates, pseudoseed({seed})) end", seed = lua_str(variable))
+        }
+        "most_played" | "least_played" => {
+            let (initial, operator) = if mode == "most_played" {
+                ("-math.huge", ">")
+            } else {
+                ("math.huge", "<")
+            };
+            format!("local tally = {initial}\nfor _, hand_name in ipairs((G and G.handlist) or {{}}) do\n    local hand = hands[hand_name]\n    if hand and hand.visible and (hand.played or 0) {operator} tally then selected = hand_name; tally = hand.played or 0 end\nend")
+        }
+        "specific" => {
+            let Some(value) = effect
+                .params
+                .get("specific_pokerhand")
+                .or_else(|| effect.params.get("specific_poker_hand"))
+            else {
+                return EffectOutput::default();
+            };
+            let Some(name) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return EffectOutput::default();
+            };
+            if matches!(value, ParamValue::Typed(value) if crate::compiler::values::is_user_variable_type(&value.value_type))
+            {
+                format!("selected = {}", round_variable_source(name, "hand"))
+            } else {
+                format!("selected = {}", lua_str(name))
+            }
+        }
+        _ => return EffectOutput::default(),
+    };
+    variable_effect_output(effect, format!(
+        "do\nlocal hands = (G and G.GAME and G.GAME.hands) or {{}}\nlocal selected\n{selection}\nif type(selected) == 'string' and hands[selected] and G and G.GAME and G.GAME.current_round then G.GAME.current_round[{field}] = selected end\nend",
+        field = lua_str(format!("{variable}_hand")),
+    ))
+}
 
-    let message = custom_message.map(lua_str);
+#[cfg(test)]
+mod variable_option_tests {
+    use super::*;
+    use crate::types::ObjectType;
+    use serde_json::json;
 
-    EffectOutput {
-        return_fields: vec![],
-        pre_return: vec![lua_raw_stmt(code)],
-        config_vars: vec![],
-        message,
-        colour: Some(lua_raw_expr("G.C.FILTER")),
+    fn context() -> CompileContext {
+        CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), true)
+    }
 
-        segment_id: None,
+    fn effect(kind: &str, params: serde_json::Value) -> EffectDef {
+        serde_json::from_value(json!({"effect_type": kind, "params": params})).unwrap()
+    }
+
+    fn key_code(params: serde_json::Value) -> String {
+        Chunk {
+            stmts: change_key_variable(&effect("change_key_variable", params), &mut context())
+                .pre_return,
+        }
+        .to_string()
+    }
+
+    fn variable_code(kind: &str, params: serde_json::Value) -> String {
+        let effect = effect(kind, params);
+        let output = match kind {
+            "change_rank_variable" => change_rank_variable(&effect, &mut context()),
+            "change_suit_variable" => change_suit_variable(&effect, &mut context()),
+            "change_pokerhand_variable" => change_poker_hand_variable(&effect, &mut context()),
+            _ => panic!("unexpected kind"),
+        };
+        Chunk {
+            stmts: output.pre_return,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn current_key_parameters_win_over_legacy_fields() {
+        let code = key_code(json!({
+            "variable_name": {"value": "chosen", "valueType": "user_var"},
+            "key_type": "edition", "edition_change_type": "specific",
+            "specific_edition": {"value": "e_other_sparkle", "valueType": "text"},
+            "change_type": "random", "specific_key": "j_joker"
+        }));
+        assert!(code.contains("local new_key = 'e_other_sparkle'"), "{code}");
+        assert!(
+            code.contains("card.ability.extra.chosen = new_key"),
+            "{code}"
+        );
+        assert!(
+            !code.contains("j_joker") && !code.contains("pseudorandom"),
+            "{code}"
+        );
+    }
+
+    #[test]
+    fn key_variable_selectors_copy_references_and_guard_contexts() {
+        let copy = key_code(
+            json!({"variable_name": "chosen", "key_type": "joker", "joker_change_type": {"value": "other", "valueType": "userVariable"}}),
+        );
+        assert!(
+            copy.contains("local new_key = card.ability.extra.other"),
+            "{copy}"
+        );
+        for (key_type, mode, source) in [
+            ("joker", "evaled_joker", "context.other_joker"),
+            ("joker", "selected_joker", "G.jokers.highlighted and"),
+            (
+                "edition",
+                "held_card",
+                "source.edition and source.edition.key",
+            ),
+            ("seal", "scored_card", "source.seal"),
+            ("consumable", "used_consumable", "context.consumeable"),
+            ("booster", "skipped_booster", "context.booster"),
+            ("tag", "added_tag", "context.tag_added"),
+        ] {
+            let mut params = json!({"variable_name": "chosen", "key_type": key_type});
+            params[format!("{key_type}_change_type")] =
+                json!({"value": mode, "valueType": "context"});
+            let code = key_code(params);
+            assert!(code.contains(source), "{code}");
+            assert!(code.contains("type(new_key) == 'string'"), "{code}");
+        }
+    }
+
+    #[test]
+    fn specific_keys_handle_namespaced_and_short_custom_values_without_double_prefixes() {
+        for (key_type, full_key) in [
+            ("joker", "j_mod_smile"),
+            ("consumable", "c_mod_moon"),
+            ("enhancement", "m_mod_bright"),
+            ("edition", "e_mod_shine"),
+            ("voucher", "v_mod_sale"),
+            ("booster", "p_mod_pack"),
+            ("tag", "tag_mod_tag"),
+        ] {
+            let mut params = json!({"variable_name": "chosen", "key_type": key_type});
+            params[format!("{key_type}_change_type")] = json!("specific");
+            params[format!("specific_{key_type}")] = json!(full_key);
+            let code = key_code(params);
+            assert!(
+                code.contains(&format!("local new_key = '{full_key}'")),
+                "{code}"
+            );
+        }
+        let short = key_code(
+            json!({"variable_name": "chosen", "key_type": "edition", "edition_change_type": "specific", "specific_edition": "sparkle"}),
+        );
+        assert!(short.contains("return 'e_mod_sparkle'"), "{short}");
+        let seal = key_code(
+            json!({"variable_name": "chosen", "key_type": "seal", "seal_change_type": "specific", "specific_seal": "mod_wax"}),
+        );
+        assert!(seal.contains("return 'mod_wax'"), "{seal}");
+        assert!(!seal.contains("mod_mod"), "{seal}");
+    }
+
+    #[test]
+    fn specific_tag_edition_and_enhancement_keys_match_actual_picker_values() {
+        let picker_source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../src/lib/balatro/balatro-utils.ts"
+        ));
+        for (key_type, declaration, prefix) in [
+            ("tag", "TAGS", "tag_"),
+            ("edition", "VANILLA_EDITIONS", "e_"),
+            ("enhancement", "VANILLA_ENHANCEMENTS", "m_"),
+        ] {
+            let marker = format!("export const {declaration} = [");
+            let values = picker_source
+                .split(&marker)
+                .nth(1)
+                .unwrap()
+                .split("] as const")
+                .next()
+                .unwrap();
+            for line in values.lines() {
+                let Some(value) = line
+                    .split("value: \"")
+                    .nth(1)
+                    .and_then(|value| value.split('"').next())
+                else {
+                    continue;
+                };
+                let expected = if value.starts_with(prefix) {
+                    value.to_string()
+                } else {
+                    format!("{prefix}{value}")
+                };
+                let mut params = json!({"variable_name": "chosen", "key_type": key_type});
+                params[format!("{key_type}_change_type")] = json!("specific");
+                params[format!("specific_{key_type}")] = json!(value);
+                let code = key_code(params);
+                assert!(
+                    code.contains(&format!("local new_key = '{expected}'")),
+                    "picker {key_type}/{value}: {code}"
+                );
+            }
+        }
+        let custom = key_code(
+            json!({"variable_name": "chosen", "key_type": "tag", "tag_change_type": "specific", "specific_tag": "special"}),
+        );
+        assert!(
+            custom.contains("local registry = G and G.P_TAGS"),
+            "{custom}"
+        );
+        assert!(custom.contains("return 'tag_mod_special'"), "{custom}");
+    }
+
+    #[test]
+    fn random_key_filters_use_every_requested_parameter_and_guard_empty_pools() {
+        for (params, fragment) in [
+            (
+                json!({"key_type": "joker", "joker_change_type": "random", "joker_random_type": "locked"}),
+                "item.unlocked == false",
+            ),
+            (
+                json!({"key_type": "joker", "joker_change_type": "random", "joker_random_type": "unlocked"}),
+                "item.unlocked ~= false",
+            ),
+            (
+                json!({"key_type": "joker", "joker_change_type": "random", "joker_random_type": "rarity", "joker_rarity": "rare"}),
+                "item.rarity == 3",
+            ),
+            (
+                json!({"key_type": "joker", "joker_change_type": "random", "joker_random_type": "rarity", "joker_rarity": "sparkly"}),
+                "item.rarity == 'mod_sparkly'",
+            ),
+            (
+                json!({"key_type": "joker", "joker_change_type": "random", "joker_random_type": "pool", "joker_pool": "special"}),
+                "G.P_CENTER_POOLS['mod_special']",
+            ),
+            (
+                json!({"key_type": "consumable", "consumable_change_type": "random", "consumable_random_type": "owned"}),
+                "G.consumeables.cards",
+            ),
+            (
+                json!({"key_type": "consumable", "consumable_change_type": "random", "consumable_random_type": "set", "consumable_set": "Stars"}),
+                "item.set == 'mod_Stars'",
+            ),
+            (
+                json!({"key_type": "voucher", "voucher_change_type": "random", "voucher_random_type": "possible"}),
+                "get_current_pool('Voucher')",
+            ),
+            (
+                json!({"key_type": "booster", "booster_change_type": "random", "booster_random_type": "category", "booster_category": "Buffoon"}),
+                "item.kind == 'Buffoon'",
+            ),
+            (
+                json!({"key_type": "booster", "booster_change_type": "random", "booster_random_type": "size", "booster_size_extra": 6, "booster_size_choose": 2}),
+                "item.config.extra == tonumber(6) and item.config.choose == tonumber(2)",
+            ),
+        ] {
+            let mut params = params;
+            params["variable_name"] = json!("chosen");
+            let code = key_code(params);
+            assert!(code.contains(fragment), "{code}");
+            assert!(code.contains("if #candidates > 0 then"), "{code}");
+        }
+    }
+
+    #[test]
+    fn key_increment_uses_the_current_count_and_keeps_missing_keys_unchanged() {
+        let code = key_code(
+            json!({"variable_name": "chosen", "key_type": "joker", "joker_change_type": "increment", "joker_increment_count": -2, "joker_random_type": "locked"}),
+        );
+        assert!(code.contains("local step = tonumber(-2)"), "{code}");
+        assert!(
+            code.contains("((index - 1 + math.floor(step)) % #candidates) + 1"),
+            "{code}"
+        );
+        assert!(
+            code.contains("if item.key == card.ability.extra.chosen"),
+            "{code}"
+        );
+        assert!(
+            !code.contains("unlocked"),
+            "increment uses the collection: {code}"
+        );
+        for params in [
+            json!({"variable_name": "chosen", "joker_change_type": "unknown"}),
+            json!({"variable_name": "chosen", "joker_change_type": "specific"}),
+            json!({"joker_change_type": "random"}),
+        ] {
+            assert!(key_code(params).is_empty());
+        }
+    }
+
+    #[test]
+    fn all_catalog_key_types_and_change_modes_generate_the_requested_branch() {
+        let catalog: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/mod_engine/catalog/effects.json"
+        )))
+        .unwrap();
+        let entry = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "change_key_variable")
+            .unwrap();
+        let params = entry["params"].as_array().unwrap();
+        let key_types = params
+            .iter()
+            .find(|param| param["id"] == "key_type")
+            .unwrap()["options"]
+            .as_array()
+            .unwrap();
+        for key_type in key_types {
+            let key_type = key_type["value"].as_str().unwrap();
+            let selector = format!("{key_type}_change_type");
+            let modes = params.iter().find(|param| param["id"] == selector).unwrap()["options"]
+                .as_array()
+                .unwrap();
+            for mode in modes {
+                let mode = mode["value"].as_str().unwrap();
+                let mut values = json!({"variable_name": "chosen", "key_type": key_type});
+                values[&selector] = json!(mode);
+                values[format!("specific_{key_type}")] = json!("registered_key");
+                let code = key_code(values);
+                assert!(!code.is_empty(), "catalog {key_type}/{mode}");
+                assert!(
+                    code.contains(match mode {
+                        "specific" => "local new_key",
+                        "random" => "pseudorandom_element",
+                        "increment" => "math.floor(step)",
+                        _ => panic!("unhandled catalog mode {mode}"),
+                    }),
+                    "{code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_rank_suit_and_hand_pools_do_not_fall_back_to_default_values() {
+        for (kind, params, expected) in [
+            (
+                "change_rank_variable",
+                json!({"variable_name": "chosen", "change_type": "pool", "rank_pool": {"value": [false,false,false,false,false,false,false,false,false,false,false,true,false], "valueType": "checkbox"}}),
+                "local candidates = {'K'}",
+            ),
+            (
+                "change_suit_variable",
+                json!({"variable_name": "chosen", "change_type": "pool", "suit_pool": "[false,true,false,false]"}),
+                "local candidates = {'Hearts'}",
+            ),
+            (
+                "change_pokerhand_variable",
+                json!({"variable_name": "chosen", "change_type": "pool", "pokerhand_pool": {"value": [false,false,false,false,false,true], "valueType": "checkbox"}}),
+                "ipairs({'Flush'})",
+            ),
+        ] {
+            let code = variable_code(kind, params);
+            assert!(code.contains(expected), "{code}");
+            assert!(code.contains("if #candidates > 0 then"), "{code}");
+        }
+        let empty = variable_code(
+            "change_rank_variable",
+            json!({"variable_name": "chosen", "change_type": "pool", "rank_pool": {"value": [false], "valueType": "checkbox"}}),
+        );
+        assert!(empty.contains("local candidates = {}"), "{empty}");
+        assert!(
+            !empty.contains("G.playing_cards"),
+            "an empty explicit pool must preserve the old value: {empty}"
+        );
+    }
+
+    #[test]
+    fn rank_suit_and_hand_specific_selectors_copy_typed_variable_values() {
+        for (kind, parameter, source) in [
+            ("change_rank_variable", "specific_rank", "source.rank"),
+            ("change_suit_variable", "specific_suit", "source.suit"),
+            (
+                "change_pokerhand_variable",
+                "specific_pokerhand",
+                "['other_hand']",
+            ),
+        ] {
+            let mut params = json!({"variable_name": "chosen", "change_type": "specific"});
+            params[parameter] = json!({"value": "other", "valueType": "user_var"});
+            let code = variable_code(kind, params);
+            assert!(code.contains(source), "{code}");
+            assert!(!code.contains("selected_value = 'other'"), "{code}");
+        }
+        let held = variable_code(
+            "change_rank_variable",
+            json!({"variable_name": "chosen", "change_type": {"value": "held_card", "valueType": "context"}}),
+        );
+        assert!(held.contains("context and context.other_card"), "{held}");
+        assert!(held.contains("SMODS.has_no_rank"), "{held}");
     }
 }
