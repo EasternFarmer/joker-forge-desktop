@@ -46,6 +46,7 @@ import FloatingDock from "./floating-dock";
 import BlockPalette from "./block-palette";
 import Variables from "./variables";
 import Inspector from "./inspector";
+import { isParameterVisible } from "./parameter-visibility";
 import LiveCodePanel from "./live-code-panel";
 import HistoryPanel from "./history-panel";
 import SoundsPanel from "./sounds-panel";
@@ -3078,9 +3079,15 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   };
 
   const getParameterCount = (
-    params: Record<string, { value: unknown; valueType?: string }>,
+    block: Condition | Effect,
+    kind: "condition" | "effect",
   ): number => {
-    return Object.keys(params).length;
+    const definition = kind === "condition"
+      ? getConditionTypeById(block.type)
+      : getEffectTypeById(block.type);
+    return definition?.params.filter((parameter) =>
+      isParameterVisible(parameter, definition.params, block.params),
+    ).length ?? 0;
   };
 
   const handleDragStart = (event: DragStartEvent) => {

@@ -98,7 +98,8 @@ interface RuleCardProps {
   generateConditionTitle: (condition: RuleCondition) => string;
   generateEffectTitle: (effect: RuleEffect) => string;
   getParameterCount: (
-    params: Record<string, { value: unknown; valueType?: string }>,
+    block: RuleCondition | RuleEffect,
+    kind: "condition" | "effect",
   ) => number;
   onUpdateConditionOperator: (
     ruleId: string,
@@ -715,7 +716,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
                         onDelete={() =>
                           onDeleteCondition(rule.id, condition.id)
                         }
-                        parameterCount={getParameterCount(condition.params)}
+                        parameterCount={getParameterCount(condition, "condition")}
                         dynamicTitle={generateConditionTitle(condition)}
                         itemType={itemType}
                         onPreviewCode={() =>
@@ -817,7 +818,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
                       })
                     }
                     onDelete={() => onDeleteEffect(rule.id, effect.id)}
-                    parameterCount={getParameterCount(effect.params)}
+                    parameterCount={getParameterCount(effect, "effect")}
                     dynamicTitle={generateEffectTitle(effect)}
                     itemType={itemType}
                     onPreviewCode={() =>
@@ -883,7 +884,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
                       })
                     }
                     onDelete={() => onDeleteEffect(rule.id, effect.id)}
-                    parameterCount={getParameterCount(effect.params)}
+                    parameterCount={getParameterCount(effect, "effect")}
                     dynamicTitle={generateEffectTitle(effect)}
                     itemType={itemType}
                     onPreviewCode={() =>
@@ -1249,7 +1250,8 @@ const RuleCard: React.FC<RuleCardProps> = ({
                           onDeleteCondition(rule.id, singleCondition.id)
                         }
                         parameterCount={getParameterCount(
-                          singleCondition.params,
+                          singleCondition,
+                          "condition",
                         )}
                         dynamicTitle={generateConditionTitle(singleCondition)}
                         itemType={itemType}
@@ -1314,7 +1316,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
                           })
                         }
                         onDelete={() => onDeleteEffect(rule.id, effect.id)}
-                        parameterCount={getParameterCount(effect.params)}
+                        parameterCount={getParameterCount(effect, "effect")}
                         dynamicTitle={generateEffectTitle(effect)}
                         itemType={itemType}
                         onPreviewCode={() =>
