@@ -209,6 +209,11 @@ export default function SealsPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: SealData, b: SealData) => a.orderValue - b.orderValue,
+      },
+      {
         label: "Name",
         value: "name",
         sortFn: (a: SealData, b: SealData) => a.name.localeCompare(b.name),

@@ -229,6 +229,11 @@ export default function VouchersPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: VoucherData, b: VoucherData) => a.orderValue - b.orderValue,
+      },
+      {
         label: "Name",
         value: "name",
         sortFn: (a: VoucherData, b: VoucherData) =>

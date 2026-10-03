@@ -164,6 +164,11 @@ export default function BoostersPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: BoosterData, b: BoosterData) => a.orderValue - b.orderValue,
+      },
+      {
         label: "Name",
         value: "name",
         sortFn: (a: BoosterData, b: BoosterData) =>
