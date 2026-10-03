@@ -132,7 +132,7 @@ export function OverviewPage() {
       pushGlobalAlert({
         type: "success",
         title: "Import Complete",
-        message: `Imported ${file.name} (${sourceLabel} format).`,
+        message: `Imported ${file.name} as a new project (${sourceLabel} format).`,
       });
     } catch (error) {
       const message =

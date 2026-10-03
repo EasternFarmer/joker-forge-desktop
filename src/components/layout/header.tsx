@@ -202,7 +202,7 @@ export function Header({ title }: HeaderProps) {
       pushGlobalAlert({
         type: "success",
         title: "Import Complete",
-        message: `Imported ${file.name} (${sourceLabel} format).`,
+        message: `Imported ${file.name} as a new project (${sourceLabel} format).`,
       });
     } catch (error) {
       const message =
@@ -296,7 +296,7 @@ export function Header({ title }: HeaderProps) {
             destinationMode === "balatro-mods" &&
             getSingleManagedModExportEnabled(),
           managedModFolderNames: projects
-            .map((project) => project.id?.trim())
+            .map((project) => project.modId?.trim())
             .filter((id): id is string => Boolean(id)),
         },
       );

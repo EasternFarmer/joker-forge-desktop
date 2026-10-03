@@ -1696,45 +1696,23 @@ export const useProjectData = () => {
     [commitStore],
   );
 
-  // Replace an entire project as one shared-store mutation.
+  // Imports always create a separate workspace project. Mod identity belongs
+  // to metadata.id; names and mod IDs never authorize replacing saved work.
   const importProject = useCallback(
     (projectData: ProjectData) => {
       const normalizedProject = sanitizeProjectData(projectData);
       commitStore((baseStore) => {
-        const importedName = (normalizedProject.metadata?.name || "").trim().toLowerCase();
-        const existingId = Object.keys(baseStore.projects).find(
-          (id) =>
-            (baseStore.projects[id].metadata.name || "").trim().toLowerCase() ===
-            importedName,
+        const workspaceProjectId = ensureUniqueProjectId(
+          crypto.randomUUID(),
+          baseStore.projects,
         );
-
-        let nextCurrentId: string;
-        let nextProjects: Record<string, ProjectData>;
-
-        if (existingId) {
-          nextCurrentId = existingId;
-          nextProjects = {
-            ...baseStore.projects,
-            [existingId]: {
-              ...normalizedProject,
-              metadata: { ...normalizedProject.metadata, id: existingId },
-            },
-          };
-        } else {
-          const baseId = normalizedProject.metadata.id || DEFAULT_METADATA.id;
-          const uniqueId = ensureUniqueProjectId(baseId, baseStore.projects);
-          const finalProject: ProjectData = {
-            ...normalizedProject,
-            metadata: { ...normalizedProject.metadata, id: uniqueId },
-          };
-          nextCurrentId = uniqueId;
-          nextProjects = { ...baseStore.projects, [uniqueId]: finalProject };
-        }
-
         const nextStore: ProjectStore = {
           ...baseStore,
-          currentProjectId: nextCurrentId,
-          projects: nextProjects,
+          currentProjectId: workspaceProjectId,
+          projects: {
+            ...baseStore.projects,
+            [workspaceProjectId]: normalizedProject,
+          },
         };
         return nextStore;
       });
@@ -1744,6 +1722,7 @@ export const useProjectData = () => {
 
   const projects = Object.entries(store.projects).map(([projectId, project]) => ({
     id: projectId,
+    modId: project.metadata.id,
     name: project.metadata.name,
     version: project.metadata.version,
   }));

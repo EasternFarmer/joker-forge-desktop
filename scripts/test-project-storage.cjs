@@ -722,6 +722,208 @@ function desktopFixture(internals) {
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
+function importFixture(internals, label, metadata = {}) {
+  return internals.sanitizeProjectData({
+    metadata: {
+      author: [`${label} author`],
+      description: `${label} description`,
+      version: "2.3.4",
+      prefix: `${label}_prefix`,
+      display_name: `${label} display name`,
+      dependencies: ["Steamodded (>=1.0.0)"],
+      iconImage: imageDataUrl(`${label} icon`),
+      gameImage: imageDataUrl(`${label} logo`),
+      ...metadata,
+    },
+    stats: { jokers: 1 },
+    jokers: [{
+      id: `${label}-joker`,
+      name: `${label} joker`,
+      image: imageDataUrl(`${label} artwork`),
+      overlayImage: imageDataUrl(`${label} overlay`),
+      imageLayers: [{ id: `${label}-layer`, imageDataUrl: imageDataUrl(`${label} layer`) }],
+      rules: [{
+        id: `${label}-rule`,
+        trigger: "hand_played",
+        conditions: [{ type: "poker_hand", operator: "equals", value: "Flush" }],
+        effects: [{ type: "add_mult", value: 10 }],
+      }],
+    }],
+  });
+}
+
+async function seedDesktopProjects(memory, projects) {
+  const storage = storageModule(memory);
+  const data = {
+    version: 2,
+    currentProjectId: Object.keys(projects)[0],
+    projects,
+  };
+  await storage.internals.getTauriProjectFiles().save(data);
+  await storage.internals.loadStoredStore();
+  return storage;
+}
+
+async function assertImportSurvivesRestart(memory, storage, originals, importIds, imported) {
+  await storage.internals.getQueue();
+  const restarted = storageModule(memory);
+  const loaded = await restarted.internals.loadStoredStore();
+  assert.equal(loaded.currentProjectId, importIds.at(-1), "The latest import remains active after restarting");
+  assert.deepEqual(Object.keys(loaded.projects).sort(), [...Object.keys(originals), ...importIds].sort());
+  for (const [id, project] of Object.entries(originals)) {
+    assert.deepEqual(plain(loaded.projects[id]), plain(project), `Import must preserve original ${id}, including artwork and rules`);
+  }
+  for (const id of importIds) {
+    assert.deepEqual(plain(loaded.projects[id]), plain(imported), "The imported mod identity, metadata, artwork, and rules must survive");
+  }
+  assert.equal(storage.alerts.length, 0, "A successful import should not produce storage warnings");
+  assert.equal(restarted.alerts.length, 0);
+}
+
+test("import creates an independent workspace project even when names or mod IDs match", async (t) => {
+  const cases = [
+    { name: "same name, different mod ID", key: "existing_mod", existingId: "existing_mod", importedId: "incoming_mod", importedName: "Shared Name" },
+    { name: "case and whitespace matching name, different mod ID", key: "existing_mod", existingId: "existing_mod", importedId: "incoming_mod", importedName: "  sHaReD nAmE  " },
+    { name: "same name and mod ID", key: "existing_mod", existingId: "existing_mod", importedId: "existing_mod", importedName: "Shared Name" },
+    { name: "same mod ID, different name", key: "existing_mod", existingId: "existing_mod", importedId: "existing_mod", importedName: "New Name" },
+    { name: "mod ID edited away from its workspace key", key: "original_workspace", existingId: "claimed_mod", importedId: "claimed_mod", importedName: "Shared Name" },
+    { name: "missing imported mod ID uses defaults safely", key: "my_custom_mod", existingId: "my_custom_mod", importedName: "Shared Name" },
+  ];
+  for (const input of cases) {
+    await t.test(input.name, async () => {
+      const memory = new MemoryFs();
+      const { internals } = storageModule(memory);
+      const existing = importFixture(internals, "existing", { id: input.existingId, name: "Shared Name" });
+      const metadata = { name: input.importedName };
+      if (Object.hasOwn(input, "importedId")) metadata.id = input.importedId;
+      const imported = importFixture(internals, "imported", metadata);
+      const originals = { [input.key]: existing };
+      const storage = await seedDesktopProjects(memory, originals);
+      const importedBefore = plain(imported);
+      storage.api.useProjectData().importProject(imported);
+      const cached = storage.internals.getCached();
+      const importId = cached.currentProjectId;
+      assert.notEqual(importId, input.key, "Import must not reuse an existing workspace identity");
+      assert.equal(Object.keys(cached.projects).length, 2);
+      assert.deepEqual(plain(cached.projects[input.key]), plain(existing));
+      assert.deepEqual(plain(cached.projects[importId]), importedBefore);
+      assert.deepEqual(plain(imported), importedBefore, "Import must not mutate the source project");
+      const summary = storage.api.useProjectData().projects.find((project) => project.id === importId);
+      assert.equal(summary.modId, imported.metadata.id, "Project summaries distinguish workspace identity from the exported mod ID");
+      await assertImportSurvivesRestart(memory, storage, originals, [importId], imported);
+    });
+  }
+});
+
+test("back-to-back imports of the same project retain every workspace copy", async () => {
+  const memory = new MemoryFs();
+  const { internals } = storageModule(memory);
+  const existing = importFixture(internals, "existing", { id: "shared_mod", name: "Shared Name" });
+  const imported = importFixture(internals, "imported", { id: "shared_mod", name: "Shared Name" });
+  const originals = { shared_mod: existing };
+  const storage = await seedDesktopProjects(memory, originals);
+  const hook = storage.api.useProjectData();
+  const importIds = [];
+  for (let index = 0; index < 3; index += 1) {
+    hook.importProject(imported);
+    importIds.push(storage.internals.getCached().currentProjectId);
+  }
+  assert.equal(new Set(["shared_mod", ...importIds]).size, 4, "Queued imports require separate workspace identities");
+  assert.equal(Object.keys(storage.internals.getCached().projects).length, 4);
+  await assertImportSurvivesRestart(memory, storage, originals, importIds, imported);
+});
+
+test("switching and deleting imported copies uses workspace identity instead of shared mod ID", async () => {
+  const memory = new MemoryFs();
+  const { internals } = storageModule(memory);
+  const existing = importFixture(internals, "existing", { id: "shared_mod", name: "Shared Name" });
+  const imported = importFixture(internals, "imported", { id: "shared_mod", name: "Shared Name" });
+  const storage = await seedDesktopProjects(memory, { shared_mod: existing });
+  const hook = storage.api.useProjectData();
+  hook.importProject(imported);
+  const firstId = storage.internals.getCached().currentProjectId;
+  hook.importProject(imported);
+  const secondId = storage.internals.getCached().currentProjectId;
+  const summary = storage.api.useProjectData().projects;
+  assert.deepEqual(plain(summary.map((project) => project.id)), ["shared_mod", firstId, secondId]);
+  assert.ok(summary.every((project) => project.modId === "shared_mod"));
+  hook.switchProject("shared_mod");
+  assert.deepEqual(plain(storage.api.useProjectData().data), plain(existing));
+  hook.switchProject(firstId);
+  assert.equal(storage.internals.getCached().currentProjectId, firstId);
+  assert.deepEqual(plain(storage.api.useProjectData().data), plain(imported));
+  hook.deleteProject(firstId);
+  const cached = storage.internals.getCached();
+  assert.equal(Object.hasOwn(cached.projects, firstId), false);
+  assert.equal(Object.hasOwn(cached.projects, cached.currentProjectId), true);
+  assert.deepEqual(plain(cached.projects.shared_mod), plain(existing));
+  assert.deepEqual(plain(cached.projects[secondId]), plain(imported));
+  hook.switchProject(secondId);
+  await assertImportSurvivesRestart(memory, storage, { shared_mod: existing }, [secondId], imported);
+});
+
+test("import preserves unreadable disk projects with the imported mod ID", async () => {
+  const memory = new MemoryFs();
+  const { internals } = storageModule(memory);
+  const healthy = importFixture(internals, "healthy", { id: "healthy_mod", name: "Healthy" });
+  const damaged = importFixture(internals, "damaged", { id: "shared_mod", name: "Shared Name" });
+  const imported = importFixture(internals, "imported", { id: "shared_mod", name: "Shared Name" });
+  await seedDesktopProjects(memory, { healthy_mod: healthy, shared_mod: damaged });
+  const settingsPath = "/appdata/joker_forge_storage/settings.json";
+  const projectsPath = "/appdata/joker_forge_storage/projects";
+  const reference = memory.manifest(settingsPath).projects.shared_mod;
+  const damagedRoot = `${projectsPath}/${reference}`;
+  const damagedFile = `${damagedRoot}/project.json`;
+  const before = memory.subtree(damagedRoot);
+  memory.blockedReads.add(damagedFile);
+  const storage = storageModule(memory);
+  const loaded = await storage.internals.loadStoredStore();
+  assert.equal(Object.hasOwn(loaded.projects, "shared_mod"), false, "The unreadable project is absent from the editor");
+  storage.api.useProjectData().importProject(imported);
+  const importId = storage.internals.getCached().currentProjectId;
+  assert.notEqual(importId, "shared_mod");
+  await storage.internals.getQueue();
+  assert.equal(memory.manifest(settingsPath).projects.shared_mod, reference, "Import must keep the unreadable project's recovery reference");
+  assert.deepEqual(memory.subtree(damagedRoot), before, "Import must preserve unreadable project files and artwork");
+  memory.blockedReads.delete(damagedFile);
+  const restarted = storageModule(memory);
+  const recovered = await restarted.internals.loadStoredStore();
+  assert.equal(recovered.currentProjectId, importId);
+  assert.deepEqual(plain(recovered.projects.healthy_mod), plain(healthy));
+  assert.deepEqual(plain(recovered.projects.shared_mod), plain(damaged));
+  assert.deepEqual(plain(recovered.projects[importId]), plain(imported));
+  assert.equal(Object.keys(recovered.projects).length, 3);
+});
+
+test("imports queued during hydration preserve loaded projects and each incoming copy", async () => {
+  const hydration = deferred();
+  const saved = [];
+  class PendingStore {
+    async load() { return hydration.promise; }
+    async save(data, options) { saved.push({ data: plain(data), options }); }
+  }
+  const storage = storageModule(new MemoryFs(), PendingStore);
+  const existing = importFixture(storage.internals, "existing", { id: "shared_mod", name: "Shared Name" });
+  const imported = importFixture(storage.internals, "imported", { id: "shared_mod", name: "Shared Name" });
+  const disk = { version: 2, currentProjectId: "shared_mod", projects: { shared_mod: existing } };
+  const hook = storage.api.useProjectData();
+  hook.importProject(imported);
+  hook.importProject(imported);
+  assert.equal(saved.length, 0, "Import waits for the initial disk load");
+  hydration.resolve(disk);
+  await settle();
+  await storage.internals.getQueue();
+  const cached = storage.internals.getCached();
+  const importIds = Object.keys(cached.projects).filter((id) => id !== "shared_mod");
+  assert.equal(importIds.length, 2);
+  assert.equal(cached.currentProjectId, importIds.at(-1));
+  assert.deepEqual(plain(cached.projects.shared_mod), plain(existing));
+  for (const id of importIds) assert.deepEqual(plain(cached.projects[id]), plain(imported));
+  assert.equal(saved.length, 1, "Autosave coalesces the queued imports into one complete snapshot");
+  assert.deepEqual(saved[0].data, plain(cached));
+  assert.equal(saved[0].options.deletedProjectIds.size, 0, "Import must not delete loaded projects");
+});
+
 test("edits during initial hydration apply to loaded projects and retain coalesced deletions", async () => {
   const hydration = deferred();
   const saved = [];

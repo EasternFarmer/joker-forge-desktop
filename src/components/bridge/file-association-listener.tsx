@@ -64,7 +64,7 @@ export function FileAssociationListener() {
         pushGlobalAlert({
           type: "success",
           title: "Import Complete",
-          message: `Imported ${fileName} (${sourceLabel} format).`,
+          message: `Imported ${fileName} as a new project (${sourceLabel} format).`,
         });
         return;
       }
