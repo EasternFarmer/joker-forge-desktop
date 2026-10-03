@@ -30,6 +30,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test updater and saving
+        run: |
+          npm run test:updater
+          npm run test:storage
+          npm run test:templates
+
       - name: Build frontend
         run: npm run build
 
@@ -52,3 +58,35 @@ jobs:
 
       - name: Run balatro-codegen tests
         run: cargo test -p balatro-codegen --manifest-path src-tauri/Cargo.toml
+
+  windows-updater-tests:
+    name: Windows Updater Tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Test native updater
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib release_updater::tests

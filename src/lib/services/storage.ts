@@ -132,6 +132,7 @@ let tauriStorePathsPromise: Promise<{
   projectsDir: string;
 }> | null = null;
 let persistQueue: Promise<void> = Promise.resolve();
+let persistedStoreRevision = 0;
 let pendingLocalStoreUpdate: StoreUpdateEventDetail | null = null;
 let localStoreUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
 let cachedProjectStore: ProjectStore | null = null;
@@ -1372,6 +1373,66 @@ const loadStoredStore = async (
 const getStoredStore = (): ProjectStore =>
   cachedProjectStore ?? loadStoreFromLocalStorage();
 
+const queueStorePersistence = (nextStore: ProjectStore, revision: number) => {
+  persistQueue = persistQueue
+    .then(async () => {
+      if (revision !== storeRevision) return;
+      try {
+        if (isTauriRuntime()) {
+          const deletedIds = new Map(pendingDeletedProjectIds);
+          await persistStoreToTauriFiles(nextStore, {
+            deletedProjectIds: new Set(deletedIds.keys()),
+          });
+          for (const [id, deletedAt] of deletedIds) {
+            if (pendingDeletedProjectIds.get(id) === deletedAt) {
+              pendingDeletedProjectIds.delete(id);
+            }
+          }
+        } else {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextStore));
+        }
+        persistedStoreRevision = revision;
+      } catch (error) {
+        console.warn("Error saving project store", error);
+        maybeShowStorageErrorAlert(error);
+      }
+    })
+    .catch((error) => {
+      console.warn("Unhandled persistence error", error);
+      maybeShowStorageErrorAlert(error);
+    });
+};
+
+/** Finish saving the latest edits before an update can close the app. */
+export const hasPendingProjectSaves = (): boolean =>
+  persistedStoreRevision < storeRevision || isResettingProjectData;
+
+export const flushPendingProjectSaves = async (): Promise<void> => {
+  if (typeof window === "undefined") return;
+  await loadStoredStore({ preferCache: true });
+  let retriedRevision: number | null = null;
+
+  for (;;) {
+    const queue = persistQueue;
+    const revision = storeRevision;
+    await queue;
+    // Edits can arrive while hydration or an earlier write is finishing.
+    if (queue !== persistQueue || revision !== storeRevision) continue;
+    if (isResettingProjectData) {
+      throw new Error("Wait for the project reset to finish before updating.");
+    }
+    if (persistedStoreRevision >= storeRevision) return;
+    if (retriedRevision === storeRevision || !cachedProjectStore) {
+      throw new Error(
+        "Your latest project changes could not be saved. Check free disk space and access to the app's data folder, then try again.",
+      );
+    }
+    // A previously failed autosave must be retryable without another edit.
+    retriedRevision = storeRevision;
+    queueStorePersistence(cachedProjectStore, storeRevision);
+  }
+};
+
 export const useProjectData = () => {
   const [store, setStore] = useState<ProjectStore>(getStoredStore);
   const [isHydrating, setIsHydrating] = useState<boolean>(
@@ -1455,38 +1516,7 @@ export const useProjectData = () => {
       sourceId: sourceIdRef.current,
     });
 
-    persistQueue = persistQueue
-      .then(async () => {
-        if (revision !== storeRevision) return;
-        if (isTauriRuntime()) {
-          const deletedIds = new Map(pendingDeletedProjectIds);
-          try {
-            await persistStoreToTauriFiles(nextStore, {
-              deletedProjectIds: new Set(deletedIds.keys()),
-            });
-            for (const [id, deletedAt] of deletedIds) {
-              if (pendingDeletedProjectIds.get(id) === deletedAt) {
-                pendingDeletedProjectIds.delete(id);
-              }
-            }
-            return;
-          } catch (error) {
-            console.warn("Error saving store to file", error);
-            maybeShowStorageErrorAlert(error);
-            return;
-          }
-        }
-
-        try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextStore));
-        } catch (error) {
-          console.warn("Error saving to localStorage", error);
-          maybeShowStorageErrorAlert(error);
-        }
-      })
-      .catch((error) => {
-        console.warn("Unhandled persistence error", error);
-      });
+    queueStorePersistence(nextStore, revision);
   }, []);
 
   const commitStore = useCallback(
@@ -1847,6 +1877,7 @@ export const resetProjectData = async (): Promise<boolean> => {
   window.localStorage.removeItem(THEME_PREFERENCE_KEY);
   clearThemeStorage();
   ++storeRevision;
+  persistedStoreRevision = storeRevision;
   cachedProjectStore = defaultStore;
   pendingDeletedProjectIds.clear();
   scheduleLocalStoreUpdate({ store: defaultStore, sourceId: "reset" });

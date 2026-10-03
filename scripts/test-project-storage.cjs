@@ -955,6 +955,173 @@ test("edits during initial hydration apply to loaded projects and retain coalesc
   assert.equal(saved[0].data.projects.a.metadata.name, "Early edit");
 });
 
+test("update save flush waits until the outstanding project write commits", async () => {
+  const write = deferred();
+  const saved = [];
+  let disk;
+  class PendingStore {
+    async load() { return disk; }
+    async save(data) { saved.push(plain(data)); await write.promise; }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), PendingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  api.useProjectData().updateMetadata({ name: "Latest edit" });
+  let flushed = false;
+  const flush = api.flushPendingProjectSaves().then(() => { flushed = true; });
+  await settle();
+  assert.equal(saved.length, 1);
+  assert.equal(flushed, false, "The updater must not close while writing");
+  write.resolve();
+  await flush;
+  assert.equal(flushed, true);
+  assert.equal(saved[0].projects.a.metadata.name, "Latest edit");
+});
+
+test("update save flush follows edits queued while the preceding write is pending", async () => {
+  const writes = [deferred(), deferred()];
+  const saved = [];
+  let disk;
+  class PendingStore {
+    async load() { return disk; }
+    async save(data) {
+      const index = saved.push(plain(data)) - 1;
+      await writes[index].promise;
+    }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), PendingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  const hook = api.useProjectData();
+  hook.updateMetadata({ name: "First edit" });
+  let flushed = false;
+  const flush = api.flushPendingProjectSaves().then(() => { flushed = true; });
+  await settle();
+  hook.updateMetadata({ name: "Edit during flush" });
+  writes[0].resolve();
+  await settle();
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1].projects.a.metadata.name, "Edit during flush");
+  assert.equal(flushed, false, "A later queued write must finish too");
+  writes[1].resolve();
+  await flush;
+  assert.equal(saved.length, 2, "Successful saves do not need an extra flush write");
+});
+
+test("update save flush waits for hydration and edits deferred before it completes", async () => {
+  const hydration = deferred();
+  const write = deferred();
+  const saved = [];
+  class PendingStore {
+    async load() { return hydration.promise; }
+    async save(data) { saved.push(plain(data)); await write.promise; }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), PendingStore);
+  const disk = desktopFixture(internals);
+  api.useProjectData().updateMetadata({ name: "Early edit" });
+  let flushed = false;
+  const flush = api.flushPendingProjectSaves().then(() => { flushed = true; });
+  await settle();
+  assert.equal(saved.length, 0);
+  assert.equal(flushed, false);
+  hydration.resolve(disk);
+  await settle();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].projects.a.metadata.name, "Early edit");
+  assert.equal(saved[0].projects.a.jokers[0].id, "original-joker");
+  assert.equal(flushed, false, "Hydration finishing alone cannot satisfy the flush");
+  write.resolve();
+  await flush;
+});
+
+test("update save flush blocks failed writes and can retry without another edit", async () => {
+  let disk;
+  let failing = true;
+  const saved = [];
+  class FailingStore {
+    async load() { return disk; }
+    async save(data) {
+      saved.push(plain(data));
+      if (failing) throw new Error("Disk full");
+    }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), FailingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  api.useProjectData().updateMetadata({ name: "Unsaved edit" });
+  await internals.getQueue();
+  await assert.rejects(api.flushPendingProjectSaves(), /latest project changes could not be saved/);
+  assert.equal(saved.length, 2, "One failed flush retry must not loop forever");
+  failing = false;
+  await api.flushPendingProjectSaves();
+  assert.equal(saved.length, 3, "Retry must save even when no new edit occurred");
+  assert.equal(saved[2].projects.a.metadata.name, "Unsaved edit");
+  await api.flushPendingProjectSaves();
+  assert.equal(saved.length, 3, "A committed revision remains clean");
+});
+
+test("a successful later autosave clears an earlier failure for update flushing", async () => {
+  let disk;
+  const saved = [];
+  class FailingStore {
+    async load() { return disk; }
+    async save(data) {
+      saved.push(plain(data));
+      if (saved.length === 1) throw new Error("Temporarily locked");
+    }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), FailingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  const hook = api.useProjectData();
+  hook.updateMetadata({ name: "Failed edit" });
+  await internals.getQueue();
+  hook.updateMetadata({ name: "Committed edit" });
+  await internals.getQueue();
+  await api.flushPendingProjectSaves();
+  assert.equal(saved.length, 2, "An old failure cannot block the latest committed revision");
+  assert.equal(saved[1].projects.a.metadata.name, "Committed edit");
+});
+
+test("update flush retries pending deletions along with the latest failed snapshot", async () => {
+  let disk;
+  const saved = [];
+  class FailingStore {
+    async load() { return disk; }
+    async save(data, options) {
+      saved.push({ data: plain(data), deleted: [...options.deletedProjectIds] });
+      if (saved.length === 1) throw new Error("Temporarily locked");
+    }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), FailingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  api.useProjectData().deleteProject("b");
+  await internals.getQueue();
+  await api.flushPendingProjectSaves();
+  assert.equal(saved.length, 2);
+  assert.deepEqual(saved[1].deleted, ["b"]);
+  assert.equal(saved[1].data.projects.b, undefined);
+});
+
+test("successful reset marks its default project saved for update flushing", async () => {
+  let disk;
+  const saved = [];
+  class PendingStore {
+    async load() { return disk; }
+    async save(data, options) { saved.push({ data: plain(data), options }); }
+  }
+  const { api, internals } = storageModule(new MemoryFs(), PendingStore);
+  disk = desktopFixture(internals);
+  await internals.loadStoredStore();
+  api.useProjectData().updateMetadata({ name: "Before reset" });
+  await internals.getQueue();
+  assert.equal(await api.resetProjectData(), true);
+  await api.flushPendingProjectSaves();
+  assert.equal(saved.length, 2, "Flush must not rewrite a successful reset");
+  assert.equal(saved[1].options.reset, true);
+});
+
 test("a failed reset waits for earlier saves and preserves preferences and active projects", async () => {
   const earlierSave = deferred();
   const resetSave = deferred();

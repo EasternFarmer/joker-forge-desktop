@@ -16,6 +16,8 @@
     "preview": "vite preview",
     "test:storage": "node --test scripts/test-project-storage.cjs",
     "test:rules": "node --test scripts/test-rule-parameters.cjs",
+    "test:updater": "node --test scripts/test-release-updater.cjs",
+    "test:templates": "node --test scripts/test-template-storage.cjs",
     "test:codegen": "node --test scripts/test-codegen-inputs.cjs && cargo test --manifest-path src-tauri/Cargo.toml -p balatro-codegen",
     "test:codegen:lua": "python scripts/test-codegen-lua.py",
     "tauri": "tauri",

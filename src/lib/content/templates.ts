@@ -92,6 +92,10 @@ let tauriStorePathPromise: Promise<{
   templatesDir: string;
 }> | null = null;
 let persistQueue: Promise<void> = Promise.resolve();
+let templateStoreRevision = 0;
+let persistedTemplateStoreRevision = 0;
+let pendingTemplateHydrations = 0;
+let latestTemplateStore: TemplateStore | null = null;
 
 const DEFAULT_TEMPLATE_STORE: TemplateStore = {
   version: 1,
@@ -673,6 +677,20 @@ const loadStoreFromFolderTemplates = async (): Promise<TemplateStore | null> => 
   return { version: 1, templates };
 };
 
+const persistLoadedTemplateStore = async (store: TemplateStore): Promise<void> => {
+  try {
+    await persistStore(store);
+  } catch (error) {
+    // Loading falls back after a migration failure. Keep that failed write dirty
+    // so the update flush can retry it instead of treating the library as saved.
+    if (templateStoreRevision === persistedTemplateStoreRevision || !latestTemplateStore) {
+      latestTemplateStore = store;
+    }
+    ++templateStoreRevision;
+    throw error;
+  }
+};
+
 const loadStoreFromDisk = async (): Promise<TemplateStore> => {
   if (isTauriRuntime()) {
     try {
@@ -686,7 +704,7 @@ const loadStoreFromDisk = async (): Promise<TemplateStore> => {
       const { currentStorePath } = await getTauriStorePaths();
       const fileContent = await readTextFile(currentStorePath);
       const parsed = sanitizeTemplateStore(JSON.parse(fileContent));
-      await persistStore(parsed);
+      await persistLoadedTemplateStore(parsed);
       return parsed;
     } catch {
       try {
@@ -694,7 +712,7 @@ const loadStoreFromDisk = async (): Promise<TemplateStore> => {
         const legacyContent = await readTextFile(legacyStorePath);
         const migrated =
           parseRawTemplateText(legacyContent) ?? DEFAULT_TEMPLATE_STORE;
-        await persistStore(migrated);
+        await persistLoadedTemplateStore(migrated);
         return migrated;
       } catch {
         // fallback to local storage below
@@ -711,6 +729,59 @@ const loadStoreFromDisk = async (): Promise<TemplateStore> => {
   }
 
   return DEFAULT_TEMPLATE_STORE;
+};
+
+const loadQueuedTemplateStore = (): Promise<TemplateStore> => {
+  const revision = templateStoreRevision;
+  ++pendingTemplateHydrations;
+  // Migration writes use the same queue as edits so an update can wait for both.
+  const load = persistQueue
+    .then(loadStoreFromDisk)
+    .then((loaded) => {
+      if (latestTemplateStore && (
+        revision !== templateStoreRevision ||
+        persistedTemplateStoreRevision < templateStoreRevision
+      )) return latestTemplateStore;
+      return loaded;
+    })
+    .finally(() => { --pendingTemplateHydrations; });
+  persistQueue = load.then(() => {}).catch((error) => {
+    console.error("Failed to load templates", error);
+  });
+  return load;
+};
+
+const queueTemplatePersistence = (store: TemplateStore, revision: number) => {
+  persistQueue = persistQueue
+    .then(async () => {
+      await persistStore(store);
+      persistedTemplateStoreRevision = revision;
+    })
+    .catch((error) => {
+      console.error("Failed to persist templates", error);
+    });
+};
+
+export const hasPendingTemplateSaves = (): boolean =>
+  templateStoreRevision > persistedTemplateStoreRevision || pendingTemplateHydrations > 0;
+
+/** Finish library writes before updating; retry a failed save without a new edit. */
+export const flushPendingTemplateSaves = async (): Promise<void> => {
+  let retriedRevision: number | null = null;
+  for (;;) {
+    const queue = persistQueue;
+    const revision = templateStoreRevision;
+    await queue;
+    if (queue !== persistQueue || revision !== templateStoreRevision) continue;
+    if (!hasPendingTemplateSaves()) return;
+    if (retriedRevision === templateStoreRevision || !latestTemplateStore) {
+      throw new Error(
+        "Your latest template changes could not be saved. Check free disk space and access to the app's data folder, then try again.",
+      );
+    }
+    retriedRevision = templateStoreRevision;
+    queueTemplatePersistence(latestTemplateStore, templateStoreRevision);
+  }
 };
 
 const dispatchTemplateStoreEvent = (store: TemplateStore, sourceId: string) => {
@@ -949,11 +1020,8 @@ export const useTemplateStore = (): TemplateStoreApi => {
 
   const saveStore = useCallback(
     (nextStore: TemplateStore) => {
-      persistQueue = persistQueue
-        .then(() => persistStore(nextStore))
-        .catch((error) => {
-          console.error("Failed to persist templates", error);
-        });
+      latestTemplateStore = nextStore;
+      queueTemplatePersistence(nextStore, ++templateStoreRevision);
       queueMicrotask(() => {
         dispatchTemplateStoreEvent(nextStore, sourceId);
       });
@@ -965,7 +1033,7 @@ export const useTemplateStore = (): TemplateStoreApi => {
     let isMounted = true;
 
     const hydrate = async () => {
-      const nextStore = await loadStoreFromDisk();
+      const nextStore = await loadQueuedTemplateStore();
       if (!isMounted) return;
       setStore(nextStore);
       setIsHydrating(false);
