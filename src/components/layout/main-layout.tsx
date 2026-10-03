@@ -6,6 +6,7 @@ import { motion } from "framer-motion";
 import { GlobalAlerts } from "./global-alerts";
 import { useAlertQueue } from "@/hooks/use-alert-queue";
 import { runBalatroAutofind } from "@/lib/balatro/balatro-autofind";
+import { useProjectData } from "@/lib/services/storage";
 import {
   GLOBAL_ALERTS_EVENT,
   type GlobalAlertsEventDetail,
@@ -17,6 +18,7 @@ interface MainLayoutProps {
 }
 
 export function MainLayout({ children, pageTitle }: MainLayoutProps) {
+  const { isHydrating } = useProjectData();
   const [isPinned, setIsPinned] = useState(false);
   const [isHoverOpen, setIsHoverOpen] = useState(false);
   const [hasOpenDialog, setHasOpenDialog] = useState(false);
@@ -134,6 +136,20 @@ export function MainLayout({ children, pageTitle }: MainLayoutProps) {
       window.removeEventListener(GLOBAL_ALERTS_EVENT, handleGlobalAlerts);
     };
   }, [pushAlerts]);
+
+  // Collection actions can capture the initially empty arrays in their event
+  // handlers. Mount the editors only after loading the saved projects.
+  if (isHydrating) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background text-foreground">
+        <TitleBar />
+        <GlobalAlerts alerts={alerts} onDismiss={dismissAlert} />
+        <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
+          Loading projects…
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-background overflow-hidden text-foreground transition-colors duration-300">

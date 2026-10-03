@@ -14,6 +14,7 @@
     "build-stable": "npm run prepare:stable && npx tauri build",
     "build-nightly": "npm run prepare:nightly && npx tauri build",
     "preview": "vite preview",
+    "test:storage": "node --test scripts/test-project-storage.cjs",
     "tauri": "tauri",
     "codegen:item": "cargo run --manifest-path src-tauri/Cargo.toml -- codegen-item",
     "codegen": "npm run codegen:item --",

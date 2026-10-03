@@ -7,6 +7,7 @@ import {
   readDir,
   readTextFile,
   remove,
+  rename,
   writeFile,
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
@@ -33,6 +34,7 @@ import { updateDataRegistry } from "@/lib/balatro/balatro-utils";
 import { pushGlobalAlert } from "@/lib/app/global-alerts-bus";
 import { clearThemeStorage } from "@/lib/app/theme-manager";
 import { ensureUniqueItemOrderValues } from "@/lib/items/item-order";
+import { ProjectFileStore } from "@/lib/services/project-file-store";
 
 export interface ProjectStats {
   jokers: number;
@@ -120,7 +122,6 @@ const THEME_PREFERENCE_KEY = "joker_forge_theme_preference";
 const THEME_CHANGE_EVENT = "joker_forge_theme_change";
 const STORAGE_ERROR_ALERT_THROTTLE_MS = 4000;
 const RECENT_ACTIVITY_LIMIT = 10;
-const PROJECT_FILE_NAME = "project.json";
 const ASSET_REF_PREFIX = "asset://";
 
 let lastStorageErrorAlertAt = 0;
@@ -136,6 +137,10 @@ let localStoreUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
 let cachedProjectStore: ProjectStore | null = null;
 let loadStoredStorePromise: Promise<ProjectStore> | null = null;
 let storeRevision = 0;
+const pendingDeletedProjectIds = new Map<string, number>();
+let isResettingProjectData = false;
+let projectResetEpoch = 0;
+const reportedStorageWarnings = new Set<string>();
 
 type StoreUpdateEventDetail = {
   store: ProjectStore;
@@ -193,12 +198,6 @@ const getTauriStorePaths = async (): Promise<{
   return tauriStorePathsPromise;
 };
 
-const ensureTauriStoreDirectories = async (): Promise<void> => {
-  const paths = await getTauriStorePaths();
-  await mkdir(paths.rootDir, { recursive: true });
-  await mkdir(paths.projectsDir, { recursive: true });
-};
-
 const isQuotaExceededError = (error: unknown): boolean => {
   if (!(error instanceof DOMException)) return false;
   return error.name === "QuotaExceededError" || error.code === 22;
@@ -226,7 +225,20 @@ const maybeShowStorageErrorAlert = (error: unknown) => {
   pushGlobalAlert({
     type: "danger",
     title: "Save Failed",
-    message: "Failed to save project data to local storage.",
+    message: isTauriRuntime()
+      ? "Your latest changes could not be saved. The previous saved projects have been kept. Keep the app open and try again."
+      : "Failed to save project data to local storage.",
+  });
+};
+
+const showStorageWarning = (message: string, error?: unknown) => {
+  console.warn(message, error ?? "");
+  if (reportedStorageWarnings.has(message)) return;
+  reportedStorageWarnings.add(message);
+  pushGlobalAlert({
+    type: "caution",
+    title: "Project Recovery",
+    message,
   });
 };
 
@@ -743,23 +755,15 @@ const createDefaultStore = (): ProjectStore => ({
   projects: { [DEFAULT_METADATA.id]: DEFAULT_DATA },
 });
 
-type SegmentedSettingsStore = {
-  version: 1;
-  currentProjectId: string;
+const createRecoveryStore = (): ProjectStore => {
+  // Keep the editor's temporary project distinct from any unreadable disk ID.
+  const id = `recovery_${crypto.randomUUID()}`;
+  return {
+    version: 2,
+    currentProjectId: id,
+    projects: { [id]: { ...DEFAULT_DATA, metadata: { ...DEFAULT_METADATA, id } } },
+  };
 };
-
-const serializeStoreToSegmented = (
-  store: ProjectStore,
-): {
-  settings: SegmentedSettingsStore;
-  projects: Record<string, ProjectData>;
-} => ({
-  settings: {
-    version: 1,
-    currentProjectId: store.currentProjectId,
-  },
-  projects: store.projects,
-});
 
 const toSafeFileStem = (value: string): string => {
   const normalized = value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
@@ -843,8 +847,9 @@ const assetRefToRelativePath = (value: string): string | null => {
   if (
     !relativePath ||
     relativePath.includes("..") ||
-    relativePath.startsWith("/") ||
-    relativePath.startsWith("\\")
+    !relativePath.split("/").every((part) =>
+      Boolean(part) && !/[<>:"\\|?*\x00-\x1F]/.test(part),
+    )
   ) {
     return null;
   }
@@ -902,14 +907,12 @@ const resolveImageAsset = async (
   value: string,
 ): Promise<string> => {
   const relativePath = assetRefToRelativePath(value);
-  if (!relativePath) return value;
+  if (!relativePath) throw new Error("Invalid saved artwork reference.");
 
-  try {
-    const bytes = await readFile(await join(assetsRoot, ...relativePath.split("/")));
-    return `data:${getMimeFromAssetPath(relativePath)};base64,${bytesToBase64(bytes)}`;
-  } catch {
-    return "";
-  }
+  // A missing asset makes this snapshot incomplete. Let the loader recover the
+  // previous snapshot instead of saving an empty image over the reference.
+  const bytes = await readFile(await join(assetsRoot, ...relativePath.split("/")));
+  return `data:${getMimeFromAssetPath(relativePath)};base64,${bytesToBase64(bytes)}`;
 };
 
 const externalizeProjectImages = async (
@@ -917,6 +920,11 @@ const externalizeProjectImages = async (
   assetsRoot: string,
 ): Promise<ProjectData> => {
   const next = cloneProjectData(project);
+  const assertHydratedImage = (value: unknown): void => {
+    if (isAssetRef(value)) throw new Error("Unresolved saved artwork reference.");
+  };
+  assertHydratedImage(next.metadata.iconImage);
+  assertHydratedImage(next.metadata.gameImage);
 
   if (isImageDataUrl(next.metadata.iconImage)) {
     next.metadata.iconImage = await writeImageAsset(
@@ -945,6 +953,8 @@ const externalizeProjectImages = async (
       );
       const basePath = `${key}/${itemSegment}`;
 
+      assertHydratedImage(item.image);
+      assertHydratedImage(item.overlayImage);
       if (isImageDataUrl(item.image)) {
         item.image = await writeImageAsset(assetsRoot, `${basePath}/image`, item.image);
       }
@@ -958,10 +968,13 @@ const externalizeProjectImages = async (
 
       const layers = item.imageLayers;
       if (Array.isArray(layers)) {
+        const usedLayerSegments = new Set<string>();
         for (const layer of layers as Array<Record<string, unknown>>) {
+          assertHydratedImage(layer.imageDataUrl);
           if (!isImageDataUrl(layer.imageDataUrl)) continue;
-          const layerId = toSafeAssetSegment(
+          const layerId = allocateAssetSegment(
             typeof layer.id === "string" ? layer.id : "layer",
+            usedLayerSegments,
           );
           layer.imageDataUrl = await writeImageAsset(
             assetsRoot,
@@ -1018,57 +1031,40 @@ const hydrateProjectImages = async (
   return next;
 };
 
-const persistStoreToTauriFiles = async (store: ProjectStore): Promise<void> => {
-  const paths = await getTauriStorePaths();
-  await ensureTauriStoreDirectories();
+let tauriProjectFiles: ProjectFileStore<ProjectData> | null = null;
 
-  const segmented = serializeStoreToSegmented(store);
-  await writeTextFile(paths.settingsPath, JSON.stringify(segmented.settings));
-
-  const existingEntries = await readDir(paths.projectsDir);
-  const existingProjectEntries = existingEntries
-    .filter((entry) => typeof entry.name === "string")
-    .map((entry) => ({
-      name: entry.name as string,
-      isDirectory: Boolean(entry.isDirectory),
-    }));
-
-  const expectedEntries = new Set<string>();
-  for (const [projectId, project] of Object.entries(segmented.projects)) {
-    const projectDirName = toSafeFileStem(projectId);
-    expectedEntries.add(projectDirName);
-    const projectDir = await join(paths.projectsDir, projectDirName);
-    const assetsRoot = await join(projectDir, "assets");
-    await mkdir(projectDir, { recursive: true });
-
-    if (await exists(assetsRoot)) {
-      await remove(assetsRoot, { recursive: true });
-    }
-    await mkdir(assetsRoot, { recursive: true });
-
-    const projectForStorage = await externalizeProjectImages(project, assetsRoot);
-    await writeTextFile(
-      await join(projectDir, PROJECT_FILE_NAME),
-      JSON.stringify({
-        version: 1,
-        projectId,
-        project: projectForStorage,
-      }),
-    );
+const getTauriProjectFiles = (): ProjectFileStore<ProjectData> => {
+  if (!tauriProjectFiles) {
+    tauriProjectFiles = new ProjectFileStore<ProjectData>({
+      fs: { join, exists, mkdir, readDir, readTextFile, writeTextFile, rename, remove },
+      getPaths: getTauriStorePaths,
+      externalize: externalizeProjectImages,
+      hydrate: async (raw, assetsRoot) => {
+        const candidate = raw as Partial<ProjectData> | null;
+        if (
+          !candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
+          !candidate.metadata || typeof candidate.metadata !== "object" ||
+          Array.isArray(candidate.metadata) ||
+          collectionAssetKeys.some((key) =>
+            candidate[key] !== undefined && !Array.isArray(candidate[key]),
+          )
+        ) {
+          throw new Error("Invalid saved project data.");
+        }
+        const project = sanitizeProjectData(raw);
+        return assetsRoot ? hydrateProjectImages(project, assetsRoot) : project;
+      },
+      warn: showStorageWarning,
+    });
   }
+  return tauriProjectFiles;
+};
 
-  for (const existingEntry of existingProjectEntries) {
-    const isLegacyJsonFile =
-      !existingEntry.isDirectory && existingEntry.name.toLowerCase().endsWith(".json");
-    if (!isLegacyJsonFile && expectedEntries.has(existingEntry.name)) continue;
-    if (!isLegacyJsonFile && !existingEntry.isDirectory) continue;
-    const obsoletePath = await join(paths.projectsDir, existingEntry.name);
-    try {
-      await remove(obsoletePath, { recursive: existingEntry.isDirectory });
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
+const persistStoreToTauriFiles = async (
+  store: ProjectStore,
+  options: { deletedProjectIds?: ReadonlySet<string>; reset?: boolean } = {},
+): Promise<void> => {
+  await getTauriProjectFiles().save(store, options);
 };
 
 // --- Sanitization Logic ---
@@ -1311,61 +1307,14 @@ const loadStoreFromLocalStorage = (): ProjectStore => {
 
 const loadStoreFromTauriFile = async (): Promise<ProjectStore | null> => {
   if (!isTauriRuntime()) return null;
-
-  try {
-    const paths = await getTauriStorePaths();
-    const settingsRaw = await readTextFile(paths.settingsPath);
-    const settingsParsed = JSON.parse(settingsRaw) as Partial<SegmentedSettingsStore>;
-
-    const projectEntries = await readDir(paths.projectsDir);
-    const projects: Record<string, ProjectData> = {};
-
-    for (const entry of projectEntries) {
-      if (!entry.name) continue;
-      try {
-        const projectPath = await join(paths.projectsDir, entry.name);
-        const filePath = entry.isDirectory
-          ? await join(projectPath, PROJECT_FILE_NAME)
-          : entry.name.endsWith(".json")
-            ? projectPath
-            : "";
-        if (!filePath) continue;
-
-        const raw = await readTextFile(filePath);
-        const parsed = JSON.parse(raw) as {
-          projectId?: unknown;
-          project?: unknown;
-        };
-        if (typeof parsed.projectId !== "string") continue;
-        const project = sanitizeProjectData(parsed.project);
-        projects[parsed.projectId] = entry.isDirectory
-          ? await hydrateProjectImages(
-              project,
-              await join(projectPath, "assets"),
-            )
-          : project;
-      } catch {
-        // Ignore broken project files and continue loading others.
-      }
-    }
-
-    const projectIds = Object.keys(projects);
-    if (projectIds.length === 0) return null;
-    const fallbackId = projectIds[0];
-    const currentProjectId =
-      typeof settingsParsed.currentProjectId === "string" &&
-      projects[settingsParsed.currentProjectId]
-        ? settingsParsed.currentProjectId
-        : fallbackId;
-
-    return {
-      version: 2,
-      currentProjectId,
-      projects,
-    };
-  } catch {
-    return null;
+  const loaded = await getTauriProjectFiles().load();
+  if (!loaded) return null;
+  if (Object.keys(loaded.projects).length === 0) {
+    // Damaged projects remain on disk. Use a separate new project in the editor
+    // so autosave cannot replace one of the unreadable project identities.
+    return createRecoveryStore();
   }
+  return { version: 2, ...loaded };
 };
 
 const loadStoredStore = async (
@@ -1386,7 +1335,12 @@ const loadStoredStore = async (
         const paths = await getTauriStorePaths();
         const legacyRaw = await readTextFile(paths.legacyStorePath);
         const migrated = sanitizeStoreFromUnknown(JSON.parse(legacyRaw));
-        await persistStoreToTauriFiles(migrated);
+        try {
+          await persistStoreToTauriFiles(migrated);
+        } catch (error) {
+          // The legacy file remains the recovery source if migration fails.
+          maybeShowStorageErrorAlert(error);
+        }
         return migrated;
       } catch {
         // No legacy file or invalid legacy data.
@@ -1395,6 +1349,13 @@ const loadStoredStore = async (
 
     return loadStoreFromLocalStorage();
   })()
+    .catch((error) => {
+      showStorageWarning(
+        "Saved projects could not be read. Their files have been kept. Check access to the app's data folder and restart the app.",
+        error,
+      );
+      return isTauriRuntime() ? createRecoveryStore() : createDefaultStore();
+    })
     .then((nextStore) => {
       if (loadStartedAtRevision === storeRevision || !cachedProjectStore) {
         cachedProjectStore = nextStore;
@@ -1480,6 +1441,14 @@ export const useProjectData = () => {
 
   const saveStore = useCallback((nextStore: ProjectStore) => {
     const revision = ++storeRevision;
+    // Keep deletions outside individual queued snapshots: autosave coalescing
+    // may skip the first save following a delete.
+    for (const id of Object.keys(cachedProjectStore?.projects ?? {})) {
+      if (!Object.prototype.hasOwnProperty.call(nextStore.projects, id)) {
+        pendingDeletedProjectIds.set(id, revision);
+      }
+    }
+    for (const id of Object.keys(nextStore.projects)) pendingDeletedProjectIds.delete(id);
     cachedProjectStore = nextStore;
     scheduleLocalStoreUpdate({
       store: nextStore,
@@ -1490,12 +1459,21 @@ export const useProjectData = () => {
       .then(async () => {
         if (revision !== storeRevision) return;
         if (isTauriRuntime()) {
+          const deletedIds = new Map(pendingDeletedProjectIds);
           try {
-            await persistStoreToTauriFiles(nextStore);
+            await persistStoreToTauriFiles(nextStore, {
+              deletedProjectIds: new Set(deletedIds.keys()),
+            });
+            for (const [id, deletedAt] of deletedIds) {
+              if (pendingDeletedProjectIds.get(id) === deletedAt) {
+                pendingDeletedProjectIds.delete(id);
+              }
+            }
             return;
           } catch (error) {
             console.warn("Error saving store to file", error);
             maybeShowStorageErrorAlert(error);
+            return;
           }
         }
 
@@ -1515,11 +1493,21 @@ export const useProjectData = () => {
     (updater: (previous: ProjectStore) => ProjectStore) => {
       // React may replay state updaters. Resolve and persist the mutation once,
       // then give React the finished snapshot so replay cannot duplicate it.
-      const previous = cachedProjectStore ?? getStoredStore();
-      const nextStore = updater(previous);
-      if (nextStore === previous) return;
-      saveStore(nextStore);
-      setStore(nextStore);
+      const resetEpoch = projectResetEpoch;
+      const applyUpdate = () => {
+        if (isResettingProjectData || resetEpoch !== projectResetEpoch) return;
+        const previous = cachedProjectStore ?? getStoredStore();
+        const nextStore = updater(previous);
+        if (nextStore === previous) return;
+        saveStore(nextStore);
+        setStore(nextStore);
+      };
+      if (isTauriRuntime() && cachedProjectStore === null) {
+        // Apply early clicks to the loaded projects, never the temporary default.
+        void loadStoredStore({ preferCache: true }).then(applyUpdate);
+      } else {
+        applyUpdate();
+      }
     },
     [saveStore],
   );
@@ -1837,8 +1825,29 @@ export const useProjectData = () => {
   };
 };
 
-export const resetProjectData = () => {
-  if (typeof window === "undefined") return;
+export const resetProjectData = async (): Promise<boolean> => {
+  if (typeof window === "undefined" || isResettingProjectData) return false;
+  isResettingProjectData = true;
+  ++projectResetEpoch;
+  const defaultStore = createDefaultStore();
+  try {
+    if (isTauriRuntime()) {
+      // Initial migration also writes files. Finish it before queuing a reset,
+      // so a late migration cannot restore projects after the reset commits.
+      if (loadStoredStorePromise) await loadStoredStorePromise;
+      else await loadStoredStore({ preferCache: true });
+      const reset = persistQueue.then(() =>
+        persistStoreToTauriFiles(defaultStore, { reset: true }),
+      );
+      persistQueue = reset.catch(() => {});
+      await reset;
+    }
+  } catch (error) {
+    console.warn("Error resetting file-backed store", error);
+    maybeShowStorageErrorAlert(error);
+    isResettingProjectData = false;
+    return false;
+  }
   window.localStorage.removeItem(STORAGE_KEY);
   window.localStorage.removeItem(CONFIRM_DELETE_KEY);
   window.localStorage.removeItem(BALATRO_APPDATA_PATH_KEY);
@@ -1858,25 +1867,12 @@ export const resetProjectData = () => {
   window.localStorage.removeItem(RULE_BUILDER_SETTINGS_KEY);
   window.localStorage.removeItem(THEME_PREFERENCE_KEY);
   clearThemeStorage();
-  if (isTauriRuntime()) {
-    const defaultStore = createDefaultStore();
-    persistQueue = persistQueue
-      .then(async () => {
-        try {
-          const paths = await getTauriStorePaths();
-          if (await exists(paths.projectsDir)) {
-            await remove(paths.projectsDir, { recursive: true });
-          }
-          await persistStoreToTauriFiles(defaultStore);
-        } catch (error) {
-          console.warn("Error resetting file-backed store", error);
-        }
-      })
-      .catch((error) => {
-        console.warn("Unhandled reset persistence error", error);
-      });
-  }
-  window.dispatchEvent(new Event(EVENT_KEY));
+  ++storeRevision;
+  cachedProjectStore = defaultStore;
+  pendingDeletedProjectIds.clear();
+  scheduleLocalStoreUpdate({ store: defaultStore, sourceId: "reset" });
+  isResettingProjectData = false;
+  return true;
 };
 
 export const getThemePreference = (): ThemePreference => {
