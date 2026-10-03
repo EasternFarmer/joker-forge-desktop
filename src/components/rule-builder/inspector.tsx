@@ -6,7 +6,6 @@ import type {
   RandomGroup,
   ConditionParameter,
   EffectParameter,
-  ShowWhenCondition,
   LoopGroup,
 } from "./types";
 import { getModPrefix } from "@/lib/balatro/balatro-utils";
@@ -32,6 +31,7 @@ import {
   getConditionTypeById,
   getEffectTypeById,
 } from "./rule-catalog";
+import { isParameterVisible } from "./parameter-visibility";
 
 import { Input as InputField } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -418,15 +418,6 @@ const ChanceInput: React.FC<ChanceInputProps> = React.memo(
 
 ChanceInput.displayName = "ChanceInput";
 
-function hasShowWhen(
-  param: ConditionParameter | EffectParameter | undefined,
-): param is (ConditionParameter | EffectParameter) & {
-  showWhen: ShowWhenCondition;
-} {
-  if (!param || !param.showWhen) return false;
-  else return "showWhen" in param;
-}
-
 const ParameterField: React.FC<ParameterFieldProps> = ({
   param,
   item,
@@ -500,44 +491,11 @@ const ParameterField: React.FC<ParameterFieldProps> = ({
     value,
   ]);
 
-  if (hasShowWhen(param)) {
-    let showing = true;
-    let currentParam: ConditionParameter | EffectParameter | undefined = param;
-    const parentObject = isEffect
-      ? getEffectTypeById(selectedEffect?.type || "")
-      : getConditionTypeById(selectedCondition?.type || "");
-
-    while (showing && currentParam && hasShowWhen(currentParam)) {
-      const { parameter, values }: ShowWhenCondition = currentParam.showWhen;
-      const parentValue = parentValues[parameter]?.value;
-      const isConsumableSpecificCardGuard =
-        currentParam.id === "specific_card" &&
-        (parameter === "set" || parameter === "consumable_type");
-      if (isConsumableSpecificCardGuard) {
-        const normalized = String(parentValue ?? "")
-          .trim()
-          .toLowerCase();
-        if (normalized === "random" || normalized === "any" || normalized === "keyvar") {
-          showing = false;
-        }
-        currentParam = parentObject?.params.find((param) => param.id === parameter);
-        continue;
-      }
-      if (Array.isArray(parentValue) && typeof parentValue[0] === "boolean") {
-        if (!values.some((item) => parentValue[parseFloat(item)])) {
-          showing = false;
-        }
-      } else if (typeof parentValue === "string") {
-        if (!values.includes(parentValue)) {
-          showing = false;
-        }
-      }
-
-      currentParam = parentObject?.params.find(
-        (param) => param.id === parameter,
-      );
-    }
-    if (showing === false) return false;
+  const parentObject = isEffect
+    ? getEffectTypeById(selectedEffect?.type || "")
+    : getConditionTypeById(selectedCondition?.type || "");
+  if (!isParameterVisible(param, parentObject?.params ?? [], parentValues)) {
+    return null;
   }
 
   switch (param.type) {
@@ -1572,30 +1530,9 @@ const Inspector: React.FC<InspectorProps> = ({
     const conditionType = getConditionTypeById(selectedCondition.type);
 
     if (!conditionType) return null;
-    const paramsToRender = conditionType.params.filter((param) => {
-      let showing = true;
-      let currentParam: ConditionParameter | undefined = param;
-
-      while (showing && currentParam && hasShowWhen(currentParam)) {
-        const { parameter, values }: ShowWhenCondition = currentParam.showWhen;
-        const parentValue = selectedCondition.params[parameter].value;
-
-        if (Array.isArray(parentValue) && typeof parentValue[0] === "boolean") {
-          if (!values.some((value) => parentValue[parseFloat(value)])) {
-            showing = false;
-          }
-        } else if (typeof parentValue === "string") {
-          if (!values.includes(parentValue)) {
-            showing = false;
-          }
-        }
-
-        currentParam = conditionType?.params.find(
-          (param) => param.id === parameter,
-        );
-      }
-      return showing;
-    });
+    const paramsToRender = conditionType.params.filter((param) =>
+      isParameterVisible(param, conditionType.params, selectedCondition.params),
+    );
 
     return (
       <div className="space-y-3">
@@ -1921,8 +1858,9 @@ const Inspector: React.FC<InspectorProps> = ({
       if (param.type == "checkbox") {
         let index = 0;
         param.checkboxOptions?.map((box) => {
-          const checklist = selectedEffect.params[param.id]
-            .value as Array<boolean>;
+          const checklist = selectedEffect.params[param.id]?.value as
+            | Array<boolean>
+            | undefined;
           if (checklist) {
             box.checked = !checklist[index] ? false : true;
             index += 1;
@@ -1930,28 +1868,7 @@ const Inspector: React.FC<InspectorProps> = ({
         });
       }
 
-      let showing = true;
-      let currentParam: EffectParameter | undefined = param;
-
-      while (showing && currentParam && hasShowWhen(currentParam)) {
-        const { parameter, values }: ShowWhenCondition = currentParam.showWhen;
-        const parentValue = selectedEffect.params[parameter].value;
-
-        if (Array.isArray(parentValue) && typeof parentValue[0] === "boolean") {
-          if (!values.some((value) => parentValue[parseFloat(value)])) {
-            showing = false;
-          }
-        } else if (typeof parentValue === "string") {
-          if (!values.includes(parentValue)) {
-            showing = false;
-          }
-        }
-
-        currentParam = effectType?.params.find(
-          (param) => param.id === parameter,
-        );
-      }
-      return showing;
+      return isParameterVisible(param, effectType.params, selectedEffect.params);
     });
 
     const isInRandomGroup = selectedRule.randomGroups.some((group) =>
@@ -2076,6 +1993,18 @@ const Inspector: React.FC<InspectorProps> = ({
                         ...selectedEffect.params,
                         [param.id]: item,
                       };
+                      if (
+                        (param.id === "consumable_type" || param.id === "set") &&
+                        selectedEffect.params[param.id]?.value !== item.value &&
+                        effectType.params.some(
+                          (definition) =>
+                            definition.id === "specific_card" &&
+                            definition.optionSource === "allConsumables",
+                        )
+                      ) {
+                        // A card from the previous set is not a valid target.
+                        newParams.specific_card = { value: "random" };
+                      }
                       onUpdateEffect(selectedRule.id, selectedEffect.id, {
                         params: newParams,
                       });

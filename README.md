@@ -120,6 +120,16 @@ Payload shape:
 
 Stable and nightly install side-by-side as separate apps.
 
+## App Updates
+
+- Stable builds offer published stable releases only; beta/RC releases and nightlies are excluded.
+- Nightly builds offer published nightly prereleases. Version comparison chooses the newest eligible version.
+- Windows downloads the matching NSIS installer from this repository, checks its size and SHA256 digest when GitHub supplies them, and verifies the saved file again before installation. Updates wait for pending project and template-library saves, then restart the app after a successful installation.
+- Linux and macOS use **Download Update** to open the official release page. Download the package for your computer, close Joker Forge, and follow its normal installation steps.
+- Failed downloads or saves keep the app open and offer a retry or manual download.
+
+Run `npm run test:updater` for update policy and handoff regression tests, `npm run test:storage` for project save/recovery coverage, and `npm run test:templates` for template-library persistence. Native updater tests run with `cargo test --manifest-path src-tauri/Cargo.toml --lib release_updater::tests`.
+
 ## Nightly Releases
 
 - Workflow file: `.github/workflows/nightly-release.yml`

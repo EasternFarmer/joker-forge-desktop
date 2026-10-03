@@ -269,6 +269,12 @@ export default function ConsumablesPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: ConsumableData, b: ConsumableData) =>
+          a.orderValue - b.orderValue,
+      },
+      {
         label: "Set",
         value: "set",
         sortFn: (a: ConsumableData, b: ConsumableData) =>

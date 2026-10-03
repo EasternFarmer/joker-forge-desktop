@@ -219,6 +219,11 @@ export default function EditionsPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: EditionData, b: EditionData) => a.orderValue - b.orderValue,
+      },
+      {
         label: "Name",
         value: "name",
         sortFn: (a: EditionData, b: EditionData) =>

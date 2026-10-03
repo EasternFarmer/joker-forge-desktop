@@ -227,6 +227,12 @@ export default function EnhancementsPage() {
   const sortOptions = useMemo(
     () => [
       {
+        label: "ID Order",
+        value: "orderValue",
+        sortFn: (a: EnhancementData, b: EnhancementData) =>
+          a.orderValue - b.orderValue,
+      },
+      {
         label: "Name",
         value: "name",
         sortFn: (a: EnhancementData, b: EnhancementData) =>

@@ -243,7 +243,8 @@ pub(crate) enum PassiveHookSpec {
         joker_key: String,
         discount_type: String,
         discount_method: String,
-        discount_amount: f64,
+        discount_amount: String,
+        condition: Option<String>,
     },
     ReduceFlushStraightRequirements {
         joker_key: String,
@@ -302,14 +303,25 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     // Check for passive effects
     let mut passive_outputs = Vec::new();
     let mut passive_hooks = Vec::new();
+    let mut effect_outputs = Vec::new();
     if is_passive {
         for (index, effect) in rule.effects.iter().enumerate() {
             ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             let config_start = ctx.config_vars().len();
+            // Vouchers retain discounts for the run after redemption, whereas
+            // Jokers supply their discounts only while held.
+            if ctx.object_type == ObjectType::Voucher && effect.effect_type == "discount_items" {
+                if let Some(mut eo) = effects::compile_effect(effect, ctx, "card_used") {
+                    eo.segment_id = effect_segment_id(&rule.id, effect);
+                    effect_outputs.push(eo);
+                }
+                ctx.record_effect_config_names(&effect.id, config_start);
+                continue;
+            }
             if let Some(po) = effects::passive::compile_passive(effect, ctx) {
                 passive_outputs.push(po);
             }
-            if let Some(hook) = passive_hook_from_effect(effect, ctx) {
+            if let Some(hook) = passive_hook_from_effect(effect, ctx, condition_expr.as_ref()) {
                 passive_hooks.push(hook);
             }
             ctx.record_effect_config_names(&effect.id, config_start);
@@ -317,7 +329,6 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext) -> RuleOutput {
     }
 
     // Compile regular effects
-    let mut effect_outputs = Vec::new();
     let mut blind_rewards = Vec::new();
     if !is_passive {
         for (index, effect) in rule.effects.iter().enumerate() {
@@ -676,6 +687,9 @@ fn build_joker_table(
     if let Some(f) = remove_deck {
         entries.push(TableEntry::KeyValue("remove_from_deck".to_string(), f));
     }
+    if let Some(f) = build_discount_update_function(rule_outputs) {
+        entries.push(TableEntry::KeyValue("update".to_string(), f));
+    }
 
     // Calculate function
     let calc_fn = build_calculate_function(rule_outputs, ctx);
@@ -835,6 +849,37 @@ fn build_passive_functions(
     (add_fn, remove_fn)
 }
 
+/// Dynamic discounts need to refresh displayed prices when the amount or a
+/// condition changes, while avoiding a full price refresh on every frame.
+fn build_discount_update_function(rule_outputs: &[RuleOutput]) -> Option<Expr> {
+    let mut states = Vec::new();
+    for rule in rule_outputs {
+        for hook in &rule.passive_hooks {
+            if let PassiveHookSpec::DiscountItems { discount_amount, condition, .. } = hook {
+                states.push(format!(
+                    "tostring(tonumber({discount_amount}) or 0) .. ':' .. tostring(not not ({condition}))",
+                    condition = condition.as_deref().unwrap_or("true"),
+                ));
+            }
+        }
+    }
+    if states.is_empty() {
+        return None;
+    }
+    let code = format!(
+        "if not (G and G.GAME and G.jokers and card and card.area == G.jokers) then return end\n\
+        local context = {{}}\n\
+        local discount_state = tostring(not not card.debuff) .. ':' .. {}\n\
+        if card.jf_discount_state ~= discount_state then\n\
+            card.jf_discount_state = discount_state\n{}\nend",
+        states.join(" .. ':' .. "), effects::economy::refresh_prices(),
+    );
+    Some(Expr::Function {
+        params: vec!["self".into(), "card".into(), "dt".into()],
+        body: vec![lua_raw_stmt(code)],
+    })
+}
+
 /// Build guarded access to a fixed Lua path used while rendering a tooltip.
 fn guarded_description_path(path: &str) -> Expr {
     let parts: Vec<&str> = path.split('.').collect();
@@ -857,36 +902,36 @@ fn description_scoped_value(ctx: &CompileContext, name: &str, fallback: Expr) ->
     lua_or(lua_or(live, default), fallback)
 }
 
-/// Tooltip evaluation has no calculate `context`; only catalog IDs are allowed here.
+/// Tooltips share the numeric catalog, with fallbacks for scoring-only values.
 fn description_game_value(id: &str) -> Expr {
     let code = match id {
-        "hand_size" | "cards_in_hand" => "G.hand and G.hand.cards and #G.hand.cards",
-        "current_hand_size" => "G.hand and G.hand.config and G.hand.config.card_limit",
-        "joker_count" => "G.jokers and G.jokers.cards and #G.jokers.cards",
-        "hands_remaining" | "remaining_hands" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left",
-        "discards_remaining" | "remaining_discards" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left",
-        "deck_size" | "cards_in_deck" => "G.deck and G.deck.cards and #G.deck.cards",
-        "cards_in_discard" => "G.discard and G.discard.cards and #G.discard.cards",
-        "full_deck_size" | "total_playing_cards" => "G.playing_cards and #G.playing_cards",
-        "cards_removed_from_deck" => "G.GAME and G.GAME.starting_deck_size and (G.GAME.starting_deck_size - #(G.playing_cards or {}))",
-        "current_money" | "player_money" | "dollars" => "G.GAME and G.GAME.dollars",
-        "current_ante" | "ante_level" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante",
-        "blind_chips" | "blind_chip_req" => "G.GAME and G.GAME.blind and G.GAME.blind.chips",
-        "blind_mult" => "G.GAME and G.GAME.blind and G.GAME.blind.mult",
-        "consumable_count" => "G.consumeables and G.consumeables.cards and #G.consumeables.cards",
-        "interest" => "G.GAME and G.GAME.interest_amount",
-        "hands_played_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.hands_played",
-        "discards_used_this_round" => "G.GAME and G.GAME.current_round and G.GAME.current_round.discards_used",
-        "blinds_skipped" => "G.GAME and G.GAME.skips",
-        "base_hands_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.hands",
-        "base_discards_per_round" => "G.GAME and G.GAME.round_resets and G.GAME.round_resets.discards",
         "hand_level" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].level",
-        "times_hand_played" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].played",
+        "current_hand_played_count" | "times_hand_played" => "G.GAME and G.GAME.hands and G.GAME.hands[G.GAME.last_hand_played or 'High Card'] and G.GAME.hands[G.GAME.last_hand_played or 'High Card'].played",
         "scored_card_count" | "played_card_count" => "G.play and G.play.cards and #G.play.cards",
-        "poker_hand_count" => "(function() local count = 0; for _, hand in pairs((G.GAME and G.GAME.hands) or {}) do if hand.visible then count = count + 1 end end return count end)()",
-        _ => return lua_int(0),
+        "cumulative_chips" => "(function() local total = 0; for _, card in ipairs(G.play and G.play.cards or {}) do total = total + (card.base and card.base.nominal or 0) end; return total end)()",
+        _ => {
+            return values::game_var_lua_code(id)
+                .map(lua_raw_expr)
+                .unwrap_or_else(|| lua_int(0))
+        }
     };
     lua_raw_expr(format!("((G and ({code})) or 0)"))
+}
+
+fn description_game_reference(reference: &str) -> Expr {
+    if let Some(game) = values::parse_game_var(reference) {
+        if values::game_var_lua_code(&game.var_id).is_none() {
+            return lua_int(0);
+        }
+        return lua_add(
+            lua_num(game.starts_from),
+            lua_mul(description_game_value(&game.var_id), lua_num(game.multiplier)),
+        );
+    }
+    if reference.starts_with("GAMEVAR:") {
+        return lua_int(0);
+    }
+    description_game_value(reference)
 }
 
 fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
@@ -898,18 +943,19 @@ fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
             if ctx.has_user_var(value) {
                 return description_user_value(ctx, value).0;
             }
-            if let Some(game) = values::parse_game_var(value) {
-                return lua_mul(
-                    lua_add(
-                        description_game_value(&game.var_id),
-                        lua_num(game.starts_from),
-                    ),
-                    lua_num(game.multiplier),
-                );
+            if value.starts_with("GAMEVAR:") {
+                return description_game_reference(value);
             }
             lua_str(value)
         }
         ParamValue::Typed(value) => {
+            if values::is_game_variable_type(&value.value_type) {
+                return value
+                    .value
+                    .as_str()
+                    .map(description_game_reference)
+                    .unwrap_or_else(|| lua_int(0));
+            }
             if values::is_user_variable_type(&value.value_type) {
                 return description_user_value(ctx, value.value.as_str().unwrap_or("")).0;
             }
@@ -1463,35 +1509,19 @@ fn build_calc_dollar_bonus(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -
 fn passive_hook_from_effect(
     effect: &EffectDef,
     ctx: &mut CompileContext,
+    condition_expr: Option<&Expr>,
 ) -> Option<PassiveHookSpec> {
     let joker_key = ctx.smods_key();
     match effect.effect_type.as_str() {
         "discount_items" => {
-            let discount_type = effect
-                .params
-                .get("discount_type")
-                .or_else(|| effect.params.get("discountType"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("all_shop_items")
-                .to_string();
-            let discount_method = effect
-                .params
-                .get("discount_method")
-                .or_else(|| effect.params.get("discountMethod"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("flat_reduction")
-                .to_string();
-            let discount_amount = effect
-                .params
-                .get("discount_amount")
-                .or_else(|| effect.params.get("discountAmount"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1.0);
+            let (discount_type, discount_method, discount_amount) =
+                effects::economy::discount_settings(effect, ctx);
             Some(PassiveHookSpec::DiscountItems {
                 joker_key,
                 discount_type,
                 discount_method,
                 discount_amount,
+                condition: condition_expr.map(|expr| Emitter::new().emit_expr_to_string(expr)),
             })
         }
         "reduce_flush_straight_requirements" | "reduce_flush_straight_requirement" => {
@@ -1595,25 +1625,36 @@ fn build_global_hook_stmts(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -
 
     if !discount_hooks.is_empty() {
         let mut code = String::from(
-            "local card_set_cost_ref = Card.set_cost\nfunction Card:set_cost()\n    card_set_cost_ref(self)",
+            "local card_set_cost_ref = Card.set_cost\nfunction Card:set_cost(...)\n    local result = card_set_cost_ref(self, ...)\n    if type(self.cost) == 'number' then\n    local original_cost = self.cost",
         );
+        code.push_str(&format!("\n{}", effects::economy::discount_card_locals()));
         for hook in discount_hooks {
             if let PassiveHookSpec::DiscountItems {
                 joker_key,
                 discount_type,
                 discount_method,
                 discount_amount,
+                condition,
             } = hook
             {
-                let cond = discount_type_to_condition(discount_type);
-                let logic = discount_method_to_logic(discount_method, *discount_amount);
+                let cond = effects::economy::discount_type_to_condition(discount_type);
+                let logic = effects::economy::discount_method_to_logic(discount_method, "discount_amount");
+                let key = Emitter::new().emit_expr_to_string(&lua_str(joker_key));
                 code.push_str(&format!(
-                    "\n    if next(SMODS.find_card(\"{}\")) then\n        if {} then\n            {}\n        end\n    end",
-                    joker_key, cond, logic
+                    "\n    for _, discount_joker in ipairs(SMODS.find_card({key})) do\n\
+                    if discount_joker and not discount_joker.debuff then\n\
+                        local card = discount_joker\n\
+                        local context = {{}}\n\
+                        if ({condition}) and ({cond}) then\n\
+                            local discount_amount = tonumber({discount_amount}) or 0\n\
+                            {logic}\n\
+                        end\n\
+                    end\nend",
+                    condition = condition.as_deref().unwrap_or("true"),
                 ));
             }
         }
-        code.push_str("\n    self.sell_cost = math.max(1, math.floor(self.cost / 2)) + (self.ability.extra_value or 0)\n    self.sell_cost_label = self.facing == 'back' and '?' or self.sell_cost\nend");
+        code.push_str(&format!("\n    if self.cost ~= original_cost then\n{}\nend\nend\nreturn result\nend", effects::economy::update_discount_sell_cost()));
         stmts.push(lua_raw_stmt(code));
     }
 
@@ -1781,31 +1822,6 @@ fn build_ignore_slot_limit_stmts(ctx: &CompileContext) -> Vec<Stmt> {
         ctx.smods_key(),
         ctx.smods_key(),
     ))]
-}
-
-fn discount_type_to_condition(discount_type: &str) -> &'static str {
-    match discount_type {
-        "planet" => "(self.ability.set == 'Planet' or (self.ability.set == 'Booster' and self.config.center.kind == 'Celestial'))",
-        "tarot" => "(self.ability.set == 'Tarot' or (self.ability.set == 'Booster' and self.config.center.kind == 'Arcana'))",
-        "spectral" => "(self.ability.set == 'Spectral' or (self.ability.set == 'Booster' and self.config.center.kind == 'Spectral'))",
-        "standard" => "(self.ability.set == 'Enhanced' or (self.ability.set == 'Booster' and self.config.center.kind == 'Standard'))",
-        "jokers" => "self.ability.set == 'Joker'",
-        "vouchers" => "self.ability.set == 'Voucher'",
-        "all_consumables" => "(self.ability.set == 'Tarot' or self.ability.set == 'Planet' or self.ability.set == 'Spectral')",
-        "all_cards" => "(self.ability.set == 'Joker' or self.ability.set == 'Tarot' or self.ability.set == 'Planet' or self.ability.set == 'Spectral' or self.ability.set == 'Enhanced' or self.ability.set == 'Booster')",
-        _ => "(self.ability.set == 'Joker' or self.ability.set == 'Tarot' or self.ability.set == 'Planet' or self.ability.set == 'Spectral' or self.ability.set == 'Enhanced' or self.ability.set == 'Booster' or self.ability.set == 'Voucher')",
-    }
-}
-
-fn discount_method_to_logic(discount_method: &str, amount: f64) -> String {
-    match discount_method {
-        "make_free" => "self.cost = 0".to_string(),
-        "percentage_reduction" => format!(
-            "self.cost = math.max(0, math.floor(self.cost * (1 - ({}) / 100)))",
-            amount
-        ),
-        _ => format!("self.cost = math.max(0, self.cost - ({}))", amount),
-    }
 }
 
 /// Build the `in_pool` function for appearance restrictions.

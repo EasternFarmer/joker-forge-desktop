@@ -1927,8 +1927,8 @@ export default function SettingsPage() {
         description="This permanently clears saved data and settings."
         confirmLabel="Reset Data"
         confirmVariant="destructive"
-        onConfirm={() => {
-          resetProjectData();
+        onConfirm={async () => {
+          if (!(await resetProjectData())) return;
           setIsResetDataDialogOpen(false);
           window.location.reload();
         }}

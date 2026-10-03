@@ -494,16 +494,16 @@ fn level_hand_pool(effect: &EffectDef) -> Expr {
 fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
     match expr {
         Expr::Raw(code) => {
+            let highlighted = "((G and G.hand and G.hand.highlighted) or {})";
             *code = code
+                // Replace the context guard together with its value. Leaving a
+                // bare `context and` here would hide valid use-hook values.
+                .replace("context and context.scoring_name", target_name)
+                .replace("context and context.full_hand", highlighted)
+                .replace("context and context.scoring_hand", highlighted)
                 .replace("context.scoring_name", target_name)
-                .replace(
-                    "context.full_hand",
-                    "((G.hand and G.hand.highlighted) or {})",
-                )
-                .replace(
-                    "context.scoring_hand",
-                    "((G.hand and G.hand.highlighted) or {})",
-                );
+                .replace("context.full_hand", highlighted)
+                .replace("context.scoring_hand", highlighted);
         }
         Expr::FieldBinding(inner, _) | Expr::UnaryOp(_, inner) => {
             scope_use_level_amount(inner, target_name)
@@ -518,6 +518,47 @@ fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod use_level_amount_tests {
+    use super::*;
+    use crate::compiler::values::resolve_value;
+
+    #[test]
+    fn use_level_amount_scopes_guarded_hand_values_and_cumulative_chips() {
+        for id in [
+            "hand_level",
+            "times_hand_played",
+            "current_hand_played_count",
+            "played_card_count",
+            "scored_card_count",
+            "cumulative_chips",
+        ] {
+            let reference = ParamValue::Str(format!("GAMEVAR:{id}|2|3"));
+            let mut expr = resolve_value(&reference, ObjectType::Consumable, None);
+            scope_use_level_amount(&mut expr, "level_hand0");
+            let code = expr.to_string();
+            assert!(
+                !code.contains("context"),
+                "use-hook amount cannot depend on calculate context: {code}"
+            );
+            if matches!(
+                id,
+                "hand_level" | "times_hand_played" | "current_hand_played_count"
+            ) {
+                assert!(
+                    code.contains("level_hand0 and G.GAME.hands[level_hand0]"),
+                    "{code}"
+                );
+            } else {
+                assert!(
+                    code.contains("G and G.hand and G.hand.highlighted"),
+                    "{code}"
+                );
+            }
+        }
     }
 }
 
@@ -1922,43 +1963,62 @@ pub fn saved_effect(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutp
 // ---------------------------------------------------------------------------
 
 /// Edit Joker: modifies a joker's edition or sticker.
-pub fn edit_joker(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
+pub fn edit_joker(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     let edition = get_str_default(effect, "edition", "none");
     let sticker = get_str_default(effect, "sticker", "none");
-    let selection_method = get_str_default(effect, "selection_method", "self");
+    let selection_method = effect
+        .params
+        .get("target")
+        .or_else(|| effect.params.get("selection_method"))
+        .and_then(ParamValue::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("random");
     let custom_message = get_str_opt(effect, "customMessage");
-
-    let target = match selection_method.as_str() {
-        "self" => "card".to_string(),
-        "evaled_joker" => "context.other_joker".to_string(),
-        "selected_joker" => "G.jokers.highlighted[1]".to_string(),
-        "random" => "pseudorandom_element(G.jokers.cards, pseudoseed('edit_joker'))".to_string(),
-        _ => "card".to_string(),
-    };
 
     let mut code_parts = Vec::new();
 
     if edition != "none" && !edition.is_empty() {
         if edition == "remove" {
-            code_parts.push(format!("{}:set_edition(nil, true)", target));
+            code_parts.push(
+                "if target_joker.set_edition then target_joker:set_edition(nil, true) end"
+                    .to_string(),
+            );
+        } else if edition == "random" {
+            code_parts.push(
+                "if target_joker.set_edition then\n\
+                    local random_edition = SMODS.poll_edition({ key = 'edit_joker_edition', no_negative = false, guaranteed = true })\n\
+                    if random_edition then target_joker:set_edition(random_edition, true) end\n\
+                end"
+                    .to_string(),
+            );
         } else {
-            let e = if edition.starts_with("e_") {
-                edition.clone()
-            } else {
-                format!("e_{}", edition)
-            };
-            code_parts.push(format!("{}:set_edition('{}', true)", target, e));
+            code_parts.push(format!(
+                "if target_joker.set_edition then target_joker:set_edition({}, true) end",
+                lua_str(&normalize_edition_key(&edition, &ctx.mod_prefix))
+            ));
         }
     }
 
     if sticker != "none" && !sticker.is_empty() {
         if sticker == "remove" {
-            code_parts.push(format!(
-                "{t}.ability.eternal = false\n{t}.ability.perishable = false\n{t}.ability.rental = false",
-                t = target
-            ));
+            // Removing through the API resets sticker bookkeeping and caches.
+            code_parts.push(
+                "if target_joker.remove_sticker and target_joker.ability then\n\
+                    for _, sticker_key in ipairs({'eternal', 'perishable', 'rental'}) do\n\
+                        if SMODS.Stickers and SMODS.Stickers[sticker_key] then\n\
+                            target_joker:remove_sticker(sticker_key)\n\
+                        end\n\
+                    end\n\
+                end"
+                .to_string(),
+            );
         } else {
-            code_parts.push(format!("{}:add_sticker('{}', true)", target, sticker));
+            code_parts.push(format!(
+                "if target_joker.add_sticker and target_joker.ability and SMODS.Stickers and SMODS.Stickers[{key}] then\n\
+                    target_joker:add_sticker({key}, true)\n\
+                end",
+                key = lua_str(&sticker)
+            ));
         }
     }
 
@@ -1968,15 +2028,94 @@ pub fn edit_joker(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput
 
     let message = custom_message.map(lua_str);
 
+    let selection = match selection_method {
+        "self" => "local target_joker = card".to_string(),
+        "evaled_joker" | "evaluated_joker" => {
+            "local target_joker = context and context.other_joker".to_string()
+        }
+        "selected_joker" | "selected" => {
+            "local target_joker = G and G.jokers and G.jokers.highlighted and G.jokers.highlighted[1]"
+                .to_string()
+        }
+        "specific" | "key" | "keyvar" | "variable" => {
+            let key = if matches!(selection_method, "keyvar" | "variable") {
+                let name = effect
+                    .params
+                    .get("key_variable")
+                    .or_else(|| effect.params.get("variable"))
+                    .and_then(ParamValue::as_str)
+                    .unwrap_or("");
+                if ctx.has_user_var(name) {
+                    guarded_joker_key_variable(ctx, name)
+                } else {
+                    "nil".to_string()
+                }
+            } else {
+                let key = get_str_default(effect, "joker_key", "");
+                if key.is_empty() {
+                    "nil".to_string()
+                } else {
+                    lua_str(&key).to_string()
+                }
+            };
+            format!(
+                "local target_joker = nil\n\
+                local target_key = {key}\n\
+                if type(target_key) == 'string' then\n\
+                    if string.sub(target_key, 1, 2) ~= 'j_' then target_key = 'j_' .. target_key end\n\
+                    for _, joker in ipairs((G and G.jokers and G.jokers.cards) or {{}}) do\n\
+                        if joker.config and joker.config.center and joker.config.center.key == target_key and not joker.getting_sliced and not joker.removed then\n\
+                            target_joker = joker\n\
+                            break\n\
+                        end\n\
+                    end\n\
+                end"
+            )
+        }
+        "random" => "local eligible_jokers = {}\n\
+            for _, joker in ipairs((G and G.jokers and G.jokers.cards) or {}) do\n\
+                if joker and not joker.getting_sliced and not joker.removed then\n\
+                    eligible_jokers[#eligible_jokers + 1] = joker\n\
+                end\n\
+            end\n\
+            local target_joker = #eligible_jokers > 0 and pseudorandom_element(eligible_jokers, pseudoseed('edit_joker')) or nil"
+            .to_string(),
+        // Unknown saved selections must not silently modify the consumable.
+        _ => "local target_joker = nil".to_string(),
+    };
+    let code = format!(
+        "do\n\
+            {selection}\n\
+            if target_joker and not target_joker.getting_sliced and not target_joker.removed then\n\
+                {}\n\
+            end\n\
+        end",
+        code_parts.join("\n")
+    );
+
     EffectOutput {
         return_fields: vec![],
-        pre_return: vec![lua_raw_stmt(code_parts.join("\n"))],
+        pre_return: vec![lua_raw_stmt(code)],
         config_vars: vec![],
         message,
         colour: Some(lua_raw_expr("G.C.DARK_EDITION")),
 
         segment_id: None,
     }
+}
+
+fn guarded_joker_key_variable(ctx: &CompileContext, name: &str) -> String {
+    let path = ctx.user_var_path(name);
+    let mut prefixes = Vec::new();
+    let mut prefix = String::new();
+    for component in path.split('.') {
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(component);
+        prefixes.push(prefix.clone());
+    }
+    format!("({})", prefixes.join(" and "))
 }
 
 // ---------------------------------------------------------------------------
@@ -2351,5 +2490,109 @@ pub fn edit_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput 
         colour: Some(lua_raw_expr("G.C.SECONDARY_SET.Tarot")),
 
         segment_id: None,
+    }
+}
+
+#[cfg(test)]
+mod joker_targeting_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn generated(params: serde_json::Value) -> String {
+        let effect: EffectDef = serde_json::from_value(json!({
+            "effect_type": "edit_joker", "params": params,
+        }))
+        .unwrap();
+        let mut ctx =
+            CompileContext::new(ObjectType::Consumable, "test".into(), "test".into(), false);
+        Chunk {
+            stmts: edit_joker(&effect, &mut ctx).pre_return,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn current_target_parameter_wins_and_random_selection_happens_once() {
+        let code = generated(json!({
+            "target": {"value": "random", "valueType": "text"},
+            "selection_method": "self", "edition": "foil", "sticker": "perishable",
+        }));
+        assert_eq!(
+            code.matches("pseudorandom_element(eligible_jokers").count(),
+            1,
+            "{code}"
+        );
+        assert!(code.contains("target_joker:set_edition"), "{code}");
+        assert!(code.contains("target_joker:add_sticker"), "{code}");
+        assert!(!code.contains("local target_joker = card"), "{code}");
+    }
+
+    #[test]
+    fn missing_parameters_use_the_catalogue_random_default() {
+        let code = generated(json!({"edition": "foil"}));
+        assert!(
+            code.contains("pseudorandom_element(eligible_jokers"),
+            "{code}"
+        );
+        assert!(!code.contains("local target_joker = card"), "{code}");
+    }
+
+    #[test]
+    fn selected_and_evaluated_targets_and_legacy_names_are_guarded() {
+        for selection in ["selected", "selected_joker"] {
+            let code = generated(json!({"selection_method": selection, "edition": "foil"}));
+            assert!(
+                code.contains("G.jokers.highlighted and G.jokers.highlighted[1]"),
+                "{code}"
+            );
+            assert!(!code.contains("pseudorandom_element"), "{code}");
+        }
+        let code = generated(json!({"target": "evaled_joker", "edition": "foil"}));
+        assert!(code.contains("context and context.other_joker"), "{code}");
+    }
+
+    #[test]
+    fn editions_use_vanilla_keys_mod_keys_or_polling() {
+        for (edition, expected) in [
+            ("foil", "e_foil"),
+            ("sparkle", "e_test_sparkle"),
+            ("e_other_sparkle", "e_other_sparkle"),
+        ] {
+            let code = generated(json!({"target": "random", "edition": edition}));
+            assert!(
+                code.contains(&format!("set_edition('{expected}', true)")),
+                "{code}"
+            );
+        }
+        let code = generated(json!({"edition": "random"}));
+        assert!(code.contains("SMODS.poll_edition"), "{code}");
+        assert!(!code.contains("e_test_random"), "{code}");
+    }
+
+    #[test]
+    fn sticker_application_and_removal_use_registered_methods() {
+        let code = generated(json!({"sticker": "rental"}));
+        assert!(code.contains("SMODS.Stickers['rental']"), "{code}");
+        assert!(
+            code.contains("target_joker:add_sticker('rental', true)"),
+            "{code}"
+        );
+        let code = generated(json!({"sticker": "remove", "edition": "remove"}));
+        assert!(
+            code.contains("target_joker:remove_sticker(sticker_key)"),
+            "{code}"
+        );
+        assert!(
+            code.contains("target_joker:set_edition(nil, true)"),
+            "{code}"
+        );
+        assert!(!code.contains("ability.rental = false"), "{code}");
+    }
+
+    #[test]
+    fn unknown_targets_do_not_fall_back_to_editing_the_consumable() {
+        let code = generated(json!({"target": "missing_target", "edition": "foil"}));
+        assert!(code.contains("local target_joker = nil"), "{code}");
+        assert!(!code.contains("local target_joker = card"), "{code}");
     }
 }

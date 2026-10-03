@@ -11,6 +11,7 @@ import type {
   VoucherData,
 } from "@/lib/core/types";
 import type { NavigationTarget } from "@/lib/app/navigation-target";
+import { getAllGameVariables } from "@/lib/content/game-vars";
 
 export interface PreExportIssue {
   id: string;
@@ -29,6 +30,16 @@ const IDENTIFIER_REGEX = /^[A-Za-z0-9_]+$/;
 const HEX_COLOR_REGEX = /^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/;
 const VANILLA_RARITY_KEYS = new Set(["common", "uncommon", "rare", "legendary"]);
 const VANILLA_CONSUMABLE_SETS = new Set(["Tarot", "Planet", "Spectral"]);
+// Saved projects can use these names from earlier compiler versions.
+// Keep the aliases aligned with balatro-codegen's game_var_lua_code.
+const GAME_VARIABLE_IDS = new Set([
+  ...getAllGameVariables().map((variable) => variable.id),
+  "hand_size", "remaining_hands", "remaining_discards", "deck_size",
+  "full_deck_size", "player_money", "dollars", "ante_level", "blind_chips", "blind_mult",
+  "consumable_count", "interest", "hand_level", "times_hand_played",
+  "scored_card_count", "played_card_count", "poker_hand_count",
+]);
+const GAME_VARIABLE_NUMBER_REGEX = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 const createIssueId = (): string =>
   `pre_export_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -46,6 +57,104 @@ const pushIssue = (
 
 const formatItemName = (item: IdentifierItem, fallback: string): string =>
   item.name && item.name.trim() ? item.name.trim() : fallback;
+
+const gameVariableReferenceError = (value: unknown, typed: boolean): string | null => {
+  if (typeof value !== "string") {
+    return typed ? "Game variables need a valid selection." : null;
+  }
+  let id = value;
+  if (value.startsWith("GAMEVAR:")) {
+    const parts = value.slice("GAMEVAR:".length).split("|");
+    if (
+      parts.length !== 3 || !parts[0] ||
+      !parts.slice(1).every((part) => GAME_VARIABLE_NUMBER_REGEX.test(part) && Number.isFinite(Number(part)))
+    ) {
+      return "The game variable's starting value or multiplier is invalid. Choose the variable again and enter finite numbers.";
+    }
+    id = parts[0];
+  } else if (!typed) {
+    return null;
+  }
+  return GAME_VARIABLE_IDS.has(id)
+    ? null
+    : `Unknown game variable "${id}". Choose a supported variable in the Rule Builder.`;
+};
+
+const checkItemGameVariables = (
+  issues: PreExportIssue[],
+  item: BaseGameObject,
+  label: string,
+  path: string,
+) => {
+  const report = (location: string, message: string) => pushIssue(
+    issues,
+    `${label}: "${formatItemName(item, item.id)}" has a problem in ${location}: ${message}`,
+    { path, itemId: item.id, editor: "rules" },
+  );
+  const checkValues = (value: unknown, location: string): void => {
+    if (typeof value === "string") {
+      const error = gameVariableReferenceError(value, false);
+      if (error) report(location, error);
+    } else if (Array.isArray(value)) {
+      value.forEach((entry, index) => checkValues(entry, `${location} ${index + 1}`));
+    } else if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      const typed = record.valueType === "gameVariable" || record.valueType === "game_var";
+      if (typed || (typeof record.value === "string" && record.value.startsWith("GAMEVAR:"))) {
+        const error = gameVariableReferenceError(record.value, typed);
+        if (error) report(location, error);
+        return;
+      }
+      Object.entries(record).forEach(([key, entry]) => checkValues(entry, `${location} / ${key}`));
+    }
+  };
+  const groupLabels: Record<string, string> = {
+    conditions: "condition", effects: "effect", conditionGroups: "condition group",
+    condition_groups: "condition group", randomGroups: "chance group", random_groups: "chance group",
+    loops: "loop", loop_groups: "loop",
+  };
+  const checkRule = (value: unknown, location: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => checkRule(entry, `${location} ${index + 1}`));
+    } else if (value && typeof value === "object") {
+      Object.entries(value).forEach(([key, entry]) => {
+        if (key === "params" || key === "triggerParams" || key === "trigger_params") {
+          if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+            Object.entries(entry).forEach(([name, parameter]) =>
+              checkValues(parameter, `${location} / parameter "${name}"`),
+            );
+          }
+        } else if (["chance_numerator", "chance_denominator", "chanceNumerator", "chanceDenominator", "repetitions", "count"].includes(key)) {
+          checkValues(entry, `${location} / ${key.startsWith("chance") ? "chance" : "repetitions"}`);
+        } else if (entry && typeof entry === "object") {
+          checkRule(entry, `${location}${groupLabels[key] ? ` / ${groupLabels[key]}` : ""}`);
+        }
+      });
+    }
+  };
+  checkRule(item.rules, "rule");
+
+  // Imported projects may carry explicit description bindings. Their game
+  // references need the same allowlist; literal localization text stays text.
+  const record = item as unknown as Record<string, unknown>;
+  const bindings = record.descriptionVariables ?? record.description_variables;
+  if (Array.isArray(bindings)) {
+    bindings.forEach((binding: unknown, index) => {
+      if (!binding || typeof binding !== "object") return;
+      const value = binding as Record<string, unknown>;
+      if (value.kind === "game") {
+        const error = typeof value.id !== "string"
+          ? "Game variables need a valid selection."
+          : GAME_VARIABLE_IDS.has(value.id)
+            ? null
+            : `Unknown game variable "${value.id}". Choose a supported variable in the Rule Builder.`;
+        if (error) report(`description variable ${index + 1}`, error);
+      } else if (value.kind === "config") {
+        checkValues(value.fallback, `description variable ${index + 1}`);
+      }
+    });
+  }
+};
 
 const checkMetadata = ({ data, issues }: CheckContext) => {
   const { metadata } = data;
@@ -198,6 +307,8 @@ const checkBaseObjectCollection = (
         },
       );
     }
+
+    checkItemGameVariables(issues, item, options.label, options.path);
 
     if (!normalizedKey) return;
     const duplicates = keyMap.get(normalizedKey) || [];

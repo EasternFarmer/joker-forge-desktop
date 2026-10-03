@@ -29,10 +29,15 @@ SMODS.Voucher {
         }
     end,
     redeem = function(self, card)
+        local redeem_result
         do
-            return {
-                chips = card.ability.extra.chips0
-            }
+            local apply_rule = function()
+                return {
+                    chips = card.ability.extra.chips0
+                }
+            end
+            redeem_result = apply_rule()
         end
+        return redeem_result
     end
 }

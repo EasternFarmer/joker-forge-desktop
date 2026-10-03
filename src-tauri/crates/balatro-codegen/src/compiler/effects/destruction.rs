@@ -222,21 +222,80 @@ fn lua_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Destroy Consumable effect: destroys a consumable from the consumable area.
-pub fn destroy_consumable(_effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
-    let stmt = lua_raw_stmt(
-        "if #G.consumeables.cards > 0 then local c = pseudorandom_element(G.consumeables.cards, pseudoseed('destroy_consumable')); if c then SMODS.destroy_cards({c}) end end",
-    );
+/// Destroy one owned consumable matching the selected set and card key.
+pub fn destroy_consumable(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
+    let set = get_str_param_any(effect, &["consumable_type", "set", "consumableType"])
+        .unwrap_or("random");
+    let key = get_str_param_any(
+        effect,
+        &["specific_card", "consumable_key", "consumableKey"],
+    )
+    .unwrap_or("random");
+    // Dynamic catalogue options can select a random card from a particular set.
+    let (set, key) = match key.strip_prefix("random_set:") {
+        Some(set) => (set, "random"),
+        None => (set, key),
+    };
+    let set = match set.to_ascii_lowercase().as_str() {
+        "tarot" => "Tarot",
+        "planet" => "Planet",
+        "spectral" => "Spectral",
+        _ => set,
+    };
+    let mut filters =
+        vec!["consumable and not consumable.getting_sliced and not consumable.removed".to_string()];
+    if !set.is_empty() && !matches!(set, "random" | "any") {
+        filters.push(format!(
+            "((consumable.ability and consumable.ability.set) or (consumable.config and consumable.config.center and consumable.config.center.set)) == {}",
+            lua_str(set)
+        ));
+    }
+    if !key.is_empty() && !matches!(key, "random" | "any" | "none") {
+        filters.push(format!(
+            "consumable.config and consumable.config.center and consumable.config.center.key == {}",
+            lua_str(&normalize_consumable_key(key))
+        ));
+    }
+    let stmt = lua_raw_stmt(format!(
+        "do\n\
+            local target_consumables = {{}}\n\
+            for _, consumable in ipairs((G and G.consumeables and G.consumeables.cards) or {{}}) do\n\
+                if {} then\n\
+                    target_consumables[#target_consumables + 1] = consumable\n\
+                end\n\
+            end\n\
+            if #target_consumables > 0 then\n\
+                local target_consumable = pseudorandom_element(target_consumables, pseudoseed('destroy_consumable'))\n\
+                if target_consumable then SMODS.destroy_cards({{target_consumable}}) end\n\
+            end\n\
+        end",
+        filters.join(" and ")
+    ));
 
     EffectOutput {
         return_fields: vec![],
         pre_return: vec![stmt],
         config_vars: vec![],
-        message: Some(lua_str("Destroyed Consumable!")),
+        message: Some(lua_str(
+            get_str_param(effect, "customMessage").unwrap_or("Destroyed Consumable!"),
+        )),
         colour: Some(lua_raw_expr("G.C.RED")),
 
         segment_id: None,
     }
+}
+
+fn normalize_consumable_key(key: &str) -> String {
+    if key.starts_with("c_") {
+        return key.to_string();
+    }
+    // Saved projects from the original web generator used display-derived IDs.
+    let key = key.strip_prefix("the_").unwrap_or(key);
+    let key = match key {
+        "hierophant" => "heirophant",
+        _ => key,
+    };
+    format!("c_{key}")
 }
 
 /// Destroy Cards effect: destroys highlighted or random cards in hand.
@@ -278,5 +337,74 @@ pub fn destroy_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutp
         colour: Some(lua_raw_expr("G.C.RED")),
 
         segment_id: None,
+    }
+}
+
+#[cfg(test)]
+mod targeting_tests {
+    use super::*;
+    use crate::types::ObjectType;
+    use serde_json::json;
+
+    fn generated(params: serde_json::Value) -> String {
+        let effect: EffectDef = serde_json::from_value(json!({
+            "effect_type": "destroy_consumable", "params": params,
+        }))
+        .unwrap();
+        let mut ctx = CompileContext::new(ObjectType::Joker, "test".into(), "test".into(), false);
+        Chunk {
+            stmts: destroy_consumable(&effect, &mut ctx).pre_return,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn current_typed_set_and_card_parameters_filter_the_owned_consumables() {
+        let code = generated(json!({
+            "consumable_type": {"value": "Tarot", "valueType": "text"},
+            "specific_card": {"value": "c_fool", "valueType": "text"},
+        }));
+        assert!(code.contains("== 'Tarot'"), "{code}");
+        assert!(code.contains("center.key == 'c_fool'"), "{code}");
+        assert!(code.contains("#target_consumables > 0"), "{code}");
+        assert!(
+            code.contains("SMODS.destroy_cards({target_consumable})"),
+            "{code}"
+        );
+    }
+
+    #[test]
+    fn random_set_options_override_the_parent_set_without_a_key_filter() {
+        let code = generated(json!({
+            "consumable_type": "any", "specific_card": "random_set:CustomSet",
+        }));
+        assert!(code.contains("== 'CustomSet'"), "{code}");
+        assert!(!code.contains("center.key =="), "{code}");
+    }
+
+    #[test]
+    fn random_and_any_preserve_all_consumable_sets() {
+        for set in ["random", "any"] {
+            let code = generated(json!({"consumable_type": set, "specific_card": "random"}));
+            assert!(!code.contains("== 'Tarot'"), "{code}");
+            assert!(!code.contains("center.key =="), "{code}");
+            assert!(
+                code.contains("G and G.consumeables and G.consumeables.cards"),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_and_custom_keys_are_preserved_without_defaulting_to_another_card() {
+        let code = generated(json!({"set": "tarot", "consumableKey": "the_hierophant"}));
+        assert!(code.contains("== 'Tarot'"), "{code}");
+        assert!(code.contains("center.key == 'c_heirophant'"), "{code}");
+        let code =
+            generated(json!({"consumable_type": "CustomSet", "specific_card": "c_test_custom"}));
+        assert!(code.contains("center.key == 'c_test_custom'"), "{code}");
+        let code = generated(json!({"consumable_type": "Tarot", "specific_card": "unknown_card"}));
+        assert!(code.contains("center.key == 'c_unknown_card'"), "{code}");
+        assert!(!code.contains("c_fool"), "{code}");
     }
 }

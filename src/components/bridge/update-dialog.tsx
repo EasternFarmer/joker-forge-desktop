@@ -19,6 +19,7 @@ import {
 export function UpdateDialog() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   const confettiPieces = useMemo(
     () =>
@@ -40,6 +41,7 @@ export function UpdateDialog() {
 
   useEffect(() => {
     return onUpdateAvailable((info) => {
+      setUpdateError(null);
       setUpdateInfo(info);
     });
   }, []);
@@ -48,15 +50,15 @@ export function UpdateDialog() {
     const handleShowDialog = (event: Event) => {
       const customEvent = event as CustomEvent<UpdateInfo | undefined>;
       const detail = customEvent.detail;
+      setUpdateError(null);
       setUpdateInfo(
         detail ?? {
           currentVersion: "2.0.0-beta",
           latestVersion: "2.1.0",
           channel: "stable",
-          asset: {
-            name: "joker-forge-update-dev.exe",
-            browser_download_url: "",
-          },
+          asset: null,
+          releaseUrl: "",
+          installation: "automatic",
         },
       );
     };
@@ -69,22 +71,28 @@ export function UpdateDialog() {
 
   if (!updateInfo) return null;
 
-  const handleUpdate = async () => {
-    if (!updateInfo.asset.browser_download_url) {
-      window.alert(
-        "This is a developer preview of the update dialog. No installer URL is attached.",
-      );
-      setUpdateInfo(null);
+  const handleUpdate = async (manual = false) => {
+    if (!updateInfo.releaseUrl) {
+      setUpdateError("This is a preview of the update dialog. No download is attached.");
       return;
     }
 
     setIsUpdating(true);
+    setUpdateError(null);
+    const update = manual
+      ? { ...updateInfo, installation: "manual" as const, asset: null }
+      : updateInfo;
     try {
-      await performUpdate(updateInfo.asset);
+      await performUpdate(update);
+      if (update.installation === "manual") {
+        setIsUpdating(false);
+        setUpdateInfo(null);
+      }
     } catch (error) {
       console.error("Update failed", error);
       setIsUpdating(false);
-      setUpdateInfo(null);
+      setUpdateError(typeof error === "string" ? error :
+        error instanceof Error ? error.message : "The update could not be started. Please try again.");
     }
   };
 
@@ -137,7 +145,7 @@ export function UpdateDialog() {
               </DialogTitle>
             </div>
             <DialogDescription className="text-sm text-muted-foreground">
-              A new <strong className="text-foreground capitalize">{updateInfo.channel}</strong> version of Joker Forge is ready to install.
+              A new <strong className="text-foreground capitalize">{updateInfo.channel}</strong> version of Joker Forge is available.
             </DialogDescription>
           </DialogHeader>
         </div>
@@ -166,6 +174,22 @@ export function UpdateDialog() {
               </span>
             </div>
           </div>
+          <p className="mt-3 text-sm text-muted-foreground">
+            {updateInfo.installation === "manual"
+              ? "Download the package for your computer from the release page, then close Joker Forge and follow the package’s installation steps."
+              : "Your project changes will be saved before Joker Forge closes. The app will reopen after the update finishes."}
+          </p>
+          {updateError && (
+            <div className="mt-3">
+              <p role="alert" className="text-sm text-destructive">{updateError}</p>
+              {updateInfo.installation === "automatic" && updateInfo.releaseUrl && (
+                <Button variant="link" className="px-0" disabled={isUpdating}
+                  onClick={() => void handleUpdate(true)}>
+                  Download manually
+                </Button>
+              )}
+            </div>
+          )}
         </div>
 
         <DialogFooter className="flex w-full flex-row gap-2 border-t border-border/40 bg-muted/10 p-4">
@@ -184,7 +208,10 @@ export function UpdateDialog() {
             onClick={() => void handleUpdate()}
             disabled={isUpdating}
           >
-            {isUpdating ? "Installing..." : "Install Now"}
+            {isUpdating
+              ? updateInfo.installation === "manual" ? "Opening..." : "Updating..."
+              : updateInfo.installation === "manual" ? "Download Update"
+              : updateError ? "Retry Update" : "Install Now"}
           </Button>
         </DialogFooter>
       </DialogContent>

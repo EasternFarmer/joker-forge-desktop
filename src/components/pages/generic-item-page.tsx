@@ -38,6 +38,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
   DropdownMenuCheckboxItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -245,10 +247,36 @@ function GenericItemPageInternal<T extends { id: string }>({
 
   const [searchTerm, setSearchTerm] = useState("");
   const deferredSearchTerm = useDeferredValue(searchTerm);
-  const [currentSort, setCurrentSort] = useState(
-    defaultSort || sortOptions[0]?.value,
-  );
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const defaultSortOption =
+    sortOptions.find((option) => option.value === defaultSort) ?? sortOptions[0];
+  const [sorting, setSorting] = useState<{
+    page: string;
+    value: string | undefined;
+    direction: "asc" | "desc";
+  }>({ page: title, value: defaultSortOption?.value, direction: "asc" });
+  const selectedSortOption =
+    (sorting.page === title
+      ? sortOptions.find((option) => option.value === sorting.value)
+      : undefined) ?? defaultSortOption;
+  const currentSort = selectedSortOption?.value;
+  const sortDirection =
+    sorting.page === title && sorting.value === currentSort
+      ? sorting.direction
+      : "asc";
+  useEffect(() => {
+    setSorting((previous) => {
+      const validSort = sortOptions.some(
+        (option) => option.value === previous.value,
+      );
+      if (
+        previous.page === title &&
+        (validSort || previous.value === defaultSortOption?.value)
+      ) {
+        return previous;
+      }
+      return { page: title, value: defaultSortOption?.value, direction: "asc" };
+    });
+  }, [title, sortOptions, defaultSortOption?.value]);
   const [activeFilters, setActiveFilters] = useState<Record<string, any>>({});
   const storageKeyBase = `jokerforge-${title.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
 
@@ -409,17 +437,16 @@ function GenericItemPageInternal<T extends { id: string }>({
       });
     }
 
-    const sortOpt = sortOptions.find((opt) => opt.value === currentSort);
     result.sort((a, b) => {
+      if (selectedSortOption) {
+        const base = selectedSortOption.sortFn(a, b);
+        if (base !== 0) return sortDirection === "desc" ? -base : base;
+      }
+
       if (deferredSearchTerm && searchProps) {
         const scoreA = searchScoreById.get(a.id) ?? -1;
         const scoreB = searchScoreById.get(b.id) ?? -1;
         if (scoreA !== scoreB) return scoreB - scoreA;
-      }
-
-      if (sortOpt) {
-        const base = sortOpt.sortFn(a, b);
-        return sortDirection === "desc" ? -base : base;
       }
 
       return 0;
@@ -435,6 +462,7 @@ function GenericItemPageInternal<T extends { id: string }>({
     searchProps,
     filterOptions,
     sortOptions,
+    selectedSortOption,
   ]);
 
   const processedItemIndexes = useMemo(
@@ -1109,7 +1137,8 @@ function GenericItemPageInternal<T extends { id: string }>({
                     weight="duotone"
                   />
                   <span className="truncate">
-                    {sortOptions.find((s) => s.value === currentSort)?.label}
+                    {selectedSortOption?.label ?? "Sort"} ·{" "}
+                    {sortDirection === "asc" ? "Ascending" : "Descending"}
                   </span>
                 </span>
                 <CaretDown
@@ -1125,29 +1154,44 @@ function GenericItemPageInternal<T extends { id: string }>({
               <div className="px-2 py-2 text-xs font-bold text-muted-foreground uppercase tracking-wider">
                 Sort By
               </div>
-              {sortOptions.map((opt) => (
-                <DropdownMenuItem
-                  key={opt.value}
-                  onClick={() => setCurrentSort(opt.value)}
+              <DropdownMenuRadioGroup
+                value={currentSort}
+                onValueChange={(value) =>
+                  setSorting({ page: title, value, direction: sortDirection })
+                }
+              >
+                {sortOptions.map((opt) => (
+                  <DropdownMenuRadioItem
+                    key={opt.value}
+                    value={opt.value}
+                    className="cursor-pointer rounded-lg focus:bg-accent focus:text-accent-foreground py-2 font-medium"
+                  >
+                    {opt.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator className="my-2 bg-border/50" />
+              <DropdownMenuRadioGroup
+                value={sortDirection}
+                onValueChange={(direction) => {
+                  if (direction === "asc" || direction === "desc") {
+                    setSorting({ page: title, value: currentSort, direction });
+                  }
+                }}
+              >
+                <DropdownMenuRadioItem
+                  value="asc"
                   className="cursor-pointer rounded-lg focus:bg-accent focus:text-accent-foreground py-2 font-medium"
                 >
-                  {opt.label}
-                  {currentSort === opt.value && (
-                    <div className="ml-auto w-2 h-2 rounded-full bg-primary" />
-                  )}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator className="my-2 bg-border/50" />
-              <DropdownMenuItem
-                onClick={() =>
-                  setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"))
-                }
-                className="cursor-pointer rounded-lg focus:bg-accent focus:text-accent-foreground py-2 font-medium"
-              >
-                {sortDirection === "asc"
-                  ? "Ascending (Low to High)"
-                  : "Descending (High to Low)"}
-              </DropdownMenuItem>
+                  Ascending (Low to High)
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem
+                  value="desc"
+                  className="cursor-pointer rounded-lg focus:bg-accent focus:text-accent-foreground py-2 font-medium"
+                >
+                  Descending (High to Low)
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
           {filterOptions && filterOptions.length > 0 && (

@@ -24,6 +24,76 @@ fn preview_test_planet(params: serde_json::Value) -> ConsumableDef {
     .unwrap()
 }
 
+#[test]
+fn voucher_discounts_use_current_fields_for_redeem_and_passive_rules() {
+    for trigger in ["card_used", "passive"] {
+        let voucher: VoucherDef = serde_json::from_value(serde_json::json!({
+            "key": "discount", "name": "Discount", "description": ["Test"],
+            "cost": 10, "atlas": "Vouchers", "pos": {"x": 0, "y": 0},
+            "rules": [{ "id": "discount_rule", "trigger": trigger, "effects": [{
+                "id": "discount_effect", "effect_type": "discount_items", "params": {
+                    "discount_type": {"valueType": "text", "value": "jokers"},
+                    "discount_method": {"valueType": "text", "value": "flat_reduction"},
+                    "discount_amount": {"valueType": "number", "value": 3}
+                }
+            }]}]
+        })).unwrap();
+        let (code, segments, bindings) = Emitter::new()
+            .emit_chunk_with_field_bindings(&compile_voucher(&voucher, "mod"));
+        assert!(code.contains("redeem = function(self, card)"), "{code}");
+        assert!(code.contains("jf_item_discounts"));
+        assert!(code.contains("item_type = 'jokers'"));
+        assert!(code.contains("method = 'flat_reduction'"));
+        assert!(!code.contains("G.GAME.discount_percent"));
+        assert!(segments.iter().any(|s| s.id == "effect:discount_rule:discount_effect"));
+        let binding = bindings.iter().find(|binding| binding.source_path == vec![
+            serde_json::json!("rules"), serde_json::json!(0), serde_json::json!("effects"),
+            serde_json::json!(0), serde_json::json!("params"),
+            serde_json::json!("discount_amount"), serde_json::json!("value")
+        ]).expect("discount amount remains editable in generated preview");
+        assert_eq!(field_binding_text(&code, binding), "3");
+    }
+}
+
+#[test]
+fn voucher_legacy_global_discount_operations_remain_compatible() {
+    let mut ctx = CompileContext::new(ObjectType::Voucher, "mod".into(), "discount".into(), false);
+    let effect: EffectDef = serde_json::from_value(serde_json::json!({
+        "id": "discount", "effect_type": "discount_items", "params": {
+            "operation": {"valueType": "text", "value": "subtract"},
+            "value": {"valueType": "number", "value": 5}
+        }
+    })).unwrap();
+    let output = effects::economy::discount_items(&effect, &mut ctx);
+    let code = Emitter::new().emit_stmts(&output.pre_return);
+    assert!(code.contains("G.GAME.discount_percent = (G.GAME.discount_percent or 0) - card.ability.extra.item_prices0"));
+    assert!(!code.contains("jf_item_discounts"));
+}
+
+#[test]
+fn passive_joker_discounts_use_scoped_amounts_and_refresh_on_inventory_changes() {
+    let mut joker = preview_test_joker(serde_json::json!([{
+        "id": "discount", "trigger": "passive", "effects": [{
+            "id": "discount", "effect_type": "discount_items", "params": {
+                "discount_type": {"valueType": "text", "value": "all_consumables"},
+                "discount_method": {"valueType": "text", "value": "percentage_reduction"},
+                "discount_amount": {"valueType": "user_var", "value": "discount_size"}
+            }
+        }]
+    }]));
+    joker.user_variables = serde_json::from_value(serde_json::json!([
+        {"name": "discount_size", "var_type": "number", "initial_value": 25}
+    ])).unwrap();
+    let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+    assert!(code.contains("add_to_deck = function"));
+    assert!(code.contains("remove_from_deck = function"));
+    assert!(code.contains("G.E_MANAGER:add_event"));
+    assert!(code.contains("local card = discount_joker"));
+    assert!(code.contains("tonumber(card.ability.extra.discount_size)"), "{code}");
+    assert!(!code.contains("tonumber(self.ability.extra.discount_size)"));
+    assert!(code.contains("not discount_joker.debuff"));
+}
+
 fn field_binding_text<'a>(code: &'a str, binding: &LuaFieldBinding) -> &'a str {
     assert_eq!(binding.start_line, binding.end_line);
     let line = code.lines().nth(binding.start_line - 1).unwrap();
@@ -356,7 +426,7 @@ fn description_game_bindings_accept_current_catalog_ids_and_dynamic_parameters()
     assert!(code.contains("G.playing_cards"));
     assert!(code.contains("G.GAME.blind.chips"));
     assert!(code.contains("G.GAME.dollars"));
-    assert!(code.contains("+ 3"));
+    assert!(code.contains("3 +"));
     assert!(code.contains("* 2"));
     assert!(!code.contains("context."));
 }

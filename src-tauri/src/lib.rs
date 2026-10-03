@@ -1,5 +1,6 @@
 mod cli_codegen_item;
 mod mod_engine;
+mod release_updater;
 
 use mod_engine::{balatro_setup, commands, state::AppState};
 use std::{
@@ -152,8 +153,11 @@ pub fn run() {
             commands::ensure_balatro_mod_setup,
             balatro_setup::inspect_balatro_mod_setup,
             balatro_setup::install_latest_balatro_mod_setup,
-            commands::download_release_asset,
-            commands::install_update_and_restart,
+            release_updater::get_update_platform,
+            release_updater::download_release_asset,
+            release_updater::install_update_and_restart,
+            release_updater::cancel_update_install,
+            release_updater::discard_update_download,
             commands::open_devtools,
             commands::open_folder_in_file_manager,
             commands::can_launch_balatro,

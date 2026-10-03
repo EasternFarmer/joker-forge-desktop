@@ -29,34 +29,50 @@ SMODS.Voucher {
         }
     end,
     redeem = function(self, card)
+        local redeem_result
         do
-            local created_playing_cards0 = {}
-            local created_playing_card0 = SMODS.add_card({
-                set = 'Base',
-                area = G.hand,
-                no_edition = true
-            })
-            if created_playing_card0 then
-                table.insert(created_playing_cards0, created_playing_card0)
-            end
-            if #created_playing_cards0 > 0 then
-                if G.deck and G.deck.config then
-                    G.deck.config.card_limit = math.max(G.deck.config.card_limit, #G.playing_cards)
-                end
-                SMODS.calculate_context({
-                    playing_card_added = true,
-                    cards = created_playing_cards0
+            local apply_rule = function()
+                local created_playing_cards0 = {}
+                local created_playing_card0 = SMODS.add_card({
+                    set = 'Base',
+                    area = G.hand,
+                    no_edition = true
                 })
-            end
-            if #G.consumeables.cards > 0 then local c = pseudorandom_element(G.consumeables.cards, pseudoseed('destroy_consumable')); if c then SMODS.destroy_cards({c}) end end
-            return {
-                message = #created_playing_cards0 > 0 and 'Added Cards!',
-                colour = G.C.GREEN,
-                extra = {
-                    message = 'Destroyed Consumable!',
-                    colour = G.C.RED
+                if created_playing_card0 then
+                    table.insert(created_playing_cards0, created_playing_card0)
+                end
+                if #created_playing_cards0 > 0 then
+                    if G.deck and G.deck.config then
+                        G.deck.config.card_limit = math.max(G.deck.config.card_limit, #G.playing_cards)
+                    end
+                    SMODS.calculate_context({
+                        playing_card_added = true,
+                        cards = created_playing_cards0
+                    })
+                end
+                do
+                local target_consumables = {}
+                for _, consumable in ipairs((G and G.consumeables and G.consumeables.cards) or {}) do
+                if consumable and not consumable.getting_sliced and not consumable.removed then
+                target_consumables[#target_consumables + 1] = consumable
+                end
+                end
+                if #target_consumables > 0 then
+                local target_consumable = pseudorandom_element(target_consumables, pseudoseed('destroy_consumable'))
+                if target_consumable then SMODS.destroy_cards({target_consumable}) end
+                end
+                end
+                return {
+                    message = #created_playing_cards0 > 0 and 'Added Cards!',
+                    colour = G.C.GREEN,
+                    extra = {
+                        message = 'Destroyed Consumable!',
+                        colour = G.C.RED
+                    }
                 }
-            }
+            end
+            redeem_result = apply_rule()
         end
+        return redeem_result
     end
 }

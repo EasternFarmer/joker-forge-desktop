@@ -685,6 +685,86 @@ mod live_code_preview_tests {
     use super::*;
 
     #[test]
+    fn current_rule_options_reach_both_editor_preview_and_mod_export() {
+        let cases = [
+            ("joker", "blind_selected", serde_json::json!({
+                "type": "change_key_variable", "params": {
+                    "variable_name": {"value": "chosen_key", "valueType": "user_var"},
+                    "key_type": {"value": "joker", "valueType": "text"},
+                    "joker_change_type": {"value": "specific", "valueType": "text"},
+                    "specific_joker": {"value": "j_smiley", "valueType": "text"}
+                }
+            }), "local new_key = 'j_smiley'"),
+            ("joker", "blind_selected", serde_json::json!({
+                "type": "destroy_consumable", "params": {
+                    "consumable_type": {"value": "Tarot", "valueType": "text"},
+                    "specific_card": {"value": "c_fool", "valueType": "text"}
+                }
+            }), "center.key == 'c_fool'"),
+            ("consumable", "card_used", serde_json::json!({
+                "type": "edit_joker", "params": {
+                    "target": {"value": "selected_joker", "valueType": "context"},
+                    "edition": {"value": "foil", "valueType": "text"}
+                }
+            }), "G.jokers.highlighted and G.jokers.highlighted[1]"),
+            ("voucher", "card_used", serde_json::json!({
+                "type": "discount_items", "params": {
+                    "discount_type": {"value": "jokers", "valueType": "text"},
+                    "discount_method": {"value": "flat_reduction", "valueType": "text"},
+                    "discount_amount": {"value": "3", "valueType": "number"}
+                }
+            }), "item_type = 'jokers'"),
+            ("voucher", "passive", serde_json::json!({
+                "type": "discount_items", "params": {
+                    "discount_type": {"value": "tarot", "valueType": "text"},
+                    "discount_method": {"value": "make_free", "valueType": "text"}
+                }
+            }), "item_type = 'tarot'"),
+        ];
+        for (item_type, trigger, mut effect, expected) in cases {
+            effect["id"] = serde_json::json!("effect");
+            let input = serde_json::json!({
+                "objectKey": "options", "name": "Options", "description": "Test", "set": "Tarot", "cost": 4, "rarity": "common",
+                "userVariables": [{"name": "chosen_key", "type": "key", "initialKey": "j_joker"}],
+                "rules": [{"id": "rule", "trigger": trigger, "effects": [effect]}]
+            });
+            let preview = compile_item_from_data_with_segments(
+                item_type.into(), input.clone(), None, None, "mod".into(), true, None,
+            ).unwrap();
+            let exported = compile_item_from_data(
+                item_type.into(), input, None, None, "mod".into(), true, None,
+            ).unwrap();
+            assert!(preview.code.contains(expected), "{item_type}/{trigger}: {}", preview.code);
+            assert!(exported.contains(expected), "{item_type}/{trigger}: {exported}");
+        }
+        let input = serde_json::json!({
+            "objectKey": "comparisons", "name": "Comparisons", "description": "Test", "cost": 4, "rarity": "common",
+            "rules": [{"id": "rule", "trigger": "hand_played", "conditionGroups": [{
+                "operator": "and", "conditions": [
+                    {"id": "rank", "type": "rank_variable", "params": {
+                        "variable_name": {"value": "chosen_rank", "valueType": "user_var"},
+                        "specific_rank": {"value": "Q", "valueType": "text"}
+                    }},
+                    {"id": "suit", "type": "suit_variable", "params": {
+                        "variable_name": {"value": "chosen_suit", "valueType": "user_var"},
+                        "specific_suit": {"value": "Hearts", "valueType": "text"}
+                    }}
+                ]
+            }], "effects": [{"id": "mult", "type": "add_mult", "params": {"value": {"value": 2}}}]}]
+        });
+        let preview = compile_item_from_data_with_segments(
+            "joker".into(), input.clone(), None, None, "mod".into(), true, None,
+        ).unwrap();
+        let exported = compile_item_from_data(
+            "joker".into(), input, None, None, "mod".into(), true, None,
+        ).unwrap();
+        for code in [&preview.code, &exported] {
+            assert!(code.contains("local expected = 12"), "{code}");
+            assert!(code.contains(".suit == 'Hearts'"), "{code}");
+        }
+    }
+
+    #[test]
     fn frontend_booster_contents_and_pack_settings_reach_preview_and_export() {
         let input = serde_json::json!({
             "objectKey": "royal_pack", "name": "Royal Pack", "description": "Choose #1# of #2#",
@@ -2128,111 +2208,6 @@ pub fn ensure_balatro_mod_setup(
             .unwrap_or_default(),
         mods_path: mods_dir.to_string_lossy().to_string(),
     })
-}
-
-#[tauri::command]
-pub async fn download_release_asset(
-    url: String,
-    file_name: String,
-    app: AppHandle,
-) -> Result<String, String> {
-    if !url.starts_with("https://github.com/") {
-        return Err("Unsupported download host".to_string());
-    }
-
-    let sanitized_file_name = Path::new(&file_name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Invalid file name".to_string())?
-        .to_string();
-
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Failed to fetch installer: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to fetch installer (status {})",
-            response.status()
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read installer bytes: {}", e))?;
-
-    let download_dir = app
-        .path()
-        .download_dir()
-        .map_err(|e| format!("Failed to resolve download directory: {}", e))?;
-
-    let target_path = download_dir.join(sanitized_file_name);
-    fs::write(&target_path, &bytes)
-        .map_err(|e| format!("Failed to write installer to disk: {}", e))?;
-
-    Ok(target_path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-pub async fn install_update_and_restart(installer_path: String) -> Result<(), String> {
-    install_update_and_restart_impl(installer_path)
-}
-
-#[cfg(target_os = "windows")]
-fn install_update_and_restart_impl(installer_path: String) -> Result<(), String> {
-    use std::env;
-    use std::fs;
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    let exe_path =
-        env::current_exe().map_err(|e| format!("Failed to get current executable path: {}", e))?;
-
-    let mut script_path = env::temp_dir();
-    script_path.push(format!("update_{}.bat", std::process::id()));
-
-    let script_content = format!(
-        "@echo off\r\n\
-         ping 127.0.0.1 -n 3 > nul\r\n\
-         start /wait \"\" \"{}\" /S\r\n\
-         set \"INSTALLER={}\" \r\n\
-         if exist \"%INSTALLER%\" (\r\n\
-           for /l %%i in (1,1,10) do (\r\n\
-             del /f /q \"%INSTALLER%\" > nul 2>&1\r\n\
-             if not exist \"%INSTALLER%\" goto :installer_deleted\r\n\
-             ping 127.0.0.1 -n 2 > nul\r\n\
-           )\r\n\
-         )\r\n\
-         :installer_deleted\r\n\
-         start \"\" \"{}\"\r\n\
-         del \"%~f0\"\r\n",
-        installer_path,
-        installer_path,
-        exe_path.to_string_lossy()
-    );
-
-    fs::write(&script_path, script_content)
-        .map_err(|e| format!("Failed to write update script: {}", e))?;
-
-    let create_no_window = 0x08000000;
-    Command::new("cmd.exe")
-        .arg("/C")
-        .arg(&script_path)
-        .creation_flags(create_no_window)
-        .spawn()
-        .map_err(|e| format!("Failed to spawn update script: {}", e))?;
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn install_update_and_restart_impl(installer_path: String) -> Result<(), String> {
-    use std::process::Command;
-    Command::new(&installer_path)
-        .spawn()
-        .map_err(|e| format!("Failed to launch installer: {}", e))?;
-    Ok(())
 }
 
 #[tauri::command]
