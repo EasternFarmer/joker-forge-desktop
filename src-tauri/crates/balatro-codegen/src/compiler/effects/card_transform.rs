@@ -4,7 +4,7 @@ use crate::compiler::effects::utils::{
 };
 use crate::compiler::effects::EffectOutput;
 use crate::lua_ast::*;
-use crate::types::{EffectDef, ParamValue};
+use crate::types::{EffectDef, ObjectType, ParamValue};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -197,31 +197,36 @@ mod global_scope_tests {
 }
 
 /// Edit Card effect: modifies a card's rank, suit, enhancement, seal, and/or edition.
-///
-/// For joker context with `card_scored` trigger: wraps in an event manager call.
-/// For other joker triggers: returns `func = function() ... end` in the return table.
-/// For card context: applies modifications directly (pre_return for card_scored).
 pub fn edit_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
     let custom_message =
         get_str(effect, "customMessage").unwrap_or_else(|| "Card Modified!".to_string());
     let scoring = is_scoring_trigger(trigger);
 
-    // For joker context
-    let target = "context.other_card";
-
-    let mod_code = build_card_modification_code(effect, target, ctx);
+    let target = if matches!(
+        ctx.object_type,
+        ObjectType::Enhancement | ObjectType::Seal | ObjectType::Edition
+    ) {
+        "card"
+    } else {
+        "context and context.other_card"
+    };
+    let capture_target = format!("local edited_card = {target}");
+    let skip_stale_target = "if not edited_card or edited_card.removed or edited_card.destroyed or edited_card.shattered or edited_card.getting_sliced then return true end";
+    let mod_code = build_card_modification_code(effect, "edited_card", ctx);
 
     if scoring {
         // Wrap in event manager with pre_return
         let stmt = lua_raw_stmt(format!(
-            "local scored_card = context.other_card\n\
+            "{capture_target}\n\
+            if edited_card then\n\
             G.E_MANAGER:add_event(Event({{\n\
-                func = function(){}\n\
-                    card_eval_status_text(scored_card, 'extra', nil, nil, nil, {{message = \"{}\", colour = G.C.ORANGE}})\n\
+                func = function()\n\
+                    {skip_stale_target}{mod_code}\n\
+                    card_eval_status_text(edited_card, 'extra', nil, nil, nil, {{message = {message}, colour = G.C.ORANGE}})\n\
                     return true\n\
                 end\n\
-            }}))",
-            mod_code, custom_message
+            }}))\nend",
+            message = lua_str(&custom_message),
         ));
         EffectOutput {
             return_fields: vec![],
@@ -235,8 +240,7 @@ pub fn edit_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) ->
     } else {
         // func = function() ... end in return table
         let func_body = vec![lua_raw_stmt(format!(
-            "{}\n            return true",
-            mod_code
+            "{skip_stale_target}{mod_code}\n            return true"
         ))];
         EffectOutput {
             return_fields: vec![(
@@ -246,7 +250,7 @@ pub fn edit_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) ->
                     body: func_body,
                 },
             )],
-            pre_return: vec![],
+            pre_return: vec![lua_raw_stmt(capture_target)],
             config_vars: vec![],
             message: Some(lua_str(custom_message)),
             colour: Some(lua_raw_expr("G.C.BLUE")),

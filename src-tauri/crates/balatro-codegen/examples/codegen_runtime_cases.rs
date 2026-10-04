@@ -505,6 +505,94 @@ fn deck_settings_case(
         "prepare":prepare, "invoke":invoke, "verify":verify}));
 }
 
+fn append_playing_card_transform_cases(cases: &mut Vec<Value>) {
+    for edition in [json!("polychrome"),json!("e_polychrome"),json!({"value":"polychrome","valueType":"specific"})] {
+        let definition=joker(json!([{"id":"modify","trigger":"card_scored","effects":[{
+            "effect_type":"edit_playing_card","params":{"new_edition":edition}
+        }]}]));
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_polychrome_{edition}"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "invoke":"test_definition:calculate(actor,{individual=true,cardarea=G.play,other_card=observed_card});run_events()",
+            "verify":"assert(observed_card.edition.key=='e_polychrome' and observed_card.edition.x_mult==1.5);assert(other_playing_card.edition==nil)"}));
+    }
+    for (name,trigger,invoke,verify) in [
+        ("native_score_card","card_scored","local context={cardarea=G.play};SMODS.score_card(observed_card,context);assert(context.other_card==nil);run_events()","assert(observed_card.edition and observed_card.edition.key=='e_polychrome');assert(other_playing_card.edition==nil)"),
+        ("native_shared_scoring_context","card_scored","local context={cardarea=G.play};SMODS.score_card(observed_card,context);SMODS.score_card(other_playing_card,context);assert(context.other_card==nil);run_events()","assert(observed_card.edition.key=='e_polychrome' and other_playing_card.edition.key=='e_polychrome')"),
+        ("reused_context","card_scored","local context={individual=true,cardarea=G.play,other_card=observed_card};test_definition:calculate(actor,context);context.other_card=other_playing_card;run_events()","assert(observed_card.edition and observed_card.edition.key=='e_polychrome');assert(other_playing_card.edition==nil)"),
+        ("cleared_context","card_scored","local context={individual=true,cardarea=G.play,other_card=observed_card};test_definition:calculate(actor,context);context.other_card=nil;run_events()","assert(observed_card.edition and observed_card.edition.key=='e_polychrome')"),
+        ("missing_target","hand_played","local effect=test_definition:calculate(actor,{joker_main=true});if effect then SMODS.calculate_effect(effect,actor) end;run_events()","assert(observed_card.edition==nil and other_playing_card.edition==nil)"),
+    ] {
+        let definition=joker(json!([{"id":"modify","trigger":trigger,"effects":[{
+            "effect_type":"edit_playing_card","params":{"new_edition":"polychrome"}
+        }]}]));
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_{name}"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "invoke":invoke,"verify":verify}));
+    }
+    for flag in ["removed","destroyed","shattered","getting_sliced"] {
+        let definition=joker(json!([{"id":"modify","trigger":"card_scored","effects":[{
+            "effect_type":"edit_playing_card","params":{"new_edition":"polychrome"}
+        }]}]));
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_stale_{flag}"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "invoke":format!("test_definition:calculate(actor,{{individual=true,cardarea=G.play,other_card=observed_card}});observed_card.{flag}=true;run_events()"),
+            "verify":"assert(observed_card.edition==nil and other_playing_card.edition==nil)"}));
+    }
+    for (name,trigger,context) in [
+        ("discarded","card_discarded","{discard=true,other_card=observed_card}"),
+        ("held","card_held_in_hand","{individual=true,cardarea=G.hand,other_card=observed_card}"),
+        ("held_round_end","card_held_in_hand_end_of_round","{individual=true,cardarea=G.hand,end_of_round=true,other_card=observed_card}"),
+    ] {
+        let definition=joker(json!([{"id":"modify","trigger":trigger,"effects":[{
+            "effect_type":"edit_playing_card","params":{"new_edition":"polychrome"}
+        }]}]));
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_{name}_cleared_context"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "invoke":format!("local context={context};local effect=test_definition:calculate(actor,context);context.other_card=nil;SMODS.calculate_effect(effect,actor);run_events()"),
+            "verify":"assert(observed_card.edition.key=='e_polychrome');assert(other_playing_card.edition==nil)"}));
+    }
+    for (name,edition,expected) in [
+        ("custom",json!("e_mod_shiny"),"e_mod_shiny"),
+        ("random",json!("random"),"e_holo"),
+        ("legacy_alias",json!("polychrome"),"e_polychrome"),
+    ] {
+        let effect=if name=="legacy_alias" {"edit_card"} else {"edit_playing_card"};
+        let definition=joker(json!([{"id":"modify","trigger":"card_scored","effects":[{
+            "effect_type":effect,"params":{"new_edition":edition}
+        }]}]));
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_{name}"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "invoke":"SMODS.score_card(observed_card,{cardarea=G.play});run_events()",
+            "verify":format!("assert(observed_card.edition.key=='{expected}');assert(other_playing_card.edition==nil)")}));
+    }
+    for scope in ["local","global","persistent"] {
+        let mut definition=joker(json!([{"id":"modify","trigger":"card_scored","effects":[{
+            "effect_type":"edit_playing_card","params":{"new_edition":{"value":"chosen_edition","valueType":"userVariable"}}
+        }]}]));
+        definition.user_variables=serde_json::from_value(json!([{"name":"chosen_edition","var_type":"key","initial_value":"e_polychrome",
+            "is_global":scope!="local","is_persistent":scope=="persistent"}])).unwrap();
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_{scope}_edition_variable"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "prepare":"G.GAME.jf_global_vars={chosen_edition='e_polychrome'};JF_GLOBALS={chosen_edition='e_polychrome'}",
+            "invoke":"SMODS.score_card(observed_card,{cardarea=G.play});run_events()",
+            "verify":"assert(observed_card.edition.key=='e_polychrome');assert(other_playing_card.edition==nil)"}));
+    }
+    for object in ["enhancement","seal","edition"] {
+        let input=json!({"key":"runtime_test","name":"Runtime Test","description":["Test"],"atlas":"CustomCards","pos":{"x":0,"y":0},
+            "rules":[{"id":"modify","trigger":"card_scored","effects":[{"effect_type":"edit_playing_card","params":{"new_edition":"polychrome"}}]}]});
+        let chunk=match object {
+            "seal"=>compile_seal(&serde_json::from_value::<SealDef>(input).unwrap(),"mod"),
+            "edition"=>compile_edition(&serde_json::from_value::<EditionDef>(input).unwrap(),"mod"),
+            _=>compile_enhancement(&serde_json::from_value::<EnhancementDef>(input).unwrap(),"mod"),
+        };
+        cases.push(json!({"kind":"rule_options","name":format!("playing_card_transform_{object}_self_target"),
+            "playing_card_transform_runtime":true,"code":Emitter::new().emit_chunk(&chunk),
+            "prepare":"actor=observed_card;actor.ability.extra=copy_table((test_definition.config or {}).extra or {});actor.ability.seal=copy_table(test_definition.config or {})",
+            "invoke":"local context={main_scoring=true,cardarea=G.play,other_card=other_playing_card};local effect=test_definition:calculate(actor,context);context.other_card=nil;if effect then SMODS.calculate_effect(effect,actor) end;run_events()",
+            "verify":"assert(actor.edition and actor.edition.key=='e_polychrome');assert(other_playing_card.edition==nil)"}));
+    }
+}
+
 fn append_deck_settings_cases(cases: &mut Vec<Value>) {
     // Exercise actual generated Back.apply through the subsequent start_run
     // overwrites, rather than evaluating an isolated effect or returned table.
@@ -1986,6 +2074,7 @@ fn main() {
     append_retrigger_scoring_cases(&mut cases);
     append_card_retrigger_cases(&mut cases);
     append_card_self_destruct_cases(&mut cases);
+    append_playing_card_transform_cases(&mut cases);
     append_deck_settings_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);

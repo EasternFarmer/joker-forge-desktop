@@ -237,6 +237,59 @@ end
 POST_TRIGGER_RUNTIME = steamodded_post_trigger_runtime()
 
 
+def steamodded_playing_card_transform_runtime():
+    """Apply editions with Steamodded's real Card implementation, not a setter stub."""
+    source = (ROOT / "public/other/smods-main/src/overrides.lua").read_text(encoding="utf-8")
+    method = "function Card:set_edition(" + source.split("function Card:set_edition(", 1)[1]
+    method = method.split("\n-- _key = key value for random seed", 1)[0]
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    sections = [
+        ("SMODS.trigger_effects = function", "\nSMODS.calculate_effect = function"),
+        ("function SMODS.calculate_card_areas", "\n\n-- Updates a [context]"),
+        ("function SMODS.score_card", "\nfunction SMODS.calculate_main_scoring"),
+    ]
+    scoring = "\n".join(start + utils.split(start, 1)[1].split(end, 1)[0]
+                        for start, end in sections)
+    return method + "\n" + scoring + """
+SMODS.enh_cache={write=function() end}
+SMODS.Sticker={obj_buffer={}}
+G.CONTROLLER={locks={}}
+G.C.ORANGE=1
+for key,config in pairs({e_foil={chips=50},e_holo={mult=10},e_polychrome={x_mult=1.5},
+ e_negative={card_limit=1},e_mod_shiny={x_mult=2}}) do
+ G.P_CENTERS[key]={key=key,set='Edition',config=config,discovered=true,
+  sound={sound='edition',per=1,vol=1}}
+end
+function play_sound() end
+function discover_card() end
+function check_for_unlock() end
+function playing_card()
+ local card={ability={set='Default',card_limit=0,extra_slots_used=0},
+  config={center={key='c_base',set='Default'}},base={id=2,suit='Hearts',nominal=2},
+  ignore_base_shader={},ignore_shadow={},base_cost=1,facing='front',area=G.play}
+ function card:juice_up() self.juice_calls=(self.juice_calls or 0)+1 end
+ return setmetatable(card,Card)
+end
+observed_card=playing_card()
+other_playing_card=playing_card()
+G.play={cards={observed_card,other_playing_card}}
+observed_card.area=G.play;other_playing_card.area=G.play
+G.hand={cards={}}
+SMODS.get_card_areas=function(kind) return kind=='jokers' and {{cards={actor}}} or {} end
+SMODS.check_looping_context=function() return false end
+SMODS.calculate_quantum_enhancements=function() end
+SMODS.calculate_repetitions=function() end
+function eval_card(card,context)
+ if card~=actor then return {},{} end
+ local effect=test_definition:calculate(card,context)
+ return effect and {jokers=effect} or {},{}
+end
+"""
+
+
+PLAYING_CARD_TRANSFORM_RUNTIME = steamodded_playing_card_transform_runtime()
+
+
 def card_area_selection_runtime(lua_library):
     """Exercise installed CardArea selection when Balatro is beside its Lua DLL."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -511,6 +564,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + SCORING_PARAMETERS
             if case.get("card_destruction_runtime"):
                 source += "\n" + CARD_DESTRUCTION_RUNTIME
+            if case.get("playing_card_transform_runtime"):
+                source += "\n" + PLAYING_CARD_TRANSFORM_RUNTIME
             if case["kind"] == "deck_settings":
                 source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
             else:
