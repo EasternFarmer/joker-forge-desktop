@@ -413,7 +413,7 @@ pub fn validate_game_var_reference(value: &ParamValue) -> Result<(), String> {
     Ok(())
 }
 
-fn is_explicit_game_var(value: &ParamValue) -> bool {
+pub(super) fn is_explicit_game_var(value: &ParamValue) -> bool {
     match value {
         ParamValue::Str(value) => value.starts_with("GAMEVAR:"),
         ParamValue::Typed(value) => {

@@ -208,6 +208,67 @@ fn live_preview_bindings_cover_condition_config_chances_and_loop_counts() {
 }
 
 #[test]
+fn loop_game_variable_counts_remain_runtime_expressions() {
+    for count in [
+        serde_json::json!("GAMEVAR:joker_count|2|1"),
+        serde_json::json!({"valueType": "game_var", "value": "GAMEVAR:joker_count|2|1"}),
+        serde_json::json!({"valueType": "gameVariable", "value": "GAMEVAR:joker_count|2|1"}),
+        serde_json::json!({"valueType": "number", "value": "GAMEVAR:joker_count|2|1"}),
+        serde_json::json!({"valueType": "gameVariable", "value": "joker_count"}),
+    ] {
+        let joker = preview_test_joker(serde_json::json!([{
+            "id": "rule", "trigger": "hand_played", "loop_groups": [{
+                "id": "loop", "count": count,
+                "effects": [{"id": "chips", "effect_type": "add_chips", "params": {
+                    "value": {"valueType": "game_var", "value": "GAMEVAR:joker_count|3|2"}
+                }}]
+            }]
+        }]));
+        let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+        let loop_header = code.lines().find(|line| line.trim_start().starts_with("for i = 1,")).unwrap();
+        assert!(loop_header.contains("G.jokers.cards"), "{code}");
+        assert!(loop_header.contains("tonumber("), "{code}");
+        assert!(!code.contains("loop_count_0"), "{code}");
+        assert!(!code.contains("GAMEVAR:"), "{code}");
+        assert!(code.contains("chips = 2 + #"), "{code}");
+        assert!(code.contains("* 3"), "{code}");
+    }
+}
+
+#[test]
+fn loop_counts_preserve_scoped_user_variables_and_numeric_config_bindings() {
+    for value_type in ["user_var", "userVariable"] {
+        for is_global in [false, true] {
+            let mut joker = preview_test_joker(serde_json::json!([{
+                "id": "rule", "trigger": "hand_played", "loop_groups": [{
+                    "id": "loop", "count": {"valueType": value_type, "value": "repeat_count"},
+                    "effects": [{"id": "mult", "effect_type": "add_mult", "params": {"value": 2}}]
+                }]
+            }]));
+            joker.user_variables = serde_json::from_value(serde_json::json!([
+                {"name": "repeat_count", "var_type": "number", "initial_value": 3, "is_global": is_global}
+            ])).unwrap();
+            let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+            let loop_header = code.lines().find(|line| line.trim_start().starts_with("for i = 1,")).unwrap();
+            let expected_path = if is_global { "G.GAME.jf_global_vars.repeat_count" } else { "card.ability.extra.repeat_count" };
+            assert!(loop_header.contains(expected_path), "{code}");
+            assert!(!code.contains("loop_count_0"), "{code}");
+        }
+    }
+    for count in [serde_json::json!(3), serde_json::json!("3"), serde_json::json!({"valueType": "number", "value": "3"})] {
+        let joker = preview_test_joker(serde_json::json!([{
+            "id": "rule", "trigger": "hand_played", "loop_groups": [{
+                "id": "loop", "count": count,
+                "effects": [{"id": "mult", "effect_type": "add_mult", "params": {"value": 2}}]
+            }]
+        }]));
+        let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+        assert!(code.contains("loop_count_0 = 3"), "{code}");
+        assert!(code.contains("for i = 1, card.ability.extra.loop_count_0 do"), "{code}");
+    }
+}
+
+#[test]
 fn live_preview_omits_ambiguous_literals_and_keeps_unrelated_fields_separate() {
     let joker = preview_test_joker(serde_json::json!([{
         "id": "rule", "trigger": "hand_played", "condition_groups": [{ "conditions": [
@@ -429,6 +490,24 @@ fn description_game_bindings_accept_current_catalog_ids_and_dynamic_parameters()
     assert!(code.contains("3 +"));
     assert!(code.contains("* 2"));
     assert!(!code.contains("context."));
+}
+
+#[test]
+fn description_game_bindings_preserve_scaling_and_legacy_defaults() {
+    let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
+    ctx.set_description_variables(Some(serde_json::from_value(serde_json::json!([
+        { "kind": "game", "id": "joker_count" },
+        { "kind": "game", "id": "joker_count", "multiplier": 2.5, "startsFrom": 3 },
+        { "kind": "game", "id": "current_money", "multiplier": -2, "starts_from": 7 },
+        { "kind": "game", "id": "missing", "multiplier": 2, "startsFrom": 3 }
+    ])).unwrap()));
+    let code = ordered_description_code(&ctx);
+    assert!(code.contains("G and G.jokers and G.jokers.cards"), "{code}");
+    assert!(code.contains("3 +"), "{code}");
+    assert!(code.contains("* 2.5"), "{code}");
+    assert!(code.contains("7 +"), "{code}");
+    assert!(code.contains("* -2"), "{code}");
+    assert!(!code.contains("missing"), "{code}");
 }
 
 fn make_rule_output(

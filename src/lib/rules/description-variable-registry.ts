@@ -18,7 +18,7 @@ export type DescriptionVariableBinding =
       group_id: string;
       part: "numerator" | "denominator";
     }
-  | { kind: "game"; id: string };
+  | { kind: "game"; id: string; multiplier?: number; startsFrom?: number };
 
 export type DescriptionVariableToken = {
   label: string;
@@ -259,32 +259,43 @@ const inferConfigVariables = (
   return tokens;
 };
 
-const extractGameVariableIds = (rules: Rule[] | undefined): string[] => {
-  if (!Array.isArray(rules)) return [];
+type GameVariableReference = {
+  id: string;
+  multiplier: number;
+  startsFrom: number;
+};
 
-  const ids = new Set<string>();
+const extractGameVariableReferences = (
+  rules: Rule[] | undefined,
+): { existingIds: string[]; references: GameVariableReference[] } => {
+  if (!Array.isArray(rules)) return { existingIds: [], references: [] };
+
+  const existingIds = new Set<string>();
+  const references = new Map<string, GameVariableReference>();
   const ingest = (
-    params?: Record<string, { value: unknown; valueType?: string }>,
+    params?: Record<string, ParameterValue | string>,
   ) => {
     if (!params) return;
     for (const payload of Object.values(params)) {
       if (!payload) continue;
+      const value = typeof payload === "string" ? payload : payload.value;
+      const valueType = typeof payload === "string" ? undefined : payload.valueType;
+      if (typeof value !== "string") continue;
 
-      if (
-        payload.valueType === "gameVariable" &&
-        typeof payload.value === "string"
-      ) {
-        const direct = payload.value.replace(/^GAMEVAR:/, "").split("|")[0];
-        if (direct) ids.add(direct);
-      }
+      const encoded = value.startsWith("GAMEVAR:");
+      if (!encoded && valueType !== "gameVariable" && valueType !== "game_var") continue;
 
+      const parts = encoded ? value.slice("GAMEVAR:".length).split("|") : [value];
+      const [id] = parts;
+      const multiplier = encoded ? Number(parts[1]) : 1;
+      const startsFrom = encoded ? Number(parts[2]) : 0;
       if (
-        typeof payload.value === "string" &&
-        payload.value.startsWith("GAMEVAR:")
-      ) {
-        const parsed = payload.value.replace("GAMEVAR:", "").split("|")[0];
-        if (parsed) ids.add(parsed);
-      }
+        !id || (encoded && (parts.length !== 3 || !parts[1] || !parts[2])) ||
+        !Number.isFinite(multiplier) || !Number.isFinite(startsFrom)
+      ) continue;
+
+      if ((encoded && typeof payload !== "string") || valueType === "gameVariable") existingIds.add(id);
+      references.set(`${id}|${multiplier}|${startsFrom}`, { id, multiplier, startsFrom });
     }
   };
 
@@ -314,7 +325,7 @@ const extractGameVariableIds = (rules: Rule[] | undefined): string[] => {
     }
   }
 
-  return Array.from(ids);
+  return { existingIds: Array.from(existingIds), references: Array.from(references.values()) };
 };
 
 export const buildDescriptionVariableTokens = (
@@ -376,7 +387,11 @@ export const buildDescriptionVariableTokens = (
     push(token);
   }
 
-  for (const gameVarId of extractGameVariableIds(item.rules)) {
+  const { existingIds, references: gameReferences } = extractGameVariableReferences(item.rules);
+  for (const gameVarId of new Set([
+    ...existingIds,
+    ...gameReferences.map((reference) => reference.id),
+  ])) {
     const label = GAME_VARIABLE_LABELS.get(gameVarId) || gameVarId;
     const source = `GAMEVAR:${gameVarId}`;
     push({
@@ -384,6 +399,20 @@ export const buildDescriptionVariableTokens = (
       source,
       category: "game",
       binding: { kind: "game", id: gameVarId },
+      previewValue: label,
+    });
+  }
+
+  for (const { id, multiplier, startsFrom } of gameReferences) {
+    if (multiplier === 1 && startsFrom === 0) continue;
+    const variableLabel = GAME_VARIABLE_LABELS.get(id) || id;
+    const scaledLabel = multiplier === 1 ? variableLabel : `${multiplier} × ${variableLabel}`;
+    const label = startsFrom === 0 ? scaledLabel : `${startsFrom} + (${scaledLabel})`;
+    push({
+      label,
+      source: `GAMEVAR:${id}|${multiplier}|${startsFrom}`,
+      category: "game",
+      binding: { kind: "game", id, multiplier, startsFrom },
       previewValue: label,
     });
   }

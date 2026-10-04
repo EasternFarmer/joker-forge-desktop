@@ -543,14 +543,36 @@ fn compile_loop_group(
 
     let loop_index = ctx.next_loop_var_index();
     let loop_var_name = format!("loop_count_{}", loop_index);
-    let loop_count = lg.count.as_i64().unwrap_or(1).max(1);
-    ctx.add_config_int(&loop_var_name, loop_count);
-    ctx.bind_preview_group_value(&loop_var_name, vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("repetitions"), serde_json::json!("value")], &lg.count);
+    let dynamic_count = if values::is_explicit_game_var(&lg.count) {
+        Some(values::resolve_value(&lg.count, ctx.object_type, None))
+    } else if let Some(name) = param_value_user_var_name(&lg.count)
+        .filter(|name| ctx.has_user_var(name))
+    {
+        Some(ctx.user_var_expr(&name))
+    } else if matches!(&lg.count, ParamValue::Typed(value) if values::is_range_type(&value.value_type))
+        || lg.count.as_str().is_some_and(|value| value.starts_with("RANGE:"))
+    {
+        Some(values::resolve_value(&lg.count, ctx.object_type, None))
+    } else {
+        None
+    };
+    let loop_stop = if let Some(count) = dynamic_count {
+        // Lua evaluates the bound once, so effects may mutate the source safely.
+        // A runtime count of zero must skip the group rather than repeat once.
+        lua_raw_expr(format!("math.max(0, math.floor(tonumber({count}) or 0))"))
+    } else {
+        let loop_count = lg.count.as_i64()
+            .or_else(|| lg.count.as_str()?.trim().parse::<i64>().ok())
+            .unwrap_or(1).max(1);
+        ctx.add_config_int(&loop_var_name, loop_count);
+        ctx.bind_preview_group_value(&loop_var_name, vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("repetitions"), serde_json::json!("value")], &lg.count);
+        lua_field(lua_raw_expr(ctx.ability_path()), &loop_var_name)
+    };
 
     let loop_stmt = Stmt::ForRange {
         var: "i".to_string(),
         start: lua_int(1),
-        stop: lua_field(lua_raw_expr(ctx.ability_path()), &loop_var_name),
+        stop: loop_stop,
         step: None,
         body: inner_stmts,
     };
@@ -984,6 +1006,20 @@ fn description_game_reference(reference: &str) -> Expr {
     description_game_value(reference)
 }
 
+fn description_scaled_game_value(id: &str, multiplier: f64, starts_from: f64) -> Expr {
+    if !multiplier.is_finite()
+        || !starts_from.is_finite()
+        || values::game_var_lua_code(id).is_none()
+    {
+        return lua_int(0);
+    }
+    let value = description_game_value(id);
+    if multiplier == 1.0 && starts_from == 0.0 {
+        return value;
+    }
+    lua_add(lua_num(starts_from), lua_mul(value, lua_num(multiplier)))
+}
+
 fn description_param_value(value: &ParamValue, ctx: &CompileContext) -> Expr {
     match value {
         ParamValue::Int(n) => lua_int(*n),
@@ -1180,7 +1216,13 @@ fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<Table
                     .map(|name| description_scoped_value(ctx, name, fallback.clone()))
                     .unwrap_or(fallback)
             }
-            DescriptionVariableBinding::Game { id } => description_game_value(id),
+            DescriptionVariableBinding::Game {
+                id,
+                multiplier,
+                starts_from,
+            } => {
+                description_scaled_game_value(id, *multiplier, *starts_from)
+            }
             DescriptionVariableBinding::Probability { group_id, part } => {
                 let (numerator, denominator) =
                     probabilities.entry(group_id.clone()).or_insert_with(|| {

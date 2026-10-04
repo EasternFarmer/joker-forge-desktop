@@ -2503,6 +2503,32 @@ mod tests {
     }
 
     #[test]
+    fn game_variable_descriptions_and_loops_survive_frontend_mapping() {
+        let input: JokerDataInput = serde_json::from_value(serde_json::json!({
+            "objectKey": "dynamic", "name": "Dynamic", "description": "#1#", "cost": 4, "rarity": "common",
+            "descriptionVariables": [
+                { "kind": "game", "id": "joker_count", "multiplier": 2, "startsFrom": 3 }
+            ],
+            "rules": [{"id": "loop", "trigger": "hand_played", "loops": [{
+                "id": "repeat", "repetitions": { "value": "GAMEVAR:joker_count|2|3", "valueType": "game_var" },
+                "effects": [{ "id": "money", "type": "set_dollars", "params": {
+                    "value": { "value": "GAMEVAR:joker_count|2|3", "valueType": "gameVariable" }
+                }}]
+            }]}]
+        })).unwrap();
+        let def = joker_data_to_def(&input, "mod", AtlasPosInput { x: 0, y: 0 }, None);
+        let code = balatro_codegen::Emitter::new().emit_chunk(&balatro_codegen::compile_joker(&def, "mod"));
+        assert!(matches!(&def.description_variables.as_ref().unwrap()[0],
+            DescriptionVariableBinding::Game { id, multiplier, starts_from }
+                if id == "joker_count" && *multiplier == 2.0 && *starts_from == 3.0));
+        assert!(matches!(&def.rules[0].loop_groups[0].count,
+            ParamValue::Typed(value) if value.value_type == "game_var" && value.value == "GAMEVAR:joker_count|2|3"));
+        assert!(code.contains("for i = 1, math.max(0, math.floor(tonumber(3 +"), "{code}");
+        assert!(code.contains("G.jokers.cards"), "{code}");
+        assert!(code.contains("dollars = 3 +"), "{code}");
+    }
+
+    #[test]
     fn wrapped_param_input_accepts_raw_number_shape() {
         let parsed: WrappedParamInput =
             serde_json::from_str("12").expect("raw number param should deserialize");

@@ -187,6 +187,7 @@ export const DescriptionEditor = memo(
           | "user"
           | "loc"
           | "probability"
+          | "game"
           | "userGlobal"
           | "userGlobalPersistent";
         label: string;
@@ -204,11 +205,12 @@ export const DescriptionEditor = memo(
         },
         { id: "loc", label: "Description Values", items: [] },
         { id: "probability", label: "Chance", items: [] },
+        { id: "game", label: "Game Variables", items: [] },
       ];
 
       variableTokens.forEach((token, idx) => {
         // Keep the original slot numbers while hiding internal rule values.
-        if (token.category === "config" || token.category === "game") return;
+        if (token.category === "config") return;
 
         const index = idx + 1;
         const labelText = `#${index}# ${token.label}`;
@@ -227,6 +229,11 @@ export const DescriptionEditor = memo(
 
         if (token.category === "probability") {
           groups[4].items.push({ index, token });
+          return;
+        }
+
+        if (token.category === "game") {
+          groups[5].items.push({ index, token });
           return;
         }
 
@@ -412,6 +419,7 @@ export const DescriptionEditor = memo(
                         {group.id === "probability" && (
                           <DiceFive className="h-3 w-3" />
                         )}
+                        {group.id === "game" && <Cube className="h-3 w-3" />}
                         <span>{group.label}</span>
                       </p>
                       <div className="space-y-2">
@@ -435,7 +443,8 @@ export const DescriptionEditor = memo(
                                 </div>
                                 {token.previewValue !== undefined && (
                                   <div className="text-[10px] text-muted-foreground mt-0.5 truncate">
-                                    Initial value: {token.previewValue}
+                                    {token.category === "game" ? "Live value: " : "Initial value: "}
+                                    {token.previewValue}
                                   </div>
                                 )}
                               </button>
@@ -450,7 +459,7 @@ export const DescriptionEditor = memo(
                   <p className="text-[11px] text-muted-foreground">
                     {variableSearch.trim()
                       ? "No variables match your search."
-                      : "Add a variable or a chance group in the Rule Builder to use it here."}
+                      : "Use a game variable, user variable, or chance group in the Rule Builder to add it here."}
                   </p>
                 )}
               </div>

@@ -9,7 +9,10 @@ const ts = require("typescript");
 function loadTypeScript(relativePath, imports = {}) {
   const filePath = path.join(__dirname, "..", relativePath);
   const compiled = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+      jsx: ts.JsxEmit.ReactJSX,
+    },
     fileName: filePath,
   });
   const module = { exports: {} };
@@ -30,6 +33,10 @@ const gameVariables = loadTypeScript("src/lib/content/game-vars.ts", {
 const { runPreExportChecks } = loadTypeScript("src/lib/export/pre-export-checks.ts", {
   "@/lib/content/game-vars": gameVariables,
 });
+const descriptionRegistry = loadTypeScript("src/lib/rules/description-variable-registry.ts", {
+  "@/lib/content/game-vars": gameVariables,
+});
+const { buildDescriptionVariableTokens } = descriptionRegistry;
 const aliases = [
   "hand_size", "remaining_hands", "remaining_discards", "deck_size", "full_deck_size",
   "player_money", "dollars", "ante_level", "blind_chips", "blind_mult", "consumable_count",
@@ -171,4 +178,144 @@ test("ordinary literals, user variables and manually edited code remain editable
     locVars: { vars: ["GAMEVAR:missing|1|0"] },
     rules: [{ effects: [{ customMessage: "GAMEVAR:missing|1|0", params: {} }] }],
   })).length, 0);
+});
+
+test("description bindings include game variables used by conditions, chance groups and loops", () => {
+  const game = (id, multiplier = 1, startsFrom = 0) => ({
+    value: `GAMEVAR:${id}|${multiplier}|${startsFrom}`, valueType: "game_var",
+  });
+  const tokens = buildDescriptionVariableTokens({ objectType: "joker", rules: [{
+    conditionGroups: [{ conditions: [{ params: { value: game("cards_in_deck") } }] }],
+    effects: [{ id: "chips", type: "add_chips", params: { value: game("joker_count", 2, 3) } }],
+    randomGroups: [{ id: "chance", chance_numerator: game("hands_remaining"),
+      chance_denominator: { value: 2 }, effects: [] }],
+    loops: [{ repetitions: game("joker_count", 2, 3), effects: [{
+      id: "money", type: "set_dollars", params: { value: game("current_money", -1, 5) },
+    }] }],
+  }] });
+  const bindings = tokens.filter((token) => token.category === "game").map((token) => token.binding);
+  assert.deepEqual(JSON.parse(JSON.stringify(bindings)), [
+    { kind: "game", id: "cards_in_deck" },
+    { kind: "game", id: "joker_count" },
+    { kind: "game", id: "hands_remaining" },
+    { kind: "game", id: "current_money" },
+    { kind: "game", id: "joker_count", multiplier: 2, startsFrom: 3 },
+    { kind: "game", id: "current_money", multiplier: -1, startsFrom: 5 },
+  ]);
+  assert.equal(tokens[0].binding.fallback.value, "GAMEVAR:joker_count|2|3");
+  assert.ok(tokens.some((token) => token.label === "3 + (2 × Joker Count)"));
+});
+
+test("description game bindings recognize both typed aliases and raw parameter strings", () => {
+  const tokens = buildDescriptionVariableTokens({ rules: [{ effects: [{ params: {
+    first: { value: "joker_count", valueType: "game_var" },
+    second: { value: "cards_in_deck", valueType: "gameVariable" },
+    raw: "GAMEVAR:cards_in_deck|0|4",
+    duplicate: { value: "GAMEVAR:cards_in_deck|0.0|4e0", valueType: "game_var" },
+    ordinary: { value: "cards_in_hand", valueType: "variable" },
+  } }] }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(tokens.map((token) => token.binding))), [
+    { kind: "game", id: "cards_in_deck" },
+    { kind: "game", id: "joker_count" },
+    { kind: "game", id: "cards_in_deck", multiplier: 0, startsFrom: 4 },
+  ]);
+});
+
+test("newly recognized typed aliases append after existing description game slots", () => {
+  const tokens = buildDescriptionVariableTokens({ rules: [{ effects: [{ params: {
+    newVariable: { value: "hands_remaining", valueType: "game_var" },
+    newRawVariable: "GAMEVAR:cards_in_hand|1|0",
+    existingVariableAlias: { value: "joker_count", valueType: "game_var" },
+    existingEncoded: { value: "GAMEVAR:cards_in_deck|2|3", valueType: "game_var" },
+    existingTyped: { value: "current_money", valueType: "gameVariable" },
+    existingEncodedLater: { value: "GAMEVAR:joker_count|1|0", valueType: "game_var" },
+  } }] }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(tokens.map((token) => token.binding))), [
+    { kind: "game", id: "cards_in_deck" },
+    { kind: "game", id: "current_money" },
+    { kind: "game", id: "joker_count" },
+    { kind: "game", id: "hands_remaining" },
+    { kind: "game", id: "cards_in_hand" },
+    { kind: "game", id: "cards_in_deck", multiplier: 2, startsFrom: 3 },
+  ]);
+});
+
+function renderDescriptionEditor(item, search = "") {
+  const element = (type, props) => ({ type, props });
+  const imports = {
+    react: {
+      memo: (component) => component, useCallback: (callback) => callback,
+      useEffect() {}, useMemo: (factory) => factory(), useRef: () => ({ current: null }),
+      useState: (initial) => [initial === "" ? search : initial, () => {}],
+    },
+    "react/jsx-runtime": { jsx: element, jsxs: element },
+    "@/lib/core/utils": { cn: () => "" },
+    "@/lib/balatro/balatro-text-formatter": {},
+    "@/lib/rules/description-variable-registry": descriptionRegistry,
+    "@/lib/rules/auto-description": { generateDescriptionFromRules: () => "" },
+    "@/lib/core/search": loadTypeScript("src/lib/core/search.ts"),
+    "@phosphor-icons/react": {},
+  };
+  for (const component of ["button", "input", "scroll-area", "textarea", "separator", "tooltip"]) {
+    imports[`@/components/ui/${component}`] = {};
+  }
+  const { DescriptionEditor } = loadTypeScript("src/components/pages/description-editor.tsx", imports);
+  return DescriptionEditor({ value: "", onChange() {}, item });
+}
+
+function elementText(node) {
+  if (Array.isArray(node)) return node.map(elementText).join("");
+  if (node && typeof node === "object") return elementText(node.props?.children);
+  return typeof node === "string" || typeof node === "number" ? String(node) : "";
+}
+
+function elementButtons(node) {
+  if (Array.isArray(node)) return node.flatMap(elementButtons);
+  if (!node || typeof node !== "object") return [];
+  return [
+    ...(node.type === "button" ? [node] : []),
+    ...elementButtons(node.props?.children),
+  ];
+}
+
+test("description editor exposes game variables with their exported placeholder numbers", () => {
+  const item = { objectType: "joker", userVariables: [{ name: "bonus", initialValue: 2 }],
+    rules: [{ effects: [{ id: "chips", type: "add_chips", params: {
+      value: { value: "GAMEVAR:joker_count|2|3", valueType: "game_var" },
+    } }] }] };
+  for (const search of ["", "joker_count"]) {
+    const tree = renderDescriptionEditor(item, search);
+    const labels = elementButtons(tree).map(elementText);
+    assert.ok(elementText(tree).includes("Game Variables"));
+    assert.ok(labels.some((label) => label.startsWith("Joker Count#3#")), search);
+    assert.ok(labels.some((label) => label.startsWith("3 + (2 × Joker Count)#4#")), search);
+    assert.ok(!labels.some((label) => label.startsWith("chips0")), "Internal config slots stay hidden");
+  }
+});
+
+test("explicit localization slots retain their order when rules use game variables", () => {
+  const tokens = buildDescriptionVariableTokens({ locVars: { vars: [7, 7, "value"] },
+    rules: [{ effects: [{ params: { value: { value: "GAMEVAR:joker_count|2|3" } } }] }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(tokens.map((token) => token.binding))), [
+    { kind: "literal", value: 7 }, { kind: "literal", value: 7 }, { kind: "literal", value: "value" },
+  ]);
+});
+
+test("description game bindings validate finite starting values and multipliers", () => {
+  for (const binding of [
+    { kind: "game", id: "joker_count" },
+    { kind: "game", id: "joker_count", multiplier: -1.5, startsFrom: 2 },
+    { kind: "game", id: "joker_count", multiplier: 0, starts_from: 0 },
+  ]) {
+    assert.equal(runPreExportChecks(project("jokers", { descriptionVariables: [binding] })).length, 0);
+  }
+  for (const field of ["multiplier", "startsFrom", "starts_from"]) {
+    for (const value of [NaN, Infinity, -Infinity, "2", null]) {
+      const issues = runPreExportChecks(project("jokers", { descriptionVariables: [{
+        kind: "game", id: "joker_count", [field]: value,
+      }] }));
+      assert.equal(issues.length, 1, `${field} ${value}`);
+      assert.match(issues[0].message, /starting value or multiplier is invalid/);
+    }
+  }
 });

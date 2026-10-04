@@ -143,11 +143,23 @@ const checkItemGameVariables = (
       if (!binding || typeof binding !== "object") return;
       const value = binding as Record<string, unknown>;
       if (value.kind === "game") {
-        const error = typeof value.id !== "string"
+        let error = typeof value.id !== "string"
           ? "Game variables need a valid selection."
           : GAME_VARIABLE_IDS.has(value.id)
             ? null
             : `Unknown game variable "${value.id}". Choose a supported variable in the Rule Builder.`;
+        if (!error) {
+          const startsFrom = value.startsFrom !== undefined
+            ? value.startsFrom
+            : value.starts_from !== undefined ? value.starts_from : 0;
+          const multiplier = value.multiplier === undefined ? 1 : value.multiplier;
+          if (
+            typeof multiplier !== "number" || !Number.isFinite(multiplier) ||
+            typeof startsFrom !== "number" || !Number.isFinite(startsFrom)
+          ) {
+            error = "The game variable's starting value or multiplier is invalid. Choose the variable again and enter finite numbers.";
+          }
+        }
         if (error) report(`description variable ${index + 1}`, error);
       } else if (value.kind === "config") {
         checkValues(value.fallback, `description variable ${index + 1}`);

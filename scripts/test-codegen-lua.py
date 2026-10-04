@@ -328,6 +328,7 @@ G={
 GAME_STATES = {
     "no_game": "G=nil;context=nil;card=nil;",
     "empty_game": "G={};context={};card={};",
+    "collection_game": "G={SETTINGS={profile=1},PROFILES={{}},hand={},deck={},jokers={},consumeables={}};context=nil;card=nil;",
     "partial_game": "G={GAME={},hand={},deck={},jokers={},consumeables={},SETTINGS={},PROFILES={}};context={};card={};",
     "populated_game": POPULATED,
 }
@@ -354,6 +355,29 @@ KNOWN_VALUES = {
 def run_checks(lua, cases):
     checks = 0
     for case in cases:
+        if case["kind"] in ("tooltip", "description_game"):
+            for scenario, setup in GAME_STATES.items():
+                for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):
+                    # Collection previews can pass no Card or an incomplete Card,
+                    # and loc_vars never receives a scoring context.
+                    source = HELPERS + setup + "\ncontext=nil;" + case["code"]
+                    source += f"\nlocal result=test_definition:loc_vars({{}}, {tooltip_card});"
+                    source += f"assert(#result.vars=={len(case['ids'])});"
+                    for index, variable in enumerate(case["ids"], 1):
+                        source += f"numeric(result.vars[{index}]);"
+                        if case["kind"] == "description_game":
+                            base = (2 if variable == "hand_level" else KNOWN_VALUES[variable]) if scenario == "populated_game" else 0
+                            expected = case["starts_from"] + base * case["multiplier"]
+                            source += f"assert(result.vars[{index}]=={expected}, '{variable}');"
+                        elif scenario == "populated_game" and variable in KNOWN_VALUES:
+                            source += f"assert(result.vars[{index}]=={KNOWN_VALUES[variable]}, '{variable}');"
+                    source += "return #result.vars"
+                    try:
+                        evaluate(lua, source)
+                    except AssertionError as error:
+                        raise AssertionError(f"{case['kind']} {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
+                    checks += len(case["ids"])
+            continue
         if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings"):
             state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
             source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
@@ -403,16 +427,7 @@ def run_checks(lua, cases):
         for scenario, setup in GAME_STATES.items():
             source = HELPERS + setup + "\n"
             expected = None
-            if case["kind"] == "tooltip":
-                # Tooltip callbacks have no scoring context, even during a run.
-                source += "context=nil;" + case["code"] + "\nlocal result=test_definition:loc_vars({}, {ability={extra={}}});"
-                source += f"assert(#result.vars=={len(case['ids'])});"
-                for index, variable in enumerate(case["ids"], 1):
-                    source += f"numeric(result.vars[{index}]);"
-                    if scenario == "populated_game" and variable in KNOWN_VALUES:
-                        source += f"assert(result.vars[{index}]=={KNOWN_VALUES[variable]}, '{variable}');"
-                source += "return #result.vars"
-            elif case["kind"] == "joker":
+            if case["kind"] == "joker":
                 source += case["code"] + "\nlocal card={ability=test_definition.config};"
                 source += "local result=test_definition:calculate(card, {joker_main=true}); local tooltip=test_definition:loc_vars({},card);"
                 source += "numeric(tooltip.vars[1]); assert(result.mult==tooltip.vars[1]); return numeric(result.mult)"
@@ -422,13 +437,13 @@ def run_checks(lua, cases):
                 result = evaluate(lua, source)
             except AssertionError as error:
                 raise AssertionError(f"{case['kind']} {case['name']} / {scenario}: {error}") from error
-            if case["kind"] not in ("game", "tooltip"):
+            if case["kind"] != "game":
                 expected = 9 if case["name"] == "GAMEVAR:cards_in_deck|2|3" and scenario == "populated_game" else 3 if case["name"] == "GAMEVAR:cards_in_deck|2|3" else 0
             elif case["kind"] == "game" and scenario == "populated_game":
                 expected = KNOWN_VALUES.get(case["name"])
             if expected is not None:
                 assert result == expected, (case["name"], scenario, result, expected)
-            checks += len(case["ids"]) if case["kind"] == "tooltip" else 1
+            checks += 1
     print(f"Passed {checks} Lua 5.1 runtime checks across {len(cases)} compiler fixtures")
 
 

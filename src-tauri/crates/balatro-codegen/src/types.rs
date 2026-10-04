@@ -24,7 +24,15 @@ pub enum DescriptionVariableBinding {
     },
     Game {
         id: String,
+        #[serde(default = "default_description_multiplier")]
+        multiplier: f64,
+        #[serde(default, rename = "startsFrom", alias = "starts_from")]
+        starts_from: f64,
     },
+}
+
+fn default_description_multiplier() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
