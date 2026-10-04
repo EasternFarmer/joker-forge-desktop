@@ -43,9 +43,6 @@ SMODS.Back {
         local card = back
         local context = {}
         do
-            return {
-                mult = self.config.extra.mult0
-            }
         end
     end
 }

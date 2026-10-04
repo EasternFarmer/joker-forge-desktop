@@ -278,6 +278,34 @@ for _,spec in ipairs({{'planet','Planet'},{'tarot','Tarot'},{'spectral','Spectra
 end
 G.I.CARD=shop_cards
 """
+DECK_RUN_STATE = """
+-- Back:apply_to_run executes before Game:start_run copies starting_params into
+-- round counters and constructs fresh CardAreas. Use the installed game's
+-- defaults and the same overwrites, including the discard reduction on stake 5.
+G={GAME={starting_params={hands=4,discards=3,consumable_slots=2,joker_slots=5},
+ round_resets={hands=4,discards=3},current_round={hands_left=4,discards_left=3},
+ interest_cap=25,interest_amount=1,modifiers={},dollars=100},
+ C={GREEN=1,RED=1,BLUE=1,MONEY=1}}
+event_queue={}
+function Event(event) return event end
+G.E_MANAGER={add_event=function(self,event) event_queue[#event_queue+1]=event end}
+function run_events()
+ while #event_queue>0 do local event=table.remove(event_queue,1);assert(event.func()) end
+end
+function finish_deck_startup()
+ G.GAME.round_resets.hands=G.GAME.starting_params.hands
+ G.GAME.round_resets.discards=G.GAME.starting_params.discards
+ G.consumeables={cards={},config={card_limit=G.GAME.starting_params.consumable_slots}}
+ G.jokers={cards={},config={card_limit=G.GAME.starting_params.joker_slots}}
+ G.GAME.current_round.discards_left=G.GAME.round_resets.discards
+ G.GAME.current_round.hands_left=G.GAME.round_resets.hands
+end
+function ease_hands_played(amount) G.GAME.current_round.hands_left=G.GAME.current_round.hands_left+amount end
+function ease_discard(amount) G.GAME.current_round.discards_left=G.GAME.current_round.discards_left+amount end
+function hand_payout() return G.GAME.current_round.hands_left*(G.GAME.modifiers.money_per_hand or 1) end
+function interest_payout() return G.GAME.interest_amount*math.min(math.floor(G.GAME.dollars/5),G.GAME.interest_cap/5) end
+SMODS.pseudorandom_probability=function() return true end
+"""
 POPULATED = """
 local c1={base={id=2,suit='Hearts',nominal=2},config={center={key='m_bonus',rarity=1}},edition={key='e_foil',foil=true},seal='Gold',sell_cost=4}
 local c2={base={id=14,suit='Spades',nominal=11},config={center={key='c_base',rarity=2}},sell_cost=7}
@@ -326,12 +354,15 @@ KNOWN_VALUES = {
 def run_checks(lua, cases):
     checks = 0
     for case in cases:
-        if case["kind"] in ("rule_options", "joker_creation", "scoring"):
-            state = JOKER_CREATION_STATE if case["kind"] == "joker_creation" else RULE_OPTIONS_STATE
+        if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings"):
+            state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
             source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
-            source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"
+            if case["kind"] == "deck_settings":
+                source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
+            else:
+                source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"
             source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
             try:
                 evaluate(lua, source)

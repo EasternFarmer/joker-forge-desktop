@@ -392,10 +392,12 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
 
     // Build the effect statements
     let collect_groups = (!rule.random_groups.is_empty() || !rule.loop_groups.is_empty())
-        && !(ctx.object_type == ObjectType::Consumable && trigger == "card_used");
+        && !(matches!(ctx.object_type, ObjectType::Consumable | ObjectType::Deck)
+            && trigger == "card_used");
     let effect_stmts = if collect_groups {
         // Group effects must not return out of the calculate hook mid-loop or
-        // before sibling effects. Consumable use already resolves each table.
+        // before sibling effects. Consumable use resolves each table, and deck
+        // apply performs setup statements without returning calculation effects.
         // Capture direct effects before groups in their configured order.
         let stmts = effect_outputs.iter()
             .flat_map(|output| effects::build_return_block(std::slice::from_ref(output)))

@@ -331,6 +331,167 @@ fn append_card_retrigger_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn deck_settings_case(
+    cases: &mut Vec<Value>,
+    name: &str,
+    rules: Value,
+    prepare: &str,
+    invoke: &str,
+    verify: &str,
+) {
+    cases.push(json!({"kind":"deck_settings", "name":format!("deck_settings_{name}"),
+        "code":Emitter::new().emit_chunk(&compile_deck(&deck(rules), "mod")),
+        "prepare":prepare, "invoke":invoke, "verify":verify}));
+}
+
+fn append_deck_settings_cases(cases: &mut Vec<Value>) {
+    // Exercise actual generated Back.apply through the subsequent start_run
+    // overwrites, rather than evaluating an isolated effect or returned table.
+    for (effect, value, initial, field) in [
+        ("edit_interest_cap", 10, 25, "G.GAME.interest_cap"),
+        ("edit_hands", 2, 4, "G.GAME.round_resets.hands"),
+        ("edit_discards", 1, 3, "G.GAME.round_resets.discards"),
+        ("edit_hands_money", 2, 1, "G.GAME.modifiers.money_per_hand"),
+        ("edit_consumable_slots", 1, 2, "G.consumeables.config.card_limit"),
+    ] {
+        for operation in ["add", "subtract", "set"] {
+            let expected = match operation {
+                "subtract" => initial - value,
+                "set" => value,
+                _ => initial + value,
+            };
+            let mut verify = format!("assert({field}=={expected})");
+            match effect {
+                "edit_hands" => verify.push_str(&format!(";assert(G.GAME.current_round.hands_left=={expected});G.GAME.current_round.hands_left=G.GAME.round_resets.hands;assert(G.GAME.current_round.hands_left=={expected})")),
+                "edit_discards" => verify.push_str(&format!(";assert(G.GAME.current_round.discards_left=={expected});G.GAME.current_round.discards_left=G.GAME.round_resets.discards;assert(G.GAME.current_round.discards_left=={expected})")),
+                "edit_interest_cap" => verify.push_str(&format!(";assert(interest_payout()=={})",expected/5)),
+                "edit_hands_money" => verify.push_str(&format!(";assert(hand_payout()=={})",4*expected)),
+                _ => {},
+            }
+            deck_settings_case(cases,&format!("{effect}_{operation}"),json!([{
+                "id":"setting", "trigger":"card_used", "effects":[{
+                    "effect_type":effect,"params":{"operation":operation,"value":value,"duration":"permanent"}
+                }]
+            }]),"","test_definition:apply(actor);finish_deck_startup();run_events()",&verify);
+        }
+    }
+    for (operation, value, expected) in [("multiply",2,50),("divide",5,5)] {
+        deck_settings_case(cases,&format!("interest_{operation}"),json!([{
+            "id":"interest", "trigger":"card_used", "effects":[{
+                "effect_type":"edit_interest_cap","params":{"operation":operation,"value":value}
+            }]
+        }]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+            &format!("assert(G.GAME.interest_cap=={expected});assert(interest_payout()=={})",expected/5));
+    }
+    deck_settings_case(cases,"all_effects_same_rule",json!([{
+        "id":"all", "trigger":"card_used", "effects":[
+            {"effect_type":"edit_hands","params":{"operation":"add","value":2}},
+            {"effect_type":"edit_interest_cap","params":{"operation":"set","value":40}},
+            {"effect_type":"edit_discards","params":{"operation":"subtract","value":1}},
+            {"effect_type":"edit_hands_money","params":{"operation":"set","value":4}},
+            {"effect_type":"edit_consumable_slots","params":{"operation":"add","value":3}}
+        ]
+    }]),"old_consumables={cards={},config={card_limit=20}};G.consumeables=old_consumables",
+        "test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(G.GAME.round_resets.discards==2 and G.GAME.current_round.discards_left==2);assert(G.consumeables.config.card_limit==5);assert(old_consumables.config.card_limit==20);assert(hand_payout()==24);assert(interest_payout()==8)");
+    deck_settings_case(cases,"all_matching_startup_rules",json!([
+        {"id":"slots","trigger":"card_used","effects":[{"effect_type":"edit_consumable_slots","params":{"operation":"add","value":1}}]},
+        {"id":"hands","trigger":"card_used","effects":[{"effect_type":"edit_hands","params":{"operation":"add","value":2}}]},
+        {"id":"interest","trigger":"card_used","effects":[{"effect_type":"edit_interest_cap","params":{"operation":"add","value":10}}]},
+        {"id":"money","trigger":"card_used","effects":[{"effect_type":"edit_hands_money","params":{"operation":"add","value":2}}]}
+    ]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.consumeables.config.card_limit==3);assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(interest_payout()==7);assert(hand_payout()==18)");
+    deck_settings_case(cases,"conditional_and_unconditional_rules",json!([
+        {"id":"true_first","trigger":"card_used",
+            "condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":50}}]}],
+            "effects":[{"effect_type":"edit_hands","params":{"operation":"add","value":1}}]},
+        {"id":"false","trigger":"card_used",
+            "condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":200}}]}],
+            "effects":[{"effect_type":"edit_interest_cap","params":{"operation":"set","value":100}}]},
+        {"id":"true_later","trigger":"card_used",
+            "condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":25}}]}],
+            "effects":[{"effect_type":"edit_consumable_slots","params":{"operation":"add","value":2}}]},
+        {"id":"unconditional","trigger":"card_used",
+            "effects":[{"effect_type":"edit_hands_money","params":{"operation":"set","value":3}}]}
+    ]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.hands==5 and G.GAME.current_round.hands_left==5);assert(G.consumeables.config.card_limit==4);assert(interest_payout()==5);assert(hand_payout()==15)");
+    deck_settings_case(cases,"reordered_effects",json!([{
+        "id":"reordered", "trigger":"card_used", "effects":[
+            {"effect_type":"edit_consumable_slots","params":{"operation":"add","value":3}},
+            {"effect_type":"edit_hands_money","params":{"operation":"set","value":4}},
+            {"effect_type":"edit_discards","params":{"operation":"subtract","value":1}},
+            {"effect_type":"edit_interest_cap","params":{"operation":"set","value":40}},
+            {"effect_type":"edit_hands","params":{"operation":"add","value":2}}
+        ]
+    }]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(G.GAME.round_resets.discards==2 and G.GAME.current_round.discards_left==2);assert(G.consumeables.config.card_limit==5);assert(hand_payout()==24);assert(interest_payout()==8)");
+    let mut variable_definition=deck(json!([{
+        "id":"variables", "trigger":"card_used", "effects":[
+            {"effect_type":"edit_hands","params":{"operation":"add","value":{"value":"bonus","valueType":"userVariable"}}},
+            {"effect_type":"edit_consumable_slots","params":{"operation":"add","value":{"value":"bonus","valueType":"userVariable"}}},
+            {"effect_type":"edit_hands_money","params":{"operation":"set","value":{"value":"GAMEVAR:current_money|0.01|1","valueType":"gameVariable"}}}
+        ]
+    }]));
+    variable_definition.user_variables=serde_json::from_value(json!([
+        {"name":"bonus","var_type":"number","initial_value":2}
+    ])).unwrap();
+    cases.push(json!({"kind":"deck_settings", "name":"deck_settings_user_and_computed_values",
+        "code":Emitter::new().emit_chunk(&compile_deck(&variable_definition,"mod")),
+        "prepare":"", "invoke":"test_definition:apply(actor);finish_deck_startup();run_events()",
+        "verify":"assert(test_definition.config.extra.bonus==2);assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(G.consumeables.config.card_limit==4);assert(hand_payout()==12)"}));
+    deck_settings_case(cases,"dependent_operations_across_rules",json!([
+        {"id":"set","trigger":"card_used","effects":[
+            {"effect_type":"edit_consumable_slots","params":{"operation":"set","value":4}},
+            {"effect_type":"edit_hands","params":{"operation":"set","value":6}},
+            {"effect_type":"edit_interest_cap","params":{"operation":"set","value":40}},
+            {"effect_type":"edit_hands_money","params":{"operation":"set","value":3}}
+        ]},
+        {"id":"modify","trigger":"card_used","effects":[
+            {"effect_type":"edit_consumable_slots","params":{"operation":"add","value":3}},
+            {"effect_type":"edit_hands","params":{"operation":"subtract","value":2}},
+            {"effect_type":"edit_interest_cap","params":{"operation":"add","value":10}},
+            {"effect_type":"edit_hands_money","params":{"operation":"subtract","value":1}}
+        ]},
+        {"id":"modify_again","trigger":"card_used","effects":[
+            {"effect_type":"edit_consumable_slots","params":{"operation":"subtract","value":2}},
+            {"effect_type":"edit_hands","params":{"operation":"add","value":1}},
+            {"effect_type":"edit_interest_cap","params":{"operation":"multiply","value":2}},
+            {"effect_type":"edit_hands_money","params":{"operation":"add","value":2}}
+        ]}
+    ]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.hands==5 and G.GAME.current_round.hands_left==5);assert(G.consumeables.config.card_limit==5);assert(interest_payout()==20);assert(hand_payout()==20)");
+    deck_settings_case(cases,"grouped_startup_effects",json!([{
+        "id":"grouped", "trigger":"card_used",
+        "effects":[{"effect_type":"edit_interest_cap","params":{"operation":"add","value":10}}],
+        "random_groups":[{"id":"chance","chance_numerator":1,"chance_denominator":2,"effects":[
+            {"effect_type":"edit_discards","params":{"operation":"add","value":1}}
+        ]}],
+        "loop_groups":[{"id":"repeat","count":2,"effects":[
+            {"effect_type":"edit_hands","params":{"operation":"add","value":1}},
+            {"effect_type":"edit_consumable_slots","params":{"operation":"add","value":1}},
+            {"effect_type":"edit_hands_money","params":{"operation":"add","value":1}}
+        ]}]
+    }]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(G.GAME.round_resets.discards==4 and G.GAME.current_round.discards_left==4);assert(G.consumeables.config.card_limit==4);assert(hand_payout()==18);assert(interest_payout()==7)");
+    deck_settings_case(cases,"stake_discard_penalty",json!([{
+        "id":"discard", "trigger":"card_used", "effects":[{"effect_type":"edit_discards","params":{"operation":"add","value":2}}]
+    }]),"G.GAME.starting_params.discards=2","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.GAME.round_resets.discards==4 and G.GAME.current_round.discards_left==4)");
+    deck_settings_case(cases,"consumable_slots_subtract_clamped",json!([{
+        "id":"slots", "trigger":"card_used", "effects":[{"effect_type":"edit_consumable_slots","params":{"operation":"subtract","value":5}}]
+    }]),"","test_definition:apply(actor);finish_deck_startup();run_events()",
+        "assert(G.consumeables.config.card_limit==0)");
+    deck_settings_case(cases,"runtime_counter_effects",json!([{
+        "id":"runtime", "trigger":"hand_played", "effects":[
+            {"effect_type":"edit_hands","params":{"operation":"add","value":2}},
+            {"effect_type":"edit_discards","params":{"operation":"subtract","value":1}},
+            {"effect_type":"edit_consumable_slots","params":{"operation":"set","value":5}}
+        ]
+    }]),"finish_deck_startup()",
+        "local effect=test_definition:calculate(actor,{main_eval=true});assert(effect);SMODS.calculate_effect(effect,actor);run_events()",
+        "assert(G.GAME.round_resets.hands==6 and G.GAME.current_round.hands_left==6);assert(G.GAME.round_resets.discards==2 and G.GAME.current_round.discards_left==2);assert(G.consumeables.config.card_limit==5)");
+}
+
 fn append_joker_creation_cases(cases: &mut Vec<Value>) {
     let effect = json!({"effect_type":"create_joker", "params":{
         "joker_type":"specific", "joker_key":"j_joker"
@@ -1395,6 +1556,7 @@ fn main() {
     append_scoring_group_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);
     append_card_retrigger_cases(&mut cases);
+    append_deck_settings_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);

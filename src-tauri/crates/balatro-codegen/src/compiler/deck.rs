@@ -171,14 +171,72 @@ fn build_apply_function(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -> O
     // and `context` exist, so provide safe locals for deck scope.
     body.push(lua_raw_stmt("local card = back"));
     body.push(lua_raw_stmt("local context = {}"));
-    super::append_rule_chain_with_fallback(&mut body, &apply_rules, |ro| {
-        super::wrap_rule_segment(&ro.rule_id, ro.effect_stmts.clone())
-    });
+    for ro in &apply_rules {
+        // Steamodded ignores apply's return value. Feedback tables must not
+        // exit this hook before later setup rules or loop iterations execute.
+        let stmts = discard_apply_returns(ro.effect_stmts.clone());
+        let stmts = super::wrap_rule_segment(&ro.rule_id, stmts);
+        body.extend(super::build_rule_anchor_stmts(ro));
+        if let Some(condition) = &ro.condition_expr {
+            body.push(Stmt::If {
+                branches: vec![(condition.clone(), stmts)],
+                else_body: None,
+            });
+        } else {
+            body.push(Stmt::DoBlock(stmts));
+        }
+    }
 
     Some(Expr::Function {
         params: vec!["self".into(), "back".into()],
         body,
     })
+}
+
+fn discard_apply_returns(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .filter_map(|stmt| {
+            Some(match stmt {
+                Stmt::Return(_) => return None,
+                Stmt::If {
+                    branches,
+                    else_body,
+                } => Stmt::If {
+                    branches: branches
+                        .into_iter()
+                        .map(|(condition, body)| (condition, discard_apply_returns(body)))
+                        .collect(),
+                    else_body: else_body.map(discard_apply_returns),
+                },
+                Stmt::ForRange {
+                    var,
+                    start,
+                    stop,
+                    step,
+                    body,
+                } => Stmt::ForRange {
+                    var,
+                    start,
+                    stop,
+                    step,
+                    body: discard_apply_returns(body),
+                },
+                Stmt::ForIn {
+                    vars,
+                    iterators,
+                    body,
+                } => Stmt::ForIn {
+                    vars,
+                    iterators,
+                    body: discard_apply_returns(body),
+                },
+                Stmt::DoBlock(body) => Stmt::DoBlock(discard_apply_returns(body)),
+                // Callback functions (including queued events) retain their returns.
+                stmt => stmt,
+            })
+        })
+        .collect()
 }
 
 fn kv(key: &str, val: Expr) -> TableEntry {

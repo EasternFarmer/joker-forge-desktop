@@ -94,6 +94,31 @@ pub fn edit_starting_dollars(effect: &EffectDef, ctx: &mut CompileContext) -> Ef
     deck_output(vec![lua_raw_stmt(code)], "G.C.MONEY")
 }
 
+/// Deck apply runs before round totals and CardAreas are initialized. Change
+/// their starting parameters so the first round and later resets inherit them.
+pub fn edit_starting_counter(
+    effect: &EffectDef,
+    ctx: &mut CompileContext,
+    counter: &str,
+) -> EffectOutput {
+    let operation = get_str(effect, "operation").unwrap_or("add");
+    let value = super::utils::value_to_lua_str(effect, "value", ctx, counter);
+    let target = format!("G.GAME.starting_params.{}", counter);
+    let result = match operation {
+        "subtract" if counter == "consumable_slots" => {
+            format!("math.max(0, {} - {})", target, value)
+        }
+        "subtract" => format!("{} - {}", target, value),
+        "set" => value,
+        _ => format!("{} + {}", target, value),
+    };
+
+    EffectOutput {
+        pre_return: vec![lua_raw_stmt(format!("{} = {}", target, result))],
+        ..Default::default()
+    }
+}
+
 /// Add Starting Cards: create new playing cards at run start.
 pub fn add_starting_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     let rank = get_str(effect, "rank").unwrap_or("random");

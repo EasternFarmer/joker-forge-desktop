@@ -12,7 +12,7 @@ pub mod variables;
 
 use crate::compiler::context::CompileContext;
 use crate::lua_ast::*;
-use crate::types::EffectDef;
+use crate::types::{EffectDef, ObjectType};
 
 /// The output of compiling a single effect.
 #[derive(Debug, Default)]
@@ -48,6 +48,7 @@ pub fn compile_effect(
     trigger: &str,
 ) -> Option<EffectOutput> {
     let config_start = ctx.config_vars().len();
+    let deck_start = ctx.object_type == ObjectType::Deck && trigger == "card_used";
     let mut result = match effect.effect_type.as_str() {
         // --------------- Scoring ---------------
         "add_chips" => scoring::add_chips(effect, ctx),
@@ -100,6 +101,9 @@ pub fn compile_effect(
         // --------------- Slot Management ---------------
         "edit_joker_slots" => slot_management::edit_joker_slots(effect, ctx),
         "edit_joker_size" => slot_management::edit_joker_size(effect, ctx),
+        "edit_consumable_slots" if deck_start => {
+            deck_setup::edit_starting_counter(effect, ctx, "consumable_slots")
+        }
         "edit_consumable_slots" => slot_management::edit_consumable_slots(effect, ctx),
         "edit_hand_size" => slot_management::edit_item_size_typed(effect, ctx, "hand_size"),
         "edit_play_size" => slot_management::edit_item_size_typed(effect, ctx, "play_size"),
@@ -107,6 +111,14 @@ pub fn compile_effect(
         "edit_voucher_slots" => slot_management::edit_item_size_typed(effect, ctx, "voucher_slots"),
         "edit_booster_slots" => slot_management::edit_item_size_typed(effect, ctx, "booster_slots"),
         "edit_shop_slots" => slot_management::edit_item_size_typed(effect, ctx, "shop_slots"),
+        "edit_hands" | "edit_discards" if deck_start => {
+            let counter = if effect.effect_type == "edit_discards" {
+                "discards"
+            } else {
+                "hands"
+            };
+            deck_setup::edit_starting_counter(effect, ctx, counter)
+        }
         "edit_hands" => slot_management::edit_round_counter_typed(effect, ctx, "hands"),
         "edit_discards" => slot_management::edit_round_counter_typed(effect, ctx, "discards"),
 
