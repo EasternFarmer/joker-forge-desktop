@@ -56,6 +56,33 @@ fn voucher_discounts_use_current_fields_for_redeem_and_passive_rules() {
 }
 
 #[test]
+fn voucher_booster_changes_keep_live_amount_bindings_on_redemption() {
+    for trigger in ["card_used", "passive"] {
+        let voucher: VoucherDef = serde_json::from_value(serde_json::json!({
+            "key": "booster", "name": "Booster", "description": ["Test"],
+            "cost": 10, "atlas": "Vouchers", "pos": {"x": 0, "y": 0},
+            "rules": [{"id": "booster_rule", "trigger": trigger, "effects": [{
+                "id": "booster_effect", "effect_type": "edit_booster_packs", "params": {
+                    "selected_type": {"valueType": "text", "value": "choice"},
+                    "operation": {"valueType": "text", "value": "add"},
+                    "value": {"valueType": "number", "value": 2}
+                }
+            }]}]
+        })).unwrap();
+        let (code, segments, bindings) = Emitter::new()
+            .emit_chunk_with_field_bindings(&compile_voucher(&voucher, "mod"));
+        assert!(code.contains("redeem = function(self, card)"), "{code}");
+        assert!(segments.iter().any(|s| s.id == "effect:booster_rule:booster_effect"));
+        let binding = bindings.iter().find(|binding| binding.source_path == vec![
+            serde_json::json!("rules"), serde_json::json!(0), serde_json::json!("effects"),
+            serde_json::json!(0), serde_json::json!("params"),
+            serde_json::json!("value"), serde_json::json!("value")
+        ]).expect("booster amount remains editable in generated preview");
+        assert_eq!(field_binding_text(&code, binding), "2");
+    }
+}
+
+#[test]
 fn voucher_legacy_global_discount_operations_remain_compatible() {
     let mut ctx = CompileContext::new(ObjectType::Voucher, "mod".into(), "discount".into(), false);
     let effect: EffectDef = serde_json::from_value(serde_json::json!({

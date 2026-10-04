@@ -869,6 +869,76 @@ fn rule_option_case(
         "code":Emitter::new().emit_chunk(&chunk),"prepare":prepare,"invoke":invoke,"verify":verify}));
 }
 
+fn append_booster_option_cases(cases: &mut Vec<Value>) {
+    rule_option_case(cases,"booster_voucher_choice_add","voucher","edit_booster_packs",
+        json!({"selected_type":"choice","operation":"add","value":2}),"",
+        "assert_booster(existing_first_pack,3,8);assert_booster(booster_card('p_second'),4,10);assert_booster_centers_unchanged()");
+    cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+
+    rule_option_case(cases,"booster_voucher_native_choice_cap","voucher","edit_booster_packs",
+        json!({"selected_type":"choice","operation":"add","value":30}),"existing_first_pack.ability.extra=3",
+        "assert_booster(existing_first_pack,3,3);assert_booster(booster_card('p_first'),8,8);assert_booster(booster_card('p_second'),10,10);assert_booster_centers_unchanged()");
+    cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+
+    for object in ["voucher", "voucher_passive"] {
+        for selected_type in ["choice", "size"] {
+            for (operation, expected_modifier) in [("add",4), ("subtract",0), ("set",2)] {
+                let (choice, size) = if selected_type=="choice" {(expected_modifier,2)} else {(2,expected_modifier)};
+                let verify=format!("assert(G.GAME.modifiers.booster_choice_mod=={choice});assert(G.GAME.modifiers.booster_size_mod=={size});assert_booster(existing_first_pack,{},{});assert_booster(existing_second_pack,{},{});assert_booster(booster_card('p_first'),{},{});assert_booster(booster_card('p_second'),{},{});assert_booster_centers_unchanged()",
+                    1+choice,8+size,2+choice,10+size,1+choice,8+size,2+choice,10+size);
+                rule_option_case(cases,&format!("booster_{object}_{selected_type}_{operation}"),object,"edit_booster_packs",
+                    json!({"selected_type":selected_type,"operation":operation,"value":2}),
+                    "G.GAME.modifiers={booster_choice_mod=2,booster_size_mod=2}",&verify);
+                cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+            }
+        }
+        for (mode,value) in [
+            ("typed_number",json!({"value":3,"valueType":"number"})),
+            ("user_variable",json!({"value":"amount","valueType":"userVariable"})),
+            ("game_variable",json!({"value":"GAMEVAR:joker_count|1|0","valueType":"gameVariable"})),
+        ] {
+            rule_option_case(cases,&format!("booster_{object}_choice_{mode}"),object,"edit_booster_packs",
+                json!({"selected_type":"choice","operation":"add","value":value}),"",
+                "assert_booster(existing_first_pack,4,8);assert_booster(booster_card('p_second'),5,10);assert_booster_centers_unchanged()");
+            cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+        }
+    }
+    rule_option_case(cases,"booster_voucher_saved_run_and_new_run","voucher_passive","edit_booster_packs",
+        json!({"selected_type":"choice","operation":"add","value":2}),"",
+        "assert_booster(existing_first_pack,3,8);assert_booster(booster_card('p_second'),4,10);local saved_game=copy_table(G.GAME);G.GAME=copy_table(saved_game);assert_booster(existing_first_pack,3,8);assert_booster(booster_card('p_second'),4,10);G.GAME={modifiers={}};assert_booster(existing_first_pack,1,8);assert_booster(existing_second_pack,2,10);assert_booster(booster_card('p_first'),1,8);assert_booster(booster_card('p_second'),2,10);assert_booster_centers_unchanged()");
+    cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+
+    rule_option_case(cases,"booster_voucher_native_size_and_choice_limits","voucher","edit_booster_packs",
+        json!({"selected_type":"choice","operation":"add","value":30}),"G.GAME.modifiers.booster_size_mod=-20",
+        "assert_booster(existing_first_pack,1,1);assert_booster(booster_card('p_second'),1,1);assert_booster_centers_unchanged()");
+    cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+
+    for (name,rules,prepare,expected_choice,expected_size) in [
+        ("multiple_rules",json!([
+            {"id":"one","trigger":"card_used","effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"add","value":2}}]},
+            {"id":"two","trigger":"passive","effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"size","operation":"add","value":3}},{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"subtract","value":1}}]}
+        ]),"",2,11),
+        ("loop",json!([{"id":"one","trigger":"passive","loop_groups":[{"id":"loop","count":3,"effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"add","value":1}}]}]}]),"",4,8),
+        ("chance_success",json!([{"id":"one","trigger":"passive","random_groups":[{"id":"chance","chance_numerator":1,"chance_denominator":2,"effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"add","value":2}}]}]}]),"SMODS.pseudorandom_probability=function() return true end",3,8),
+        ("chance_miss",json!([{"id":"one","trigger":"passive","random_groups":[{"id":"chance","chance_numerator":1,"chance_denominator":2,"effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"add","value":2}}]}]}]),"SMODS.pseudorandom_probability=function() return false end",1,8),
+        ("condition_miss",json!([{"id":"one","trigger":"passive","condition_groups":[{"conditions":[{"condition_type":"player_money","params":{"operator":"greater_than","value":10}}]}],"effects":[{"effect_type":"edit_booster_packs","params":{"selected_type":"choice","operation":"add","value":2}}]}]),"G.GAME.dollars=5",1,8),
+    ] {
+        let definition:VoucherDef=serde_json::from_value(json!({"key":"runtime_test","name":"Runtime Test","description":["Test"],"atlas":"CustomVouchers","pos":{"x":0,"y":0},"rules":rules})).unwrap();
+        cases.push(json!({"kind":"rule_options","name":format!("booster_voucher_{name}"),"booster_open_runtime":true,
+            "code":Emitter::new().emit_chunk(&compile_voucher(&definition,"mod")),"prepare":prepare,"invoke":"test_definition:redeem(actor)",
+            "verify":format!("assert_booster(existing_first_pack,{expected_choice},{expected_size});assert_booster(booster_card('p_second'),{},{});assert_booster_centers_unchanged()",expected_choice+1,expected_size+2)}));
+    }
+
+    for (operation, expected) in [("add",4),("subtract",0),("set",2)] {
+        rule_option_case(cases,&format!("booster_joker_passive_choice_{operation}"),"joker_passive","edit_booster_packs",
+            json!({"selected_type":"choice","operation":operation,"value":2}),
+            "G.GAME.modifiers.booster_choice_mod=2;actor.config={center={key='j_mod_runtime_test'}};G.jokers.cards={actor}",
+            &format!("assert_booster(existing_first_pack,{},8);assert_booster(booster_card('p_second'),{},10);test_definition:remove_from_deck(actor);assert_booster(existing_first_pack,3,8);assert_booster(booster_card('p_second'),4,10);assert_booster_centers_unchanged()",expected+1,expected+2));
+        cases.last_mut().unwrap()["booster_open_runtime"]=json!(true);
+        cases.last_mut().unwrap()["invoke"]=json!("test_definition:add_to_deck(actor)");
+    }
+}
+
 fn append_rule_option_cases(cases: &mut Vec<Value>) {
     for tag in ["negative", "d_six", "top_up"] {
         rule_option_case(
@@ -2078,6 +2148,7 @@ fn main() {
     append_deck_settings_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
+    append_booster_option_cases(&mut cases);
     append_joker_selection_and_key_cases(&mut cases);
     append_joker_selection_size_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);

@@ -335,7 +335,7 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
             // Vouchers retain these changes after redemption; Jokers supply
             // their passive changes only while held.
             if ctx.object_type == ObjectType::Voucher
-                && matches!(effect.effect_type.as_str(), "discount_items" | "edit_joker_size")
+                && matches!(effect.effect_type.as_str(), "discount_items" | "edit_joker_size" | "edit_booster_packs")
             {
                 if let Some(mut eo) = effects::compile_effect(effect, ctx, "card_used") {
                     eo.segment_id = effect_segment_id(&rule.id, effect);

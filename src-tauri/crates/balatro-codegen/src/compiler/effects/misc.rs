@@ -2220,28 +2220,23 @@ fn guarded_joker_key_variable(ctx: &CompileContext, name: &str) -> String {
 
 /// Edit Booster Packs: modifies booster pack size/choice.
 pub fn edit_booster_packs(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let booster_key = get_str_default(effect, "booster_key", "");
-    let modify_type = get_str_default(effect, "modify_type", "size");
-    let resolved = resolve_config_value(&effect.params, "value", ctx, "booster_mod");
-
-    if booster_key.is_empty() {
-        return EffectOutput::default();
-    }
-
-    let field = if modify_type == "choice" {
-        "config.choose"
+    let selected_type = effect.params.get("selected_type")
+        .or_else(|| effect.params.get("modify_type"))
+        .and_then(ParamValue::as_str)
+        .unwrap_or("size");
+    let operation = get_str_default(effect, "operation", "add");
+    let resolved = resolve_config_value(&effect.params, "value", ctx, "booster_packs");
+    let modifier = if selected_type == "choice" {
+        "booster_choice_mod"
     } else {
-        "config.extra"
+        "booster_size_mod"
     };
-
-    let code = format!(
-        "if G.P_CENTERS['{key}'] then\n\
-            G.P_CENTERS['{key}'].{field} = (G.P_CENTERS['{key}'].{field} or 0) + {val}\n\
-        end",
-        key = booster_key,
-        field = field,
-        val = resolved.lua_str
-    );
+    let path = format!("G.GAME.modifiers.{modifier}");
+    let code = match operation.as_str() {
+        "subtract" => format!("{path} = ({path} or 0) - {}", resolved.lua_str),
+        "set" => format!("{path} = {}", resolved.lua_str),
+        _ => format!("{path} = ({path} or 0) + {}", resolved.lua_str),
+    };
 
     EffectOutput {
         return_fields: vec![],

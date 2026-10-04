@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -290,6 +291,43 @@ end
 PLAYING_CARD_TRANSFORM_RUNTIME = steamodded_playing_card_transform_runtime()
 
 
+def steamodded_booster_open_runtime():
+    """Use native opening payloads so saved modifiers must affect real pack choices."""
+    patches = tomllib.loads((ROOT / "public/other/smods-main/lovely/booster.toml").read_text(encoding="utf-8"))
+    payloads = [patch["pattern"]["payload"] for patch in patches["patches"] if "pattern" in patch]
+    choices = next(payload for payload in payloads if "G.GAME.pack_choices = math.min" in payload)
+    size = next(payload for payload in payloads if "local _size = math.max(1," in payload)
+    return """
+G.GAME.modifiers={}
+G.C.BLUE=1
+SMODS.Centers={}
+G.P_CENTERS.p_first.config.extra=8
+G.P_CENTERS.p_second.config.extra=10
+function booster_card(key)
+ local center=G.P_CENTERS[key]
+ return {config={center=center},ability=copy_table(center.config)}
+end
+existing_first_pack=booster_card('p_first')
+existing_second_pack=booster_card('p_second')
+function open_booster(self)
+""" + choices + "\n" + size + """
+ return G.GAME.pack_choices,_size
+end
+function assert_booster(card,choices,size)
+ local actual_choices,actual_size=open_booster(card)
+ assert(actual_choices==choices,'expected '..choices..' choices, got '..actual_choices)
+ assert(actual_size==size,'expected '..size..' cards, got '..actual_size)
+end
+function assert_booster_centers_unchanged()
+ assert(G.P_CENTERS.p_first.config.choose==1 and G.P_CENTERS.p_first.config.extra==8)
+ assert(G.P_CENTERS.p_second.config.choose==2 and G.P_CENTERS.p_second.config.extra==10)
+end
+"""
+
+
+BOOSTER_OPEN_RUNTIME = steamodded_booster_open_runtime()
+
+
 def card_area_selection_runtime(lua_library):
     """Exercise installed CardArea selection when Balatro is beside its Lua DLL."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -566,6 +604,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + CARD_DESTRUCTION_RUNTIME
             if case.get("playing_card_transform_runtime"):
                 source += "\n" + PLAYING_CARD_TRANSFORM_RUNTIME
+            if case.get("booster_open_runtime"):
+                source += "\n" + BOOSTER_OPEN_RUNTIME
             if case["kind"] == "deck_settings":
                 source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
             else:
