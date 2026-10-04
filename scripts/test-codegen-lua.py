@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -172,6 +173,92 @@ reset_score(0,1)
 
 
 SCORING_PARAMETERS = steamodded_scoring_parameters()
+
+
+def steamodded_post_trigger_runtime():
+    """Use Steamodded's feature scan and patched evaluation callback together."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    feature_scan = "SMODS.get_optional_features = function" + source.split(
+        "SMODS.get_optional_features = function", 1
+    )[1].split("\n\nG.FUNCS.can_select_from_booster", 1)[0]
+    patches = (ROOT / "public/other/smods-main/lovely/better_calc.toml").read_text(encoding="utf-8")
+    payloads = [payload.split('"""', 1)[0] for payload in patches.split('payload = """')[1:]]
+    evaluation = next(payload for payload in payloads
+                      if "post_trigger = true" in payload and "return ret, post_trig" in payload)
+    return """
+function insert(target,values) for key,value in pairs(values) do target[key]=value end end
+SMODS.optional_features={}
+SMODS.get_card_areas=function() return {G.jokers} end
+SMODS.calculate_retriggers=function() return {} end
+SMODS.is_getter_context=function() return false end
+post_contexts={}
+SMODS.calculate_context=function(context)
+ post_contexts[#post_contexts+1]=context
+ last_post_result=test_definition:calculate(actor,context)
+end
+""" + feature_scan + "\nfunction evaluate_observed_joker(card,context)\nlocal ret={}\n" + evaluation + "\nend\n"
+
+
+POST_TRIGGER_RUNTIME = steamodded_post_trigger_runtime()
+
+
+def card_area_selection_runtime(lua_library):
+    """Exercise installed CardArea selection when Balatro is beside its Lua DLL."""
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            source = archive.read("cardarea.lua").decode("utf-8")
+            common_events = archive.read("functions/common_events.lua").decode("utf-8")
+        method = "function CardArea:add_to_highlighted" + source.split(
+            "function CardArea:add_to_highlighted", 1
+        )[1].split("\nfunction ", 1)[0]
+        copy_card_method = "function copy_card(" + common_events.split(
+            "function copy_card(", 1
+        )[1].split("\nfunction ", 1)[0]
+    else:
+        # Portable Lua-library runs retain the Joker-area selection contract.
+        method = """
+function CardArea:add_to_highlighted(card, silent)
+ if #self.highlighted>=self.config.highlighted_limit then
+  self:remove_from_highlighted(self.highlighted[1])
+ end
+ self.highlighted[#self.highlighted+1]=card;card:highlight(true)
+end
+"""
+        copy_card_method = """
+function copy_card(other,new_card)
+ new_card.ability=copy_table(other.ability);new_card.config=copy_table(other.config)
+ return new_card
+end
+"""
+    return """
+CardArea={};CardArea.__index=CardArea
+function CardArea:remove_from_highlighted(card)
+ for i,selected in ipairs(self.highlighted) do
+  if selected==card then table.remove(self.highlighted,i);card:highlight(false);return end
+ end
+end
+function make_joker_selection_area(limit)
+ return setmetatable({config={type='joker',highlighted_limit=limit},cards=owned_jokers,highlighted={}},CardArea)
+end
+function select_jokers()
+ for _,joker in ipairs(owned_jokers) do G.jokers:add_to_highlighted(joker,true) end
+end
+function clone_card_shell(id,sort_id)
+ local clone={ID=id,sort_id=sort_id,ability={},config={}}
+ function clone:set_ability(center) self.config.center=center end
+ function clone:set_base(base) self.config.card=base end
+ function clone:set_edition(edition) self.edition=edition end
+ function clone:set_seal(seal) self.seal=seal end
+ return clone
+end
+function check_for_unlock() end
+for _,joker in ipairs(owned_jokers) do
+ function joker:highlight(highlighted) self.highlighted=highlighted end
+end
+""" + method + copy_card_method
+
+
 JOKER_CREATION_STATE = """
 G={GAME={joker_buffer=0},C={GREEN=1}}
 event_queue={};created_cards={}
@@ -352,7 +439,7 @@ KNOWN_VALUES = {
 }
 
 
-def run_checks(lua, cases):
+def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
         if case["kind"] in ("tooltip", "description_game"):
@@ -381,6 +468,10 @@ def run_checks(lua, cases):
         if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings"):
             state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
             source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
+            if case.get("card_selection"):
+                source += "\n" + card_area_selection_runtime(lua_library)
+            if case.get("post_trigger_runtime"):
+                source += "\n" + POST_TRIGGER_RUNTIME
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
             if case["kind"] == "deck_settings":
@@ -467,7 +558,7 @@ def main():
             cases = [case for case in cases if args.filter in case["name"]]
             if not cases:
                 parser.error("No compiler fixture names matched --filter")
-        run_checks(lua, cases)
+        run_checks(lua, cases, library)
 
 
 if __name__ == "__main__":

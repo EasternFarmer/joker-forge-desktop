@@ -332,9 +332,11 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
         for (index, effect) in rule.effects.iter().enumerate() {
             ctx.set_preview_node(vec![serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
             let config_start = ctx.config_vars().len();
-            // Vouchers retain discounts for the run after redemption, whereas
-            // Jokers supply their discounts only while held.
-            if ctx.object_type == ObjectType::Voucher && effect.effect_type == "discount_items" {
+            // Vouchers retain these changes after redemption; Jokers supply
+            // their passive changes only while held.
+            if ctx.object_type == ObjectType::Voucher
+                && matches!(effect.effect_type.as_str(), "discount_items" | "edit_joker_size")
+            {
                 if let Some(mut eo) = effects::compile_effect(effect, ctx, "card_used") {
                     eo.segment_id = effect_segment_id(&rule.id, effect);
                     effect_outputs.push(eo);

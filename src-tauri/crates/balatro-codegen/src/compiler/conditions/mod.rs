@@ -65,7 +65,7 @@ pub fn compile_condition(
         "this_joker_sticker" => joker::this_joker_sticker(condition)?,
         "joker_edition" => joker::joker_edition(condition)?,
         "this_joker_edition" => joker::this_joker_edition(condition)?,
-        "joker_key" => joker::joker_key(condition)?,
+        "joker_key" => joker::joker_key(condition, ctx)?,
         "joker_rarity" => joker::joker_rarity(condition)?,
 
         // Game state conditions

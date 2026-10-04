@@ -2,7 +2,7 @@ use crate::compiler::context::CompileContext;
 use crate::compiler::effects::utils::{get_str, get_str_default, value_to_lua_str};
 use crate::compiler::effects::{passive::PassiveEffectOutput, EffectOutput};
 use crate::lua_ast::*;
-use crate::types::{EffectDef, ParamValue};
+use crate::types::{EffectDef, ObjectType, ParamValue};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,57 +150,70 @@ pub fn edit_joker_slots_passive(
 // edit_joker_size  (modifies G.jokers.config.highlighted_limit)
 // ---------------------------------------------------------------------------
 
+fn joker_selection_target(operation: &str, value: &str) -> String {
+    let target = match operation {
+        "subtract" => format!("current_joker_selection_limit - ({value})"),
+        "set" => format!("({value})"),
+        _ => format!("current_joker_selection_limit + ({value})"),
+    };
+    // Joker areas always allow at least one selection, and selection counts
+    // must be whole numbers even when a game variable supplies the amount.
+    format!("math.max(1, math.floor({target}))")
+}
+
+fn trim_joker_selection() -> &'static str {
+    "while G.jokers.highlighted and #G.jokers.highlighted > G.jokers.config.highlighted_limit do\n\
+        G.jokers:remove_from_highlighted(G.jokers.highlighted[1])\n\
+    end"
+}
+
 /// Edit Joker Size effect: changes how many jokers can be highlighted at once.
-pub fn edit_joker_size(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+pub fn edit_joker_size(
+    effect: &EffectDef,
+    ctx: &mut CompileContext,
+    trigger: &str,
+) -> EffectOutput {
     let operation = get_str_default(effect, "operation", "add");
     let custom_message = get_str(effect, "customMessage");
     let value_str = value_to_lua_str(effect, "value", ctx, "joker_size");
-
-    let (size_code, colour_str) = match operation.as_str() {
-        "subtract" => (
-            format!("G.jokers.config.highlighted_limit = math.max(1, G.jokers.config.highlighted_limit - {})", value_str),
-            "G.C.RED",
-        ),
-        "set" => (
-            format!("G.jokers.config.highlighted_limit = {}", value_str),
-            "G.C.BLUE",
-        ),
-        _ => (
-            format!("G.jokers.config.highlighted_limit = G.jokers.config.highlighted_limit + {}", value_str),
-            "G.C.DARK_EDITION",
-        ),
+    let target = joker_selection_target(&operation, &value_str);
+    let size_code = format!(
+        "if G and G.jokers and G.jokers.config then\n\
+            local current_joker_selection_limit = G.jokers.config.highlighted_limit or 1\n\
+            G.jokers.config.highlighted_limit = {target}\n{}\nend",
+        trim_joker_selection()
+    );
+    let colour_str = match operation.as_str() {
+        "subtract" => "G.C.RED",
+        "set" => "G.C.BLUE",
+        _ => "G.C.DARK_EDITION",
+    };
+    let message = custom_message
+        .map(lua_str)
+        .unwrap_or_else(|| match operation.as_str() {
+            "subtract" => lua_raw_expr(format!("\"-\"..tostring({value_str})..' Joker Selection Size'")),
+            "set" => lua_raw_expr(format!("\"Joker Selection Size set to \"..tostring({value_str})")),
+            _ => lua_raw_expr(format!("\"+\"..tostring({value_str})..' Joker Selection Size'")),
+        });
+    let deck_start = ctx.object_type == ObjectType::Deck && trigger == "card_used";
+    let size_code = if deck_start {
+        // Back.apply runs before the new Joker area is constructed. Applying
+        // here would either crash or modify the previous run's area.
+        format!(
+            "G.E_MANAGER:add_event(Event({{func = function()\n{size_code}\nreturn true\nend}}))"
+        )
+    } else {
+        size_code
     };
 
-    let msg_lua = custom_message
-        .map(|m| format!("\"{}\"", m))
-        .unwrap_or_else(|| match operation.as_str() {
-            "subtract" => format!("\"-\"..tostring({})..' Joker Size'", value_str),
-            "set" => format!("\"Joker Sizes set to \"..tostring({})", value_str),
-            _ => format!("\"+\"..tostring({})..' Joker Size'", value_str),
-        });
-
-    let func_body = vec![
-        lua_raw_stmt(format!(
-            "card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {{message = {}, colour = {}}})\n\
-            {}\n\
-            return true",
-            msg_lua, colour_str, size_code
-        )),
-    ];
-
     EffectOutput {
-        return_fields: vec![(
-            "func".to_string(),
-            Expr::Function {
-                params: vec![],
-                body: func_body,
-            },
-        )],
-        pre_return: vec![],
+        // Back.apply and Voucher.redeem ignore calculation return tables.
+        // Perform the mutation here so those hooks execute it as well.
+        return_fields: vec![],
+        pre_return: vec![lua_raw_stmt(size_code)],
         config_vars: vec![],
-        message: None,
-        colour: Some(lua_raw_expr("G.C.DARK_EDITION")),
-
+        message: (!deck_start).then_some(message),
+        colour: Some(lua_raw_expr(colour_str)),
         segment_id: None,
     }
 }
@@ -211,44 +224,54 @@ pub fn edit_joker_size_passive(
     ctx: &mut CompileContext,
 ) -> PassiveEffectOutput {
     let operation = get_str_default(effect, "operation", "add");
-    let count = ctx.next_effect_count("joker_size");
-    let var_name = ctx.unique_var_name("joker_size", count);
-
-    let value_str = match effect.params.get("value") {
-        Some(ParamValue::Int(n)) => {
-            ctx.bind_preview_config_parameter(&var_name, "value");
-            ctx.add_config_int(&var_name, *n);
-            format!("{}.{}", ctx.ability_path(), var_name)
-        }
-        Some(ParamValue::Float(n)) => {
-            ctx.bind_preview_config_parameter(&var_name, "value");
-            ctx.add_config_num(&var_name, *n);
-            format!("{}.{}", ctx.ability_path(), var_name)
-        }
-        _ => "1".to_string(),
-    };
-
-    let (add_to_deck, remove_from_deck) = match operation.as_str() {
-        "subtract" => (
-            format!("G.jokers.config.highlighted_limit = math.max(1, G.jokers.config.highlighted_limit - {})", value_str),
-            format!("G.jokers.config.highlighted_limit = G.jokers.config.highlighted_limit + {}", value_str),
-        ),
-        "set" => (
-            format!(
-                "card.ability.extra.original_joker_size = G.jokers.config.highlighted_limit\n\
-                G.jokers.config.highlighted_limit = {}",
-                value_str
-            ),
-            "if card.ability.extra.original_joker_size then\n\
-                G.jokers.config.highlighted_limit = card.ability.extra.original_joker_size\n\
-            end"
-                .to_string(),
-        ),
-        _ => (
-            format!("G.jokers.config.highlighted_limit = G.jokers.config.highlighted_limit + {}", value_str),
-            format!("G.jokers.config.highlighted_limit = G.jokers.config.highlighted_limit - {}", value_str),
-        ),
-    };
+    let value_str = value_to_lua_str(effect, "value", ctx, "joker_size");
+    let count = ctx.next_effect_count("joker_selection_delta");
+    let state_name = ctx.unique_var_name("joker_selection_delta", count);
+    let state_path = format!("{}.{}", ctx.ability_path(), state_name);
+    let state_owner_path = format!("{}.joker_selection_owner{}", ctx.ability_path(), count);
+    let total_path = format!("{}.jf_joker_selection_total_delta", ctx.ability_path());
+    let count_path = format!("{}.jf_joker_selection_effect_count", ctx.ability_path());
+    let owner_path = format!("{}.jf_joker_selection_owner", ctx.ability_path());
+    let target = joker_selection_target(&operation, &value_str);
+    // Save the applied change rather than recomputing a game/user variable
+    // on removal or restoring a shared snapshot that another effect replaced.
+    // copy_card copies ability.extra, but a new Card gets its own ID.
+    // Steamodded saves this ID separately, distinguishing a clone from a
+    // restored card even when its transient runtime ID changes on load.
+    let add_to_deck = format!(
+        "if G and G.jokers and G.jokers.config then\n\
+            local joker_selection_card_id = card.unique_val__saved_ID or card.ID or card.sort_id\n\
+            if {owner_path} ~= joker_selection_card_id then\n\
+                {total_path} = nil\n\
+                {count_path} = nil\n\
+                {owner_path} = joker_selection_card_id\n\
+            end\n\
+            if {state_path} == nil or {state_owner_path} ~= joker_selection_card_id then\n\
+            local current_joker_selection_limit = G.jokers.config.highlighted_limit or 1\n\
+            local target_joker_selection_limit = {target}\n\
+            {state_path} = target_joker_selection_limit - current_joker_selection_limit\n\
+            {state_owner_path} = joker_selection_card_id\n\
+            {total_path} = ({total_path} or 0) + {state_path}\n\
+            {count_path} = ({count_path} or 0) + 1\n\
+            G.jokers.config.highlighted_limit = target_joker_selection_limit\n{}\nend\nend",
+        trim_joker_selection()
+    );
+    let remove_from_deck = format!(
+        "local joker_selection_card_id = card.unique_val__saved_ID or card.ID or card.sort_id\n\
+        if G and G.jokers and G.jokers.config and {state_path} ~= nil and {state_owner_path} == joker_selection_card_id then\n\
+            {count_path} = ({count_path} or 1) - 1\n\
+            {state_path} = nil\n\
+            {state_owner_path} = nil\n{}\nend",
+        // Undo all selection changes supplied by this card at once. Clamping
+        // each opposing delta separately could otherwise lose the baseline.
+        format!(
+            "if {count_path} == 0 then\n\
+                G.jokers.config.highlighted_limit = math.max(1, G.jokers.config.highlighted_limit - ({total_path} or 0))\n\
+                {total_path} = nil\n\
+                {count_path} = nil\n{}\nend",
+            trim_joker_selection()
+        )
+    );
 
     PassiveEffectOutput {
         add_to_deck: vec![lua_raw_stmt(add_to_deck)],
@@ -759,5 +782,126 @@ pub fn edit_round_counter_passive_typed(
         add_to_deck: vec![lua_raw_stmt(add_to_deck)],
         remove_from_deck: vec![lua_raw_stmt(remove_from_deck)],
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConfigValue, TypedValue};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn selection_effect(operation: &str, value: ParamValue) -> EffectDef {
+        EffectDef {
+            id: "selection_size".to_string(),
+            effect_type: "edit_joker_size".to_string(),
+            params: HashMap::from([
+                ("operation".to_string(), ParamValue::Str(operation.to_string())),
+                ("value".to_string(), value),
+            ]),
+        }
+    }
+
+    fn context(object_type: ObjectType) -> CompileContext {
+        CompileContext::new(object_type, "testmod".to_string(), "selection".to_string(), false)
+    }
+
+    #[test]
+    fn passive_selection_uses_typed_literal_instead_of_default_amount() {
+        let mut ctx = context(ObjectType::Joker);
+        let effect = selection_effect("add", ParamValue::Typed(TypedValue {
+            value_type: "number".to_string(),
+            value: json!(4),
+        }));
+        let output = edit_joker_size_passive(&effect, &mut ctx);
+        assert_eq!(ctx.config_vars().len(), 1);
+        assert!(matches!(ctx.config_vars()[0].value, ConfigValue::Int(4)));
+        assert!(Emitter::new().emit_stmts(&output.add_to_deck).contains("card.ability.extra.joker_size0"));
+    }
+
+    #[test]
+    fn passive_selection_removal_uses_saved_applied_delta_for_dynamic_values() {
+        let mut ctx = context(ObjectType::Joker);
+        let effect = selection_effect("subtract", ParamValue::Typed(TypedValue {
+            value_type: "gameVariable".to_string(),
+            value: json!("GAMEVAR:dollars|1|0"),
+        }));
+        let output = edit_joker_size_passive(&effect, &mut ctx);
+        let add_code = Emitter::new().emit_stmts(&output.add_to_deck);
+        let remove_code = Emitter::new().emit_stmts(&output.remove_from_deck);
+        assert!(add_code.contains("G.GAME.dollars"));
+        assert!(add_code.contains("target_joker_selection_limit - current_joker_selection_limit"));
+        assert!(remove_code.contains("joker_selection_delta0"));
+        assert!(!remove_code.contains("G.GAME.dollars"));
+        assert!(remove_code.contains("joker_selection_delta0 = nil"));
+    }
+
+    #[test]
+    fn passive_selection_effects_have_separate_state() {
+        let mut ctx = context(ObjectType::Joker);
+        let effect = selection_effect("set", ParamValue::Int(3));
+        let first = edit_joker_size_passive(&effect, &mut ctx);
+        let second = edit_joker_size_passive(&effect, &mut ctx);
+        let first_code = Emitter::new().emit_stmts(&first.remove_from_deck);
+        let second_code = Emitter::new().emit_stmts(&second.remove_from_deck);
+        assert!(first_code.contains("joker_selection_delta0"));
+        assert!(!first_code.contains("joker_selection_delta1"));
+        assert!(second_code.contains("joker_selection_delta1"));
+        assert!(!second_code.contains("original_joker_size"));
+    }
+
+    #[test]
+    fn passive_selection_undo_waits_for_all_effects_on_the_card() {
+        let mut ctx = context(ObjectType::Joker);
+        let first = edit_joker_size_passive(&selection_effect("set", ParamValue::Int(3)), &mut ctx);
+        let second = edit_joker_size_passive(&selection_effect("set", ParamValue::Int(1)), &mut ctx);
+        for output in [first, second] {
+            let add_code = Emitter::new().emit_stmts(&output.add_to_deck);
+            let remove_code = Emitter::new().emit_stmts(&output.remove_from_deck);
+            assert!(add_code.contains("jf_joker_selection_total_delta"));
+            assert!(add_code.contains("jf_joker_selection_effect_count"));
+            assert!(remove_code.contains("if card.ability.extra.jf_joker_selection_effect_count == 0 then"));
+            assert!(remove_code.contains("highlighted_limit - (card.ability.extra.jf_joker_selection_total_delta or 0)"));
+        }
+    }
+
+    #[test]
+    fn passive_selection_state_is_owned_by_the_card_and_preserved_on_restore() {
+        let mut ctx = context(ObjectType::Joker);
+        let output = edit_joker_size_passive(&selection_effect("add", ParamValue::Int(2)), &mut ctx);
+        let add_code = Emitter::new().emit_stmts(&output.add_to_deck);
+        let remove_code = Emitter::new().emit_stmts(&output.remove_from_deck);
+        assert!(add_code.contains("card.unique_val__saved_ID or card.ID or card.sort_id"));
+        assert!(add_code.contains("jf_joker_selection_owner ~= joker_selection_card_id"));
+        assert!(add_code.contains("joker_selection_delta0 == nil or card.ability.extra.joker_selection_owner0 ~= joker_selection_card_id"));
+        assert!(remove_code.contains("joker_selection_owner0 == joker_selection_card_id"));
+    }
+
+    #[test]
+    fn active_selection_executes_in_hooks_that_ignore_return_tables() {
+        for object_type in [ObjectType::Joker, ObjectType::Consumable, ObjectType::Voucher] {
+            let mut ctx = context(object_type);
+            let effect = selection_effect("set", ParamValue::Int(3));
+            let output = edit_joker_size(&effect, &mut ctx, "card_used");
+            let code = Emitter::new().emit_stmts(&output.pre_return);
+            assert!(output.return_fields.is_empty());
+            assert!(code.contains("G.jokers.config.highlighted_limit ="));
+            assert!(code.contains("remove_from_highlighted"));
+            assert!(!code.contains("Event"));
+        }
+    }
+
+    #[test]
+    fn deck_selection_is_deferred_only_for_run_start() {
+        let effect = selection_effect("add", ParamValue::Int(2));
+        let mut ctx = context(ObjectType::Deck);
+        let startup = edit_joker_size(&effect, &mut ctx, "card_used");
+        let startup_code = Emitter::new().emit_stmts(&startup.pre_return);
+        assert!(startup_code.contains("G.E_MANAGER:add_event(Event"));
+        assert!(startup_code.contains("return true"));
+        assert!(startup.message.is_none());
+        let calculate = edit_joker_size(&effect, &mut ctx, "hand_drawn");
+        assert!(!Emitter::new().emit_stmts(&calculate.pre_return).contains("Event"));
     }
 }

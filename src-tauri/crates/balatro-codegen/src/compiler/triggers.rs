@@ -114,7 +114,13 @@ fn joker_trigger_context(trigger: &str, bp: bool) -> Option<Expr> {
             bp,
         ),
         "joker_evaluated" => bp_check(ctx("other_joker"), bp),
-        "joker_triggered" => bp_check(ctx("post_trigger"), bp),
+        "joker_triggered" => bp_check(
+            lua_and(
+                ctx("post_trigger"),
+                lua_raw_expr("(context.other_card and context.other_card ~= card and context.other_card.config and context.other_card.config.center and context.other_card.config.center.set == 'Joker')"),
+            ),
+            bp,
+        ),
 
         // In blind events
         "hand_drawn" => bp_check(ctx("hand_drawn"), bp),

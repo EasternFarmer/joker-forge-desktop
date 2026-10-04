@@ -100,7 +100,7 @@ pub fn compile_effect(
 
         // --------------- Slot Management ---------------
         "edit_joker_slots" => slot_management::edit_joker_slots(effect, ctx),
-        "edit_joker_size" => slot_management::edit_joker_size(effect, ctx),
+        "edit_joker_size" => slot_management::edit_joker_size(effect, ctx, trigger),
         "edit_consumable_slots" if deck_start => {
             deck_setup::edit_starting_counter(effect, ctx, "consumable_slots")
         }

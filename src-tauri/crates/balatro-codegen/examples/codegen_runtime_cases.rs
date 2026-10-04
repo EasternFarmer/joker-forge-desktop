@@ -1294,6 +1294,273 @@ fn append_rule_option_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn joker_condition_case(
+    cases: &mut Vec<Value>,
+    name: &str,
+    trigger: &str,
+    conditions: Value,
+    prepare: &str,
+    context: &str,
+    expected: bool,
+) {
+    let mut definition = joker(json!([{
+        "id":"joker_condition", "trigger":trigger,
+        "condition_groups":[{"conditions":conditions}],
+        "effects":[{"effect_type":"add_mult","params":{"value":9}}]
+    }]));
+    definition.user_variables = serde_json::from_value(json!([
+        {"name":"source", "var_type":"key", "initial_value":"j_second"},
+        {"name":"global_source", "var_type":"key", "initial_value":"j_third", "is_global":true},
+        {"name":"persistent_source", "var_type":"key", "initial_value":"j_first", "is_global":true, "is_persistent":true}
+    ])).unwrap();
+    cases.push(json!({"kind":"rule_options", "name":name,
+        "code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+        "prepare":format!("G.GAME.jf_global_vars={{global_source='j_third'}};JF_GLOBALS={{persistent_source='j_first'}};{prepare}"),
+        "invoke":format!("comparison_result=test_definition:calculate(actor,{context})"),
+        "verify":if expected {"assert(comparison_result and comparison_result.mult==9)"} else {"assert(not comparison_result or comparison_result.mult==nil)"}
+    }));
+}
+
+fn append_joker_selection_and_key_cases(cases: &mut Vec<Value>) {
+    for (name, params, prepare, expected) in [
+        ("any_multiple", json!({"check_key":"any"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
+        ("any_empty", json!({"check_key":"any"}), "G.jokers.highlighted={}", false),
+        ("any_missing_area", json!({"check_key":"any"}), "G.jokers=nil", false),
+        ("any_missing_highlighted", json!({"check_key":"any"}), "G.jokers.highlighted=nil", false),
+        ("any_no_game", json!({"check_key":"any"}), "G=nil", false),
+        ("key_second_highlighted", json!({"check_key":"key","joker_key":"second"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
+        ("key_third_highlighted", json!({"check_key":"key","joker_key":"j_third"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2],owned_jokers[3]}", true),
+        ("key_not_selected", json!({"check_key":"key","joker_key":"j_third"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", false),
+        ("key_malformed_selection", json!({"check_key":"key","joker_key":"j_second"}), "G.jokers.highlighted={{},{config={}},owned_jokers[2]}", true),
+        ("key_missing_area", json!({"check_key":"key","joker_key":"j_second"}), "G.jokers=nil", false),
+        ("legacy_key_alias", json!({"mode":"key","jokerKey":"second"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
+        ("rarity_second_highlighted", json!({"check_key":"rarity","rarity":"rare"}), "owned_jokers[1].config.center.rarity=1;owned_jokers[2].config.center.rarity=3;G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
+        ("rarity_not_selected", json!({"check_key":"rarity","rarity":"rare"}), "owned_jokers[1].config.center.rarity=1;G.jokers.highlighted={owned_jokers[1]}", false),
+    ] {
+        joker_condition_case(cases,&format!("joker_selected_{name}"),"hand_played",
+            json!([{"condition_type":"joker_selected","params":params}]),prepare,"{joker_main=true}",expected);
+    }
+    for (name, prepare, expected) in [
+        ("both", "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
+        ("one_missing", "G.jokers.highlighted={owned_jokers[2]}", false),
+    ] {
+        joker_condition_case(cases,&format!("joker_selected_two_keys_{name}"),"hand_played",
+            json!([
+                {"condition_type":"joker_selected","params":{"check_key":"key","joker_key":"j_first"}},
+                {"condition_type":"joker_selected","params":{"check_key":"key","joker_key":"j_second"}}
+            ]),prepare,"{joker_main=true}",expected);
+    }
+    for (name, prepare, expected) in [
+        ("match", "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", false),
+        ("missing", "G.jokers.highlighted={owned_jokers[1]}", true),
+    ] {
+        joker_condition_case(cases,&format!("joker_selected_negated_{name}"),"hand_played",
+            json!([{"condition_type":"joker_selected","negate":true,"params":{"check_key":"key","joker_key":"j_second"}}]),
+            prepare,"{joker_main=true}",expected);
+    }
+
+    for (name, trigger, params, prepare, context, negate, expected) in [
+        ("triggered_match", "joker_triggered", json!({"joker_key":"second"}), "", "{post_trigger=true,other_card=owned_jokers[2]}", false, true),
+        ("triggered_mismatch", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true,other_card=owned_jokers[1]}", false, false),
+        ("triggered_target_priority", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true,other_card=owned_jokers[2],other_joker=owned_jokers[1]}", false, true),
+        ("evaluated_match", "joker_evaluated", json!({"joker_key":"j_second"}), "", "{other_joker=owned_jokers[2]}", false, true),
+        ("evaluated_mismatch", "joker_evaluated", json!({"joker_key":"j_second"}), "", "{other_joker=owned_jokers[1]}", false, false),
+        ("evaluated_target_priority", "joker_evaluated", json!({"joker_key":"j_second"}), "", "{other_joker=owned_jokers[2],other_card=owned_jokers[1]}", false, true),
+        ("triggered_missing", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true}", false, false),
+        ("triggered_malformed", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true,other_card={config={}}}", false, false),
+        ("triggered_self", "joker_triggered", json!({"joker_key":"j_second"}), "actor.config={center={key='j_second',set='Joker'}}", "{post_trigger=true,other_card=actor}", false, false),
+        ("triggered_consumable", "joker_triggered", json!({"joker_key":"j_second"}), "owned_consumables[1].config.center.key='j_second'", "{post_trigger=true,other_card=owned_consumables[1]}", false, false),
+        ("triggered_nonpost_context", "joker_triggered", json!({"joker_key":"j_second"}), "", "{other_card=owned_jokers[2]}", false, false),
+        ("triggered_negated_match", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true,other_card=owned_jokers[2]}", true, false),
+        ("triggered_negated_mismatch", "joker_triggered", json!({"joker_key":"j_second"}), "", "{post_trigger=true,other_card=owned_jokers[1]}", true, true),
+        ("local_key_variable", "joker_triggered", json!({"type":"variable","key_variable":"source"}), "", "{post_trigger=true,other_card=owned_jokers[2]}", false, true),
+        ("global_key_variable", "joker_triggered", json!({"type":"variable","key_variable":"global_source"}), "", "{post_trigger=true,other_card=owned_jokers[3]}", false, true),
+        ("persistent_key_variable", "joker_triggered", json!({"type":"variable","key_variable":"persistent_source"}), "", "{post_trigger=true,other_card=owned_jokers[1]}", false, true),
+        ("missing_key_variable", "joker_triggered", json!({"type":"variable","key_variable":"unknown"}), "", "{post_trigger=true,other_card=owned_jokers[2]}", false, false),
+        ("legacy_key_alias", "joker_triggered", json!({"selection_method":"key","jokerKey":"second"}), "", "{post_trigger=true,other_card=owned_jokers[2]}", false, true),
+    ] {
+        joker_condition_case(cases,&format!("joker_key_{name}"),trigger,
+            json!([{"condition_type":"joker_key","negate":negate,"params":params}]),prepare,context,expected);
+    }
+    let definition = joker(json!([{
+        "id":"observed", "trigger":"joker_triggered",
+        "condition_groups":[{"conditions":[{"condition_type":"joker_key","params":{"joker_key":"j_second"}}]}],
+        "effects":[{"effect_type":"add_mult","params":{"value":9}}]
+    }]));
+    let entry: export::BatchJokerEntry = serde_json::from_value(json!({
+        "jokerData":{"objectKey":"runtime_test","name":"Runtime Test","description":"Test","cost":4,"rarity":"common",
+            "rules":[{"id":"observed","trigger":"joker_triggered"}]},
+        "pos":{"x":0,"y":0},"fileName":"runtime_test.lua"
+    })).unwrap();
+    let main = export::build_main_lua(&[entry], &[], &[], &[], &[], &[], &[], "mod", &[],
+        false, false, false, false, false, false, false, &[]);
+    cases.push(json!({"kind":"rule_options","name":"joker_key_steamodded_post_trigger_dispatch","post_trigger_runtime":true,
+        "setup":"package.preload.nativefs=function() return {} end;SMODS.current_mod={can_load=true,optional_features={existing_feature=true}};SMODS.Atlas=function() end;SMODS.ObjectType=function() end;SMODS.load_file=function() return function() end end;",
+        "code":format!("{main}\n{}",Emitter::new().emit_chunk(&compile_joker(&definition,"mod"))),
+        "invoke":r#"
+SMODS.mod_list={SMODS.current_mod};SMODS.get_optional_features()
+assert(SMODS.optional_features.post_trigger==true)
+assert(SMODS.optional_features.existing_feature==true)
+actor.config={center={key='j_mod_runtime_test',set='Joker'}};actor.area=G.jokers
+for _,observed in ipairs(owned_jokers) do
+ observed.area=G.jokers
+ function observed:calculate_joker(context) return {mult=1} end
+end
+evaluate_observed_joker(owned_jokers[2],{joker_main=true})
+assert(#post_contexts==1 and post_contexts[1].other_card==owned_jokers[2])
+assert(last_post_result and last_post_result.mult==9)
+evaluate_observed_joker(owned_jokers[1],{joker_main=true})
+assert(#post_contexts==2 and not last_post_result)
+evaluate_observed_joker(owned_jokers[2],{post_trigger=true})
+evaluate_observed_joker(owned_jokers[2],{retrigger_joker_check=true})
+assert(#post_contexts==2)
+SMODS.optional_features.post_trigger=false
+evaluate_observed_joker(owned_jokers[2],{joker_main=true})
+"#,
+        "verify":"assert(#post_contexts==2)"
+    }));
+}
+
+fn joker_selection_size_case(
+    cases: &mut Vec<Value>,
+    name: &str,
+    object: &str,
+    rules: Value,
+    prepare: &str,
+    invoke: &str,
+    verify: &str,
+) {
+    let variables = json!([{"name":"amount","var_type":"number","initial_value":3}]);
+    let chunk = match object {
+        "deck" => {
+            let mut definition = deck(rules);
+            definition.user_variables = serde_json::from_value(variables).unwrap();
+            compile_deck(&definition,"mod")
+        }
+        "voucher" => {
+            let definition: VoucherDef = serde_json::from_value(json!({
+                "key":"runtime_test","name":"Runtime Test","description":["Test"],
+                "atlas":"CustomVouchers","pos":{"x":0,"y":0},
+                "user_variables":variables,"rules":rules
+            })).unwrap();
+            compile_voucher(&definition,"mod")
+        }
+        "consumable" => {
+            let definition: ConsumableDef = serde_json::from_value(json!({
+                "key":"runtime_test","name":"Runtime Test","description":["Test"],
+                "set":"Tarot","atlas":"CustomConsumables","pos":{"x":0,"y":0},
+                "user_variables":variables,"rules":rules
+            })).unwrap();
+            compile_consumable(&definition,"mod")
+        }
+        _ => {
+            let mut definition = joker(rules);
+            definition.user_variables = serde_json::from_value(variables).unwrap();
+            compile_joker(&definition,"mod")
+        }
+    };
+    cases.push(json!({"kind":"rule_options","card_selection":true,"name":name,
+        "code":Emitter::new().emit_chunk(&chunk),"prepare":format!("actor.ID=100;actor.sort_id=100;{prepare}"),"invoke":invoke,"verify":verify
+    }));
+}
+
+fn append_joker_selection_size_cases(cases: &mut Vec<Value>) {
+    for object in ["joker", "consumable", "voucher", "deck"] {
+        for (operation, initial, value, expected) in [
+            ("add", 1, 2.0, 3),
+            ("subtract", 3, 2.0, 1),
+            ("set", 1, 3.0, 3),
+            ("set", 3, 1.9, 1),
+            ("subtract", 3, 8.0, 1),
+        ] {
+            let trigger = if object == "joker" {"hand_played"} else {"card_used"};
+            let rules = json!([{"id":"selection_limit","trigger":trigger,
+                "effects":[{"effect_type":"edit_joker_size","params":{"operation":operation,"value":value}}]
+            }]);
+            let prepare = if object == "deck" {
+                "actor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};G.jokers=nil".to_string()
+            } else {
+                format!("G.jokers=make_joker_selection_area({initial});select_jokers()")
+            };
+            let invoke = match object {
+                "deck" => format!("test_definition:apply(actor);assert(G.jokers==nil);G.jokers=make_joker_selection_area({initial});select_jokers();run_events()"),
+                "voucher" => "test_definition:redeem(actor);run_events()".to_string(),
+                "consumable" => "test_definition:use(actor,nil,nil);run_events()".to_string(),
+                _ => "test_definition:calculate(actor,{joker_main=true});run_events()".to_string(),
+            };
+            joker_selection_size_case(cases,&format!("joker_selection_size_{object}_{operation}_{value}"),object,
+                rules,&prepare,&invoke,
+                &format!("assert(G.jokers.config.highlighted_limit=={expected});assert(#G.jokers.highlighted<=G.jokers.config.highlighted_limit);G.jokers.highlighted={{}};select_jokers();assert(#G.jokers.highlighted=={expected});assert(G.jokers.highlighted[#G.jokers.highlighted]==owned_jokers[3])"));
+        }
+    }
+    joker_selection_size_case(cases,"joker_selection_size_deck_stale_area","deck",json!([{
+        "id":"selection_limit","trigger":"card_used","effects":[{"effect_type":"edit_joker_size","params":{"operation":"add","value":2}}]
+    }]),"actor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};old_area=make_joker_selection_area(8);G.jokers=old_area",
+        "test_definition:apply(actor);assert(old_area.config.highlighted_limit==8);G.jokers=make_joker_selection_area(1);run_events();select_jokers()",
+        "assert(old_area.config.highlighted_limit==8);assert(G.jokers.config.highlighted_limit==3 and #G.jokers.highlighted==3)");
+
+    for (name, operation, value, initial, applied, after_add) in [
+        ("add", "add", json!(2), 1, 3, ""),
+        ("subtract_clamped", "subtract", json!(8), 3, 1, ""),
+        ("set", "set", json!(3), 1, 3, ""),
+        ("typed_number", "add", json!({"value":2,"valueType":"number"}), 1, 3, ""),
+        ("user_variable_changed", "add", json!({"value":"amount","valueType":"userVariable"}), 1, 4, "actor.ability.extra.amount=8"),
+        ("game_variable_changed", "add", json!({"value":"GAMEVAR:joker_count|1|0","valueType":"gameVariable"}), 1, 4, "G.jokers.cards={owned_jokers[1]}"),
+    ] {
+        joker_selection_size_case(cases,&format!("joker_selection_size_passive_{name}"),"joker",json!([{
+            "id":"selection_limit","trigger":"passive","effects":[{"effect_type":"edit_joker_size","params":{"operation":operation,"value":value}}]
+        }]),&format!("G.jokers=make_joker_selection_area({initial});select_jokers()"),
+            &format!("test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit=={applied});test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit=={applied});assert(#G.jokers.highlighted<=G.jokers.config.highlighted_limit)\n{after_add}\ntest_definition:remove_from_deck(actor,false);test_definition:remove_from_deck(actor,false)"),
+            &format!("assert(G.jokers.config.highlighted_limit=={initial});assert(#G.jokers.highlighted<=G.jokers.config.highlighted_limit)"));
+    }
+    joker_selection_size_case(cases,"joker_selection_size_passive_multiple_effects","joker",json!([{
+        "id":"selection_limit","trigger":"passive","effects":[
+            {"effect_type":"edit_joker_size","params":{"operation":"add","value":1}},
+            {"effect_type":"edit_joker_size","params":{"operation":"add","value":2}}
+        ]
+    }]),"G.jokers=make_joker_selection_area(1)",
+        "test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit==4);select_jokers();test_definition:remove_from_deck(actor,false)",
+        "assert(G.jokers.config.highlighted_limit==1 and #G.jokers.highlighted==1)");
+    joker_selection_size_case(cases,"joker_selection_size_passive_opposing_sets","joker",json!([{
+        "id":"selection_limit","trigger":"passive","effects":[
+            {"effect_type":"edit_joker_size","params":{"operation":"set","value":3}},
+            {"effect_type":"edit_joker_size","params":{"operation":"set","value":1}}
+        ]
+    }]),"G.jokers=make_joker_selection_area(1)",
+        "test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit==1);test_definition:remove_from_deck(actor,false)",
+        "assert(G.jokers.config.highlighted_limit==1)");
+
+    let copy_rules = json!([{
+        "id":"selection_limit","trigger":"passive","effects":[
+            {"effect_type":"edit_joker_size","params":{"operation":"add","value":2}}
+        ]
+    }]);
+    for (name, removal) in [
+        ("source_first", "test_definition:remove_from_deck(actor,false);assert(G.jokers.config.highlighted_limit==3);test_definition:remove_from_deck(clone,false)"),
+        ("copy_first", "test_definition:remove_from_deck(clone,false);assert(G.jokers.config.highlighted_limit==3);test_definition:remove_from_deck(actor,false)"),
+    ] {
+        joker_selection_size_case(cases,&format!("joker_selection_size_passive_copy_{name}"),"joker",copy_rules.clone(),
+            "G.jokers=make_joker_selection_area(1);actor.config={center={key='j_mod_runtime_test',set='Joker'},card={}}",
+            &format!("test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit==3);clone=copy_card(actor,clone_card_shell(200,actor.sort_id));assert(clone.ID~=actor.ID and clone.sort_id==actor.sort_id);test_definition:remove_from_deck(clone,false);assert(G.jokers.config.highlighted_limit==3);test_definition:add_to_deck(clone,false);assert(G.jokers.config.highlighted_limit==5);{removal}"),
+            "assert(G.jokers.config.highlighted_limit==1)");
+    }
+    joker_selection_size_case(cases,"joker_selection_size_passive_saved_id_reload","joker",copy_rules,
+        "G.jokers=make_joker_selection_area(1)",
+        "test_definition:add_to_deck(actor,false);assert(G.jokers.config.highlighted_limit==3);restored={ID=200,sort_id=300,unique_val__saved_ID=actor.ID,ability=copy_table(actor.ability)};test_definition:add_to_deck(restored,false);assert(G.jokers.config.highlighted_limit==3);test_definition:remove_from_deck(restored,false)",
+        "assert(G.jokers.config.highlighted_limit==1)");
+
+    joker_selection_size_case(cases,"joker_selection_consumable_two_keys","consumable",json!([{
+        "id":"selected_jokers","trigger":"card_used",
+        "condition_groups":[{"conditions":[
+            {"condition_type":"joker_selected","params":{"check_key":"key","joker_key":"j_first"}},
+            {"condition_type":"joker_selected","params":{"check_key":"key","joker_key":"j_second"}}
+        ]}],
+        "effects":[{"effect_type":"modify_internal_variable","params":{"variable_name":"amount","operation":"increment","value":1}}]
+    }]),"G.jokers=make_joker_selection_area(2);G.jokers:add_to_highlighted(owned_jokers[1],true);G.jokers:add_to_highlighted(owned_jokers[2],true)",
+        "assert(test_definition:can_use(actor));test_definition:use(actor,nil,nil);assert(actor.ability.extra.amount==4);G.jokers:remove_from_highlighted(owned_jokers[1]);assert(not test_definition:can_use(actor));test_definition:use(actor,nil,nil)",
+        "assert(actor.ability.extra.amount==4)");
+}
+
 fn append_flag_and_variable_cases(cases: &mut Vec<Value>) {
     let flag = "1 active-flag!";
     let mut writer = joker(json!([{
@@ -1638,6 +1905,8 @@ fn main() {
     append_deck_settings_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
+    append_joker_selection_and_key_cases(&mut cases);
+    append_joker_selection_size_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);
     append_global_lifecycle_case(&mut cases);
     append_typed_global_cases(&mut cases);

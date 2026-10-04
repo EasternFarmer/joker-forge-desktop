@@ -179,14 +179,25 @@ pub fn joker_selected(condition: &ConditionDef) -> Option<Expr> {
                 "no joker key given",
             ));
         }
-        let normalized = normalized_joker_key(&joker_key);
+        let normalized = lua_str(normalized_joker_key(joker_key.trim()));
         return Some(lua_raw_expr(format!(
-            "#G.jokers.highlighted > 0 and G.jokers.highlighted[1].config and G.jokers.highlighted[1].config.center and G.jokers.highlighted[1].config.center.key == '{}'",
+            "(function() for _, selected in ipairs((G and G.jokers and G.jokers.highlighted) or {{}}) do if selected.config and selected.config.center and selected.config.center.key == {} then return true end end return false end)()",
             normalized
         )));
     }
 
-    Some(lua_raw_expr("#G.jokers.highlighted > 0"))
+    let rarity = get_param(condition, &["rarity"])
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "any".into());
+    if rarity != "any" {
+        let rarity = rarity_literal(&rarity);
+        return Some(lua_raw_expr(format!(
+            "(function() for _, selected in ipairs((G and G.jokers and G.jokers.highlighted) or {{}}) do if selected.config and selected.config.center and selected.config.center.rarity == {} then return true end end return false end)()",
+            rarity
+        )));
+    }
+
+    Some(lua_raw_expr("#((G and G.jokers and G.jokers.highlighted) or {}) > 0"))
 }
 
 fn joker_sticker_for_target(condition: &ConditionDef, target: JokerTarget) -> Expr {
@@ -227,7 +238,7 @@ pub fn this_joker_edition(condition: &ConditionDef) -> Option<Expr> {
     Some(joker_edition_for_target(condition, JokerTarget::SelfJoker))
 }
 
-pub fn joker_key(condition: &ConditionDef) -> Option<Expr> {
+pub fn joker_key(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let mode = get_param(condition, &["type", "selection_method"])
         .and_then(|v| v.as_str())
         .unwrap_or("key");
@@ -242,27 +253,44 @@ pub fn joker_key(condition: &ConditionDef) -> Option<Expr> {
                 ))
             }
         };
-        return Some(lua_raw_expr(format!(
-            "(context.other_joker and context.other_joker.config and context.other_joker.config.center and context.other_joker.config.center.key == card.ability.extra.{})",
-            key_var
-        )));
+        if !ctx.has_user_var(key_var) {
+            return Some(super::utils::invalid_condition("joker_key", "unknown key variable"));
+        }
+        let base = if ctx.user_var_is_global(key_var) {
+            if ctx.user_var_is_persistent(key_var) {
+                "JF_GLOBALS"
+            } else {
+                "G.GAME.jf_global_vars"
+            }
+        } else {
+            ctx.ability_path()
+        };
+        let parts: Vec<&str> = base.split('.').collect();
+        let guarded_base = (1..=parts.len())
+            .map(|end| parts[..end].join("."))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let expected = format!("({} and {}[{}])", guarded_base, base, lua_str(key_var));
+        return Some(joker_key_match(&expected));
     }
 
     let joker_key = get_param(condition, &["joker_key", "jokerKey", "value"])
         .map(|v| v.to_string_lossy())
         .unwrap_or_default();
-    if joker_key.is_empty() {
+    if joker_key.trim().is_empty() {
         return Some(super::utils::invalid_condition(
             "joker_key",
             "no joker key given",
         ));
     }
-    let normalized = normalized_joker_key(&joker_key);
+    Some(joker_key_match(&lua_str(normalized_joker_key(joker_key.trim())).to_string()))
+}
 
-    Some(lua_raw_expr(format!(
-        "(context.other_joker and context.other_joker.config and context.other_joker.config.center and context.other_joker.config.center.key == '{}')",
-        normalized
-    )))
+fn joker_key_match(expected: &str) -> Expr {
+    lua_raw_expr(format!(
+        "(function() local target = context and ((context.post_trigger and context.other_card) or (not context.post_trigger and context.other_joker)); local expected = {}; if type(expected) ~= 'string' or expected == '' then return false end; if expected:sub(1, 2) ~= 'j_' then expected = 'j_' .. expected end; return not not (target and target.config and target.config.center and target.config.center.key == expected) end)()",
+        expected
+    ))
 }
 
 fn rarity_literal(rarity: &str) -> String {
@@ -271,7 +299,7 @@ fn rarity_literal(rarity: &str) -> String {
         "uncommon" | "Uncommon" | "2" => "2".to_string(),
         "rare" | "Rare" | "3" => "3".to_string(),
         "legendary" | "Legendary" | "4" => "4".to_string(),
-        other => format!("'{}'", other),
+        other => lua_str(other).to_string(),
     }
 }
 

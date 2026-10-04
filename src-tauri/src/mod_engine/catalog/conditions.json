@@ -2766,7 +2766,7 @@
   {
     "id": "joker_selected",
     "label": "Joker Selected",
-    "description": "Check if a joker is selected/highlighted",
+    "description": "Check whether any selected Joker matches the chosen key or rarity. Combine conditions to require multiple selected Jokers.",
     "objectUsers": ["joker", "consumable"],
     "applicableTriggers": [
       "booster_exited",
@@ -3604,7 +3604,7 @@
   {
     "id": "joker_key",
     "label": "Joker Key",
-    "description": "Check the key of the evaluated joker",
+    "description": "Check the key of the Joker being evaluated or whose effect just triggered",
     "objectUsers": ["joker"],
     "applicableTriggers": ["joker_evaluated", "joker_triggered"],
     "params": [

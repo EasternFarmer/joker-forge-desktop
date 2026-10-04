@@ -2103,9 +2103,19 @@ SMODS.current_mod.reset_game_globals = function(run_start)\n\
         )
     };
 
+    // Steamodded only dispatches post-trigger contexts when a loaded mod opts in.
+    let optional_features = if jokers.iter().any(|entry| {
+        entry.joker_data.rules.iter().any(|rule| rule.trigger == "joker_triggered")
+    }) {
+        "SMODS.current_mod.optional_features = SMODS.current_mod.optional_features or {}\n\
+SMODS.current_mod.optional_features.post_trigger = true\n"
+    } else {
+        ""
+    };
+
     format!(
-        "{}local NFS = require(\"nativefs\")\nto_big = to_big or function(a) return a end\nlenient_bignum = lenient_bignum or function(a) return a end\n{}\n{}{}\n",
-        atlas_decls, globals_load, game_globals_reset, requires
+        "{}local NFS = require(\"nativefs\")\nto_big = to_big or function(a) return a end\nlenient_bignum = lenient_bignum or function(a) return a end\n{}\n{}{}{}\n",
+        atlas_decls, globals_load, game_globals_reset, optional_features, requires
     )
 }
 
@@ -2664,6 +2674,50 @@ mod tests {
         let names: Vec<&str> = globals.iter().map(|value| value.name.as_str()).collect();
         assert!(names.contains(&"global_non_persistent"));
         assert!(!names.contains(&"global_persistent"));
+    }
+
+    #[test]
+    fn build_main_lua_enables_post_trigger_for_any_exported_joker() {
+        let mut triggered_joker = make_joker_entry(vec![]);
+        triggered_joker.joker_data.rules = serde_json::from_value(serde_json::json!([
+            { "id": "triggered", "trigger": "joker_triggered", "effects": [
+                { "id": "mult", "type": "add_mult", "params": { "value": 2 } }
+            ] }
+        ])).unwrap();
+        let jokers = vec![make_joker_entry(vec![]), triggered_joker];
+        let lua = build_main_lua(
+            &jokers, &[], &[], &[], &[], &[], &[], "mod", &[],
+            false, false, false, false, false, false, false, &[],
+        );
+
+        let feature = "SMODS.current_mod.optional_features.post_trigger = true";
+        assert!(lua.contains("SMODS.current_mod.optional_features = SMODS.current_mod.optional_features or {}"));
+        assert_eq!(lua.matches(feature).count(), 1);
+        assert!(lua.find(feature).unwrap() < lua.find("jokers/j_test.lua").unwrap());
+    }
+
+    #[test]
+    fn build_main_lua_leaves_post_trigger_disabled_without_a_triggered_rule() {
+        for trigger in [None, Some("joker_evaluated"), Some("hand_played")] {
+            let mut joker = make_joker_entry(vec![]);
+            if let Some(trigger) = trigger {
+                joker.joker_data.rules = serde_json::from_value(serde_json::json!([
+                    { "id": "other", "trigger": trigger, "effects": [
+                        { "id": "mult", "type": "add_mult", "params": { "value": 2 } }
+                    ] }
+                ])).unwrap();
+            }
+            let lua = build_main_lua(
+                &[joker], &[], &[], &[], &[], &[], &[], "mod", &[],
+                false, false, false, false, false, false, false, &[],
+            );
+            assert!(!lua.contains("optional_features"), "trigger {trigger:?}");
+        }
+        let empty = build_main_lua(
+            &[], &[], &[], &[], &[], &[], &[], "mod", &[],
+            false, false, false, false, false, false, false, &[],
+        );
+        assert!(!empty.contains("optional_features"));
     }
 
     #[test]
