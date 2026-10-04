@@ -43,6 +43,112 @@ const aliases = [
   "interest", "hand_level", "times_hand_played", "scored_card_count", "played_card_count", "poker_hand_count",
 ];
 
+function editionSaveHandlers(shader = "foil") {
+  const edition = {
+    id: "edition", objectType: "edition", name: "Test Edition",
+    objectKey: "test", description: "Custom description", orderValue: 1,
+    shader, rules: [],
+  };
+  const data = { editions: [edition], metadata: { prefix: "test" } };
+  const hookStates = [null, edition, null, false];
+  let hookIndex = 0;
+  const { applyItemUpdatesWithOrderSwap } = loadTypeScript("src/lib/items/item-order.ts");
+  const componentImports = {
+    "@/components/pages/generic-item-page": { GenericItemPage: "ItemPage" },
+    "@/components/pages/generic-item-card": {},
+    "@/components/pages/generic-item-card-compact": {},
+    "@/components/ui/confirm-dialog": {},
+    "@/components/balatro/balatro-card": {},
+    "@/components/rule-builder": { RuleBuilder: "RuleBuilder" },
+    "@/components/pages/item-showcase-dialog": {},
+    "@/components/templates/template-picker-dialog": {},
+    "@/components/edit-dialogs": { EditEditionDialog: "InfoDialog" },
+  };
+  const { default: EditionsPage } = loadTypeScript("src/pages/editions-page.tsx", {
+    ...componentImports,
+    react: {
+      useCallback: (callback) => callback,
+      useMemo: (callback) => callback(),
+      useEffect() {},
+      useRef: (current) => ({ current }),
+      useState() {
+        const index = hookIndex++;
+        return [hookStates[index], (value) => {
+          hookStates[index] = typeof value === "function" ? value(hookStates[index]) : value;
+        }];
+      },
+    },
+    "react/jsx-runtime": {
+      jsx: (type, props) => ({ type, props }),
+      jsxs: (type, props) => ({ type, props }),
+      Fragment: "Fragment",
+    },
+    "react-router-dom": { useSearchParams: () => [new URLSearchParams(), () => {}] },
+    "@/lib/services/storage": {
+      useProjectData: () => ({
+        data, isHydrating: false,
+        updateEditions: (updates) => {
+          data.editions = typeof updates === "function" ? updates(data.editions) : updates;
+        },
+      }),
+      useModName: () => "Test Mod",
+    },
+    "@/hooks/use-confirm-delete": { useConfirmDelete: () => ({}) },
+    "@/lib/core/search": {},
+    "@phosphor-icons/react": {},
+    "@/lib/export/rust-codegen-export": {},
+    "@/lib/app/global-user-variables": {},
+    "@/lib/rules/auto-description": {
+      shouldOverwriteDescriptionOnRuleSave: () => false,
+    },
+    "@/lib/items/item-order": { applyItemUpdatesWithOrderSwap },
+    "@/lib/content/templates": {
+      useTemplateStore: () => ({ getItemTemplatesForType: () => [] }),
+    },
+    "@/lib/app/global-alerts-bus": {},
+    "@/lib/description/description-loc-vars": { getItemLocVarsFromUserVariables: () => [] },
+  });
+  const children = EditionsPage().props.children;
+  return {
+    data,
+    rules: children.find((child) => child?.type === "RuleBuilder").props,
+    info: children.find((child) => child?.type === "InfoDialog").props,
+    page: children.find((child) => child?.type === "ItemPage").props,
+  };
+}
+
+test("saving edition rules and other partial edits retains its selected shader", () => {
+  for (const shader of ["foil", "holo", "custom_shader", false]) {
+    const { data, rules, info, page } = editionSaveHandlers(shader);
+    const newRules = [{ id: "score", trigger: "card_scored", effects: [] }];
+    rules.onSave(newRules);
+    assert.equal(data.editions[0].shader, shader);
+    assert.equal(data.editions[0].rules, newRules);
+    assert.equal(data.editions[0].description, "Custom description");
+    rules.onUpdateItem({ userVariables: [{ id: "bonus", name: "bonus", type: "number", initialValue: 5 }] });
+    rules.onUpdateItem({ customCode: { calculate: "return nil" } });
+    info.onSave("edition", { name: "Renamed Edition" });
+    page.renderCard(data.editions[0], { selectedAce: "Spades" }).props.onUpdate({ unlocked: false });
+    assert.equal(data.editions[0].shader, shader);
+    assert.equal(data.editions[0].name, "Renamed Edition");
+    assert.equal(data.editions[0].unlocked, false);
+  }
+});
+
+test("explicit edition shader changes still replace or clear the shader", () => {
+  const { data, info, rules } = editionSaveHandlers();
+  info.onSave("edition", { shader: "holo" });
+  assert.equal(data.editions[0].shader, "holo");
+  info.onSave("edition", { shader: "" });
+  assert.equal(data.editions[0].shader, false);
+  rules.onSave([{ id: "score", effects: [] }]);
+  assert.equal(data.editions[0].shader, false);
+  info.onSave("edition", { shader: "custom_shader" });
+  assert.equal(data.editions[0].shader, "custom_shader");
+  info.onSave("edition", { shader: false });
+  assert.equal(data.editions[0].shader, false);
+});
+
 function project(collection = "jokers", item = {}) {
   const data = {
     metadata: { id: "test", prefix: "test", name: "Test" },

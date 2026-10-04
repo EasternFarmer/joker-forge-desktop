@@ -2,14 +2,14 @@ use crate::compiler::context::CompileContext;
 use crate::compiler::effects::utils::is_literal_one_param;
 use crate::compiler::effects::EffectOutput;
 use crate::lua_ast::*;
-use crate::types::EffectDef;
+use crate::types::{EffectDef, ObjectType};
 
 /// Destroy Card effect: marks a card for destruction.
 ///
 /// Behaviour varies by trigger:
 /// - `card_discarded`: uses `remove = true` return field
 /// - Other triggers: uses pre-return code to set `card.should_destroy`
-pub fn destroy_card(effect: &EffectDef, _ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
+pub fn destroy_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
     let message = effect
         .params
         .get("customMessage")
@@ -27,28 +27,39 @@ pub fn destroy_card(effect: &EffectDef, _ctx: &mut CompileContext, trigger: &str
             segment_id: None,
         },
         _ => {
-            let mut pre = vec![];
-            // check whether glass trigger flag is needed
+            // Playing-card objects receive the affected card directly. Their
+            // main_scoring context does not contain context.other_card.
+            let target = if matches!(
+                ctx.object_type,
+                ObjectType::Enhancement | ObjectType::Seal | ObjectType::Edition
+            ) {
+                "card"
+            } else {
+                "context.other_card"
+            };
             let set_glass = effect
                 .params
-                .get("setGlassTrigger")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
+                .get("set_glass_trigger")
+                .or_else(|| effect.params.get("setGlassTrigger"))
+                .map(|value| value.as_bool().unwrap_or_else(|| {
+                    matches!(value.to_string_lossy().trim().to_ascii_lowercase().as_str(), "y" | "yes" | "true")
+                }))
+                .unwrap_or(false);
+            let mut mark_destroyed = Vec::new();
             if set_glass {
-                pre.push(lua_assign(
-                    lua_path(&["context", "other_card", "glass_trigger"]),
+                mark_destroyed.push(lua_assign(
+                    lua_field(lua_raw_expr(target), "glass_trigger"),
                     lua_bool(true),
                 ));
             }
-            pre.push(lua_assign(
-                lua_path(&["context", "other_card", "should_destroy"]),
+            mark_destroyed.push(lua_assign(
+                lua_field(lua_raw_expr(target), "should_destroy"),
                 lua_bool(true),
             ));
 
             EffectOutput {
                 return_fields: vec![],
-                pre_return: pre,
+                pre_return: vec![lua_if(lua_raw_expr(target), mark_destroyed)],
                 config_vars: vec![],
                 message: Some(lua_str(message)),
                 colour: Some(lua_raw_expr("G.C.RED")),

@@ -175,6 +175,41 @@ reset_score(0,1)
 SCORING_PARAMETERS = steamodded_scoring_parameters()
 
 
+def steamodded_card_destruction_runtime():
+    """Keep native scoring contexts and destruction bookkeeping in the regression."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    sections = [
+        ("SMODS.trigger_effects = function", "\nSMODS.calculate_effect = function"),
+        ("function SMODS.calculate_card_areas", "\n\n-- Updates a [context]"),
+        ("function SMODS.calculate_context", "\nfunction SMODS.in_scoring"),
+        ("function SMODS.in_scoring", "\nfunction SMODS.calculate_main_scoring"),
+        ("function SMODS.calculate_destroying_cards", "\nfunction SMODS.blueprint_effect"),
+    ]
+    native = "\n".join(start + source.split(start, 1)[1].split(end, 1)[0]
+                       for start, end in sections)
+    return native + """
+SMODS.context_stack={}
+SMODS.push_to_context_stack=function(context) SMODS.context_stack[#SMODS.context_stack+1]={context=context} end
+SMODS.pop_from_context_stack=function() table.remove(SMODS.context_stack) end
+SMODS.check_looping_context=function() return false end
+SMODS.update_context_flags=function() end
+SMODS.Sticker={obj_buffer={}}
+SMODS.get_card_areas=function(kind) return kind=='playing_cards' and {G.play,G.hand} or {} end
+SMODS.shatters=function(card) return test_definition.shatters or false end
+function highlight_card() end
+G.STAGE=1;G.STAGES={RUN=1};percent=0;percent_delta=0.08
+function eval_card(card,context)
+ if card~=actor then return {},{} end
+ local effect=test_definition:calculate(card,context)
+ if effect then effect.card=effect.card or card end
+ return effect and {[native_effect_key]=effect} or {},{}
+end
+"""
+
+
+CARD_DESTRUCTION_RUNTIME = steamodded_card_destruction_runtime()
+
+
 def steamodded_post_trigger_runtime():
     """Use Steamodded's feature scan and patched evaluation callback together."""
     source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
@@ -474,6 +509,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + POST_TRIGGER_RUNTIME
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
+            if case.get("card_destruction_runtime"):
+                source += "\n" + CARD_DESTRUCTION_RUNTIME
             if case["kind"] == "deck_settings":
                 source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
             else:

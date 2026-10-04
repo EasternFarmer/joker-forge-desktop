@@ -1,6 +1,6 @@
 use super::colors::normalize_hex_colour;
 use super::context::CompileContext;
-use super::enhancement::build_card_calculate_function;
+use super::enhancement::{build_card_calculate_function, has_non_discard_destroy};
 use super::{build_shared_loc_vars, compile_rules, RuleOutput};
 use crate::lua_ast::*;
 use crate::types::*;
@@ -199,7 +199,12 @@ fn build_edition_table(
     ));
 
     // calculate function
-    if let Some(f) = build_card_calculate_function(rule_outputs, ctx, false, false, "edition") {
+    if let Some(f) = build_card_calculate_function(
+        rule_outputs,
+        ctx,
+        has_non_discard_destroy(&edition.rules),
+        false,
+    ) {
         entries.push(TableEntry::KeyValue("calculate".to_string(), f));
     }
 

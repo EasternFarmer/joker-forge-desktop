@@ -409,6 +409,89 @@ fn append_card_retrigger_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_card_self_destruct_cases(cases: &mut Vec<Value>) {
+    for object in ["seal", "enhancement", "edition"] {
+        for scenario in ["direct", "chance", "chance_then_miss", "loop", "missed_chance", "missed_condition", "empty_loop", "legacy_alias", "retrigger", "held", "glass", "typed_glass", "legacy_glass", "typed_legacy_false"] {
+            let destroy_type = if scenario == "legacy_alias" { "destroy_card" } else { "destroy_playing_card" };
+            let trigger = if scenario == "held" { "card_held_in_hand" } else { "card_scored" };
+            let destroy_params = match scenario {
+                "glass" => json!({"set_glass_trigger":"y"}),
+                "typed_glass" => json!({"set_glass_trigger":{"value":"y", "valueType":"text"}}),
+                "legacy_glass" => json!({"setGlassTrigger":true}),
+                "typed_legacy_false" => json!({"setGlassTrigger":{"value":false, "valueType":"text"}}),
+                _ => json!({"set_glass_trigger":"n"}),
+            };
+            let mut effects = json!([
+                {"effect_type":"apply_x_mult", "params":{"value":5}},
+                {"effect_type":destroy_type, "params":destroy_params}
+            ]);
+            let mut rule = json!({"id":"self_destruct", "trigger":trigger, "destroy":true});
+            match scenario {
+                "chance" | "chance_then_miss" | "missed_chance" => {
+                    rule["random_groups"] = json!([{"id":"destruction_chance", "chance_numerator":1, "chance_denominator":2, "effects":effects}]);
+                }
+                "loop" | "empty_loop" => {
+                    let count = if scenario=="empty_loop" { json!({"value":"GAMEVAR:current_money|1|0", "valueType":"gameVariable"}) } else { json!(2) };
+                    rule["loop_groups"] = json!([{"id":"destruction_loop", "count":count, "effects":effects}]);
+                }
+                "retrigger" => {
+                    effects.as_array_mut().unwrap().insert(0, json!({"effect_type":"retrigger", "params":{"repetitions":1}}));
+                    rule["retrigger"] = json!(true);
+                    rule["effects"] = effects;
+                }
+                _ => rule["effects"] = effects,
+            }
+            if scenario == "missed_condition" {
+                rule["condition_groups"] = json!([{"conditions":[{"condition_type":"player_money", "params":{"operator":"greater_than", "value":10}}]}]);
+            }
+            let input = json!({"key":"runtime_test", "name":"Runtime Test", "description":["Test"],
+                "atlas":"CustomCards", "pos":{"x":0,"y":0}, "rules":[rule]});
+            let chunk = match object {
+                "seal" => compile_seal(&serde_json::from_value::<SealDef>(input).unwrap(), "mod"),
+                "edition" => compile_edition(&serde_json::from_value::<EditionDef>(input).unwrap(), "mod"),
+                _ => compile_enhancement(&serde_json::from_value::<EnhancementDef>(input).unwrap(), "mod"),
+            };
+            let object_setup = match object {
+                "seal" => "actor.ability.seal=copy_table(test_definition.config or {});native_effect_key='seals'",
+                "edition" => "actor.edition=copy_table(test_definition.config or {});native_effect_key='edition'",
+                _ => "native_effect_key='enhancement'",
+            };
+            let succeeds = !matches!(scenario, "missed_chance" | "missed_condition" | "empty_loop");
+            let expected_mult = if !succeeds { 1 } else if matches!(scenario, "loop" | "retrigger") { 25 } else { 5 };
+            let area = if scenario == "held" { "G.hand" } else { "G.play" };
+            let scoring_hand = if scenario == "held" { "nil" } else { "{actor}" };
+            let probability = if scenario == "chance_then_miss" {
+                "chance_calls=0;SMODS.pseudorandom_probability=function() chance_calls=chance_calls+1;return chance_calls==1 end".to_string()
+            } else {
+                format!("SMODS.pseudorandom_probability=function() return {} end",scenario!="missed_chance")
+            };
+            let score_call = format!("SMODS.score_card(actor,{{cardarea={area},full_hand={{actor}},scoring_hand={scoring_hand}}});");
+            let score_calls = if scenario == "chance_then_miss" { format!("{score_call}{score_call}assert(chance_calls==2);") } else { score_call };
+            let glass_check = if matches!(scenario,"glass"|"typed_glass"|"legacy_glass") { "assert(actor.glass_trigger==true);" } else { "assert(not actor.glass_trigger);" };
+            cases.push(json!({"kind":"scoring", "name":format!("card_self_destruct_{object}_{scenario}"),
+                "card_destruction_runtime":true, "code":Emitter::new().emit_chunk(&chunk),
+                "prepare":format!("G.GAME.dollars=0;G.play={{cards={{}}}};G.hand={{cards={{}}}};{object_setup};actor.config={{center={{key='c_base'}}}};actor.dissolve_calls=0;function actor:start_dissolve() self.dissolve_calls=self.dissolve_calls+1 end;innocent={{ability={{}},config={{center={{key='c_base'}}}}}};{area}.cards={{actor,innocent}};{probability};reset_score(0,1)"),
+                "invoke":format!("{score_calls}assert(mult=={expected_mult}, 'scoring must finish before destruction');assert(not actor.destroyed and not actor.shattered and #event_queue==0);{glass_check}local cards_destroyed={{}};SMODS.calculate_destroying_cards({{cardarea={area},full_hand={{actor}},scoring_hand={scoring_hand}}},cards_destroyed,{scoring_hand})"),
+                "verify":format!("assert(#cards_destroyed=={});{}assert(not innocent.should_destroy and not innocent.getting_sliced);run_events();assert(actor.dissolve_calls==0, 'Steamodded must own card removal')",if succeeds {1}else{0},if succeeds {"assert(cards_destroyed[1]==actor and actor.getting_sliced and (actor.destroyed or actor.shattered));"}else{"assert(not actor.should_destroy and not actor.getting_sliced);"})}));
+        }
+        let input = json!({"key":"runtime_test", "name":"Runtime Test", "description":["Test"],
+            "atlas":"CustomCards", "pos":{"x":0,"y":0}, "rules":[{
+                "id":"discard_destruction", "trigger":"card_discarded", "destroy":true,
+                "effects":[{"effect_type":"destroy_playing_card", "params":{}}]
+            }]});
+        let chunk = match object {
+            "seal" => compile_seal(&serde_json::from_value::<SealDef>(input).unwrap(), "mod"),
+            "edition" => compile_edition(&serde_json::from_value::<EditionDef>(input).unwrap(), "mod"),
+            _ => compile_enhancement(&serde_json::from_value::<EnhancementDef>(input).unwrap(), "mod"),
+        };
+        cases.push(json!({"kind":"scoring", "name":format!("card_self_destruct_{object}_discard"),
+            "card_destruction_runtime":true, "code":Emitter::new().emit_chunk(&chunk),
+            "prepare":format!("G.play={{cards={{}}}};G.hand={{cards={{actor}}}};actor.config={{center={{key='c_base'}}}};native_effect_key={:?}", if object=="seal" {"seals"} else {object}),
+            "invoke":"local effects={};SMODS.calculate_context({discard=true,other_card=actor,full_hand={actor}},effects);local flags=SMODS.trigger_effects(effects,actor)",
+            "verify":"assert(flags.remove, 'discard destruction must return native remove flag');assert(not actor.should_destroy and #event_queue==0)"}));
+    }
+}
+
 fn deck_settings_case(
     cases: &mut Vec<Value>,
     name: &str,
@@ -1902,6 +1985,7 @@ fn main() {
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);
     append_card_retrigger_cases(&mut cases);
+    append_card_self_destruct_cases(&mut cases);
     append_deck_settings_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);

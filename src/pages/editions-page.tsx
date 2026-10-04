@@ -68,10 +68,8 @@ export default function EditionsPage() {
 
   const handleUpdate = useCallback(
     (id: string, updates: Partial<EditionData>) => {
-      const normalizedUpdates = {
-        ...updates,
-        shader: updates.shader === "" ? false : updates.shader,
-      };
+      const normalizedUpdates =
+        updates.shader === "" ? { ...updates, shader: false as const } : updates;
       updateEditions((previous) =>
         applyItemUpdatesWithOrderSwap(previous, id, normalizedUpdates),
       );

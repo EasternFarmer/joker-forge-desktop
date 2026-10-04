@@ -93,12 +93,14 @@ fn extract_base_config(rules: &[RuleDef]) -> Vec<(String, f64)> {
 }
 
 /// check whether any rule has destroy effects (non-discard triggers)
-fn has_non_discard_destroy(rules: &[RuleDef]) -> bool {
+pub(super) fn has_non_discard_destroy(rules: &[RuleDef]) -> bool {
     rules.iter().any(|r| {
         r.trigger != "card_discarded"
-            && r.effects
-                .iter()
-                .any(|e| e.effect_type == "destroy_playing_card")
+            && (r.destroy
+                || r.effects.iter()
+                    .chain(r.random_groups.iter().flat_map(|group| &group.effects))
+                    .chain(r.loop_groups.iter().flat_map(|group| &group.effects))
+                    .any(|e| matches!(e.effect_type.as_str(), "destroy_playing_card" | "destroy_card")))
     })
 }
 
@@ -215,7 +217,6 @@ fn build_enhancement_table(
         ctx,
         has_non_discard_destroy(&enhancement.rules),
         has_retrigger_effects(&enhancement.rules),
-        "enhancement",
     ) {
         entries.push(TableEntry::KeyValue("calculate".to_string(), f));
     }
@@ -230,7 +231,6 @@ pub(crate) fn build_card_calculate_function(
     ctx: &CompileContext,
     has_destroy: bool,
     has_retrigger: bool,
-    item_type: &str,
 ) -> Option<Expr> {
     let non_passive: Vec<&RuleOutput> = rule_outputs
         .iter()
@@ -248,29 +248,14 @@ pub(crate) fn build_card_calculate_function(
         let destroy_check = lua_and(
             lua_path(&["context", "destroy_card"]),
             lua_and(
-                lua_eq(lua_path(&["context", "cardarea"]), lua_path(&["G", "play"])),
-                lua_and(
-                    lua_eq(lua_path(&["context", "destroy_card"]), lua_ident("card")),
-                    lua_path(&["card", "should_destroy"]),
-                ),
+                lua_eq(lua_path(&["context", "destroy_card"]), lua_ident("card")),
+                lua_path(&["card", "should_destroy"]),
             ),
         );
-
-        let destroy_body = if item_type == "enhancement" {
-            vec![lua_return(lua_table(vec![("remove", lua_bool(true))]))]
-        } else {
-            vec![
-                lua_raw_stmt(
-                    "G.E_MANAGER:add_event(Event({\n                func = function()\n                    card:start_dissolve()\n                    return true\n                end\n            }))",
-                ),
-                lua_raw_stmt(
-                    "card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {message = \"Card Destroyed!\", colour = G.C.RED})",
-                ),
-                lua_return(Expr::Nil),
-            ]
-        };
-
-        body.push(lua_if(destroy_check, destroy_body));
+        body.push(lua_if(
+            destroy_check,
+            vec![lua_return(lua_table(vec![("remove", lua_bool(true))]))],
+        ));
     }
 
     // Retrigger handling
@@ -303,8 +288,6 @@ pub(crate) fn build_card_calculate_function(
             .filter(|r| r.trigger == *trigger && r.has_retrigger == *use_retrigger)
             .collect();
 
-        let has_trigger_destroy = rules_for_trigger.iter().any(|r| r.has_destroy);
-
         let trigger_ctx = super::triggers::trigger_context_for_rule(
             ctx.object_type,
             trigger,
@@ -314,12 +297,6 @@ pub(crate) fn build_card_calculate_function(
 
         let mut trigger_body: Vec<Stmt> = Vec::new();
 
-        if has_trigger_destroy && trigger.as_str() != "card_discarded" {
-            trigger_body.push(lua_assign(
-                lua_path(&["card", "should_destroy"]),
-                lua_bool(false),
-            ));
-        }
         if *use_retrigger {
             trigger_body.push(lua_assign(
                 lua_path(&["card", "should_retrigger"]),
@@ -328,14 +305,7 @@ pub(crate) fn build_card_calculate_function(
         }
 
         super::append_rule_chain_with_fallback(&mut trigger_body, &rules_for_trigger, |ro| {
-            let mut stmts = ro.effect_stmts.clone();
-            if ro.has_destroy && trigger.as_str() != "card_discarded" {
-                stmts.insert(
-                    0,
-                    lua_assign(lua_path(&["card", "should_destroy"]), lua_bool(true)),
-                );
-            }
-            super::wrap_rule_segment(&ro.rule_id, stmts)
+            super::wrap_rule_segment(&ro.rule_id, ro.effect_stmts.clone())
         });
 
         if !trigger_body.is_empty() {
