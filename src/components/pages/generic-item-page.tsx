@@ -377,8 +377,10 @@ function GenericItemPageInternal<T extends { id: string }>({
 
   const actualCardSize = 80 + (compactCardSizeIndex - 1) * 40;
   const [isPending, startTransition] = useTransition();
-  const listContainerRef = useRef<HTMLDivElement | null>(null);
-  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  // These nodes mount after the initial reveal and can remount after filtering.
+  // Track the nodes so their observers connect whenever the actual grid appears.
+  const [listContainer, setListContainer] = useState<HTMLDivElement | null>(null);
+  const [loadMoreTarget, setLoadMoreTarget] = useState<HTMLDivElement | null>(null);
   const emptyStateFlavor = useMemo(() => getRandomEmptyStateFlavor(), []);
   const renderContext = useMemo(() => ({ selectedAce }), [selectedAce]);
 
@@ -548,8 +550,7 @@ function GenericItemPageInternal<T extends { id: string }>({
   const [containerWidth, setContainerWidth] = useState(1200);
 
   useEffect(() => {
-    const container = listContainerRef.current;
-    if (!container) return;
+    if (!listContainer) return;
 
     const observer = new ResizeObserver(([entry]) => {
       const nextWidth = entry?.contentRect.width;
@@ -558,9 +559,9 @@ function GenericItemPageInternal<T extends { id: string }>({
         Math.abs(previous - nextWidth) > 2 ? nextWidth : previous,
       );
     });
-    observer.observe(container);
+    observer.observe(listContainer);
     return () => observer.disconnect();
-  }, [processedItems.length]);
+  }, [listContainer]);
 
   useEffect(() => {
     const onResize = () => {
@@ -653,7 +654,7 @@ function GenericItemPageInternal<T extends { id: string }>({
       : Math.max(800, viewportSize.height * 1.5);
 
   useEffect(() => {
-    const target = loadMoreRef.current;
+    const target = loadMoreTarget;
     if (!target || !hasMoreItems) return;
     const scrollRoot = getScrollableAncestor(target);
 
@@ -708,6 +709,7 @@ function GenericItemPageInternal<T extends { id: string }>({
       scrollTarget.removeEventListener("scroll", maybeLoadFromScrollPosition);
     };
   }, [
+    loadMoreTarget,
     hasMoreItems,
     processedItems.length,
     renderedItemBatchSize,
@@ -726,6 +728,7 @@ function GenericItemPageInternal<T extends { id: string }>({
   const [isInitialGridReady, setIsInitialGridReady] = useState(false);
   const [showDelayedSkeletons, setShowDelayedSkeletons] = useState(false);
 
+  // Appending a scroll batch must keep the existing grid mounted.
   useEffect(() => {
     setIsInitialGridReady(false);
     setShowDelayedSkeletons(false);
@@ -752,7 +755,7 @@ function GenericItemPageInternal<T extends { id: string }>({
       if (isCancelled) return;
       setShowDelayedSkeletons(true);
 
-      if (renderedItems.length > FAST_INITIAL_RENDER_ITEM_LIMIT) {
+      if (processedItems.length > FAST_INITIAL_RENDER_ITEM_LIMIT) {
         firstFrameId = window.requestAnimationFrame(() => {
           secondFrameId = window.requestAnimationFrame(revealGrid);
         });
@@ -761,7 +764,7 @@ function GenericItemPageInternal<T extends { id: string }>({
 
     if (
       !isInitialLoadingState &&
-      renderedItems.length <= FAST_INITIAL_RENDER_ITEM_LIMIT
+      processedItems.length <= FAST_INITIAL_RENDER_ITEM_LIMIT
     ) {
       if ("requestIdleCallback" in window) {
         idleCallbackId = window.requestIdleCallback(revealGrid, {
@@ -784,7 +787,6 @@ function GenericItemPageInternal<T extends { id: string }>({
     gridRenderKey,
     isInitialLoadingState,
     processedItems.length,
-    renderedItems.length,
     startTransition,
   ]);
 
@@ -1383,7 +1385,7 @@ function GenericItemPageInternal<T extends { id: string }>({
           {initialSkeletonCards}
         </div>
       ) : isInitialLoadingState || isWaitingForInitialGrid ? (
-        <div ref={listContainerRef} aria-busy="true" />
+        <div ref={setListContainer} aria-busy="true" />
       ) : processedItems.length === 0 ? (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -1431,7 +1433,7 @@ function GenericItemPageInternal<T extends { id: string }>({
           )}
         </motion.div>
       ) : (
-        <div ref={listContainerRef}>
+        <div ref={setListContainer}>
           <div
             className={cn(
               "grid",
@@ -1505,7 +1507,7 @@ function GenericItemPageInternal<T extends { id: string }>({
             ))}
             {hasMoreItems && (
               <div
-                ref={loadMoreRef}
+                ref={setLoadMoreTarget}
                 className="col-span-full h-px w-full"
                 aria-hidden="true"
               />
