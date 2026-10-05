@@ -74,6 +74,44 @@ fn append_rarity_shop_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
+    for (name, object, source_set, create_set, key, count, loops, expected_key, expected_set) in [
+        ("self_tarot", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
+        ("self_planet", "consumable", "Planet", "Planet", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Planet"),
+        ("self_spectral", "consumable", "Spectral", "Spectral", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Spectral"),
+        ("random_set", "consumable", "Tarot", "random", "random", 1, 1, "c_first", "Tarot"),
+        ("custom_set_multiple", "consumable", "mod_Runes", "mod_Runes", "random", 2, 1, "c_mod_runtime_test", "mod_Runes"),
+        ("self_in_loop", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 2, 2, "c_mod_runtime_test", "Tarot"),
+        ("shared_joker_effect", "joker", "Tarot", "Tarot", "c_first", 1, 1, "c_first", "Tarot"),
+    ] {
+        let effect = json!({"id":"create","effect_type":"create_consumable","params":{
+            "set":create_set,"specific_card":key,"count":count,"edition":"none","ignore_slots":"n"
+        }});
+        let mut rule = json!({"id":"creation","trigger":if object=="joker" {"hand_played"} else {"card_used"}});
+        if loops > 1 {
+            rule["loop_groups"] = json!([{"id":"repeat","count":loops,"effects":[effect]}]);
+        } else {
+            rule["effects"] = json!([effect]);
+        }
+        let rules = json!([rule]);
+        let chunk = if object == "consumable" {
+            let definition: ConsumableDef = serde_json::from_value(json!({
+                "key":"runtime_test","name":"Runtime Test","description":["Test"],
+                "set":source_set,"atlas":"CustomConsumables","pos":{"x":0,"y":0},"rules":rules
+            })).unwrap();
+            compile_consumable(&definition, "mod")
+        } else {
+            compile_joker(&joker(rules), "mod")
+        };
+        cases.push(json!({"kind":"rule_options","name":format!("consumable_creation_message_{name}"),
+            "consumable_creation_message_runtime":true,"code":Emitter::new().emit_chunk(&chunk),
+            "prepare":if object=="consumable" {format!("register_source_consumable('{source_set}')")} else {String::new()},
+            "invoke":if object=="consumable" {"test_definition:use(actor,nil,nil)"} else {"local effect=test_definition:calculate(actor,{joker_main=true});assert(effect);SMODS.calculate_effect(effect,actor)"},
+            "verify":format!("assert_consumable_creation_message({},'{expected_key}','{expected_set}',{loops})",count*loops)
+        }));
+    }
+}
+
 fn scoring_case(
     cases: &mut Vec<Value>,
     name: &str,
@@ -2535,6 +2573,7 @@ fn main() {
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
     append_rarity_shop_cases(&mut cases);
+    append_consumable_creation_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);

@@ -383,6 +383,73 @@ end
 """
 
 
+def consumable_creation_message_runtime(lua_library):
+    """Resolve messages with Balatro's real dictionary and localize implementation."""
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            dictionary = archive.read("localization/en-us.lua").decode("utf-8-sig")
+            functions = archive.read("functions/misc_functions.lua").decode("utf-8-sig")
+        localize = "function localize(args, misc_cat)" + functions.split(
+            "function localize(args, misc_cat)", 1
+        )[1].split("\nfunction get_stake_sprite", 1)[0]
+        localization = "G.localization=(function()\n" + dictionary + "\nend)()\n" + localize
+    else:
+        # Preserve the game's missing-key behavior when only Lua is installed.
+        localization = """
+G.localization={misc={dictionary={k_plus_tarot='+1 Tarot'}}}
+function localize(args,misc_cat)
+ if args and type(args)~='table' then
+  if misc_cat and G.localization.misc[misc_cat] then return G.localization.misc[misc_cat][args] or 'ERROR' end
+  return G.localization.misc.dictionary[args] or 'ERROR'
+ end
+ error('this regression only uses dictionary localization')
+end
+"""
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    add_card = "function SMODS.add_card(t)" + utils.split("function SMODS.add_card(t)", 1)[1]
+    add_card = add_card.split("\nfunction SMODS.debuff_card", 1)[0]
+    return localization + """
+assert(localize('k_plus_tarot')=='+1 Tarot')
+assert(localize('k_plus_consumable')=='ERROR','regression must retain native missing-key behavior')
+created_cards={}
+G.consumeables={cards={},config={card_limit=10}}
+function G.consumeables:emplace(card) self.cards[#self.cards+1]=card end
+function SMODS.create_card(params)
+ assert(params.area==G.consumeables,'creation must target the consumable area')
+ local center=params.key and G.P_CENTERS[params.key]
+ if not center then
+  assert(not params.key,'specific consumable key must survive export')
+  center=assert(G.P_CENTER_POOLS[params.set] and G.P_CENTER_POOLS[params.set][1],'unknown consumable set')
+ end
+ local card=option_card(center.key,center.set)
+ function card:add_to_deck() self.added_to_deck=true end
+ created_cards[#created_cards+1]=card
+ return card
+end
+function register_source_consumable(set)
+ local center={key='c_mod_runtime_test',set=set,consumeable=true}
+ G.P_CENTERS[center.key]=center
+ G.P_CENTER_POOLS[set]=G.P_CENTER_POOLS[set] or {center}
+ actor.config={center=center};actor.ability.set=set
+ G.consumeables:emplace(actor)
+end
+function assert_consumable_creation_message(count,key,set,messages)
+ assert(#created_cards==count,'unexpected created-card count')
+ local source_count=actor.config and actor.config.center.consumeable and 1 or 0
+ assert(#G.consumeables.cards==count+source_count,'native SMODS.add_card must emplace each created consumable')
+ for _,card in ipairs(created_cards) do
+  assert(card.config.center.key==key and card.ability.set==set,'created key or set changed')
+  assert(card.added_to_deck,'native SMODS.add_card must add the card to the deck')
+ end
+ assert(#status_messages==messages,'unexpected status-message count')
+ for _,status in ipairs(status_messages) do
+  assert(status.message=='Created Consumable!','unexpected creation status: '..tostring(status.message))
+ end
+end
+""" + add_card
+
+
 def steamodded_playing_card_transform_runtime():
     """Apply editions with Steamodded's real Card implementation, not a setter stub."""
     source = (ROOT / "public/other/smods-main/src/overrides.lua").read_text(encoding="utf-8")
@@ -851,6 +918,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + POST_TRIGGER_RUNTIME
             if case.get("probability_result_runtime"):
                 source += "\n" + PROBABILITY_RESULT_RUNTIME
+            if case.get("consumable_creation_message_runtime"):
+                source += "\n" + consumable_creation_message_runtime(lua_library)
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
             if case.get("card_destruction_runtime"):

@@ -237,7 +237,7 @@ pub fn create_consumable(effect: &EffectDef, ctx: &mut CompileContext) -> Effect
         return_fields: vec![],
         pre_return: vec![lua_raw_stmt(lua)],
         config_vars: vec![],
-        message: Some(lua_call("localize", vec![lua_str("k_plus_consumable")])),
+        message: Some(lua_str("Created Consumable!")),
         colour: Some(lua_raw_expr("G.C.GREEN")),
 
         segment_id: None,
