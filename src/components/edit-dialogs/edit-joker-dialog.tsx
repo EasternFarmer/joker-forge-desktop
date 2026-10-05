@@ -5,6 +5,7 @@ import {
 } from "@/components/pages/generic-item-dialog";
 import { BalatroCard } from "@/components/balatro/balatro-card";
 import { Button } from "@/components/ui/button";
+import { ListInput } from "@/components/ui/list-input";
 import {
   COMPARISON_OPERATORS,
   getRarityBadgeColor,
@@ -471,9 +472,27 @@ export function EditJokerDialog({
             fields: [
               {
                 id: "appearFlags",
-                type: "list",
+                type: "custom",
                 label: "Flags Required",
                 placeholder: "custom_flag1, not custom_flag2",
+                description:
+                  'All flags must match for this Joker to appear. Use the same flag name as Emit Flag; "not flag" requires that flag to be inactive.',
+                render: (value, onChange) => (
+                  <ListInput
+                    value={
+                      Array.isArray(value)
+                        ? value
+                        : typeof value === "string"
+                          ? value
+                              .split(",")
+                              .map((flag) => flag.trim())
+                              .filter(Boolean)
+                          : []
+                    }
+                    onChange={onChange}
+                    placeholder="custom_flag1, not custom_flag2"
+                  />
+                ),
               },
             ],
           },

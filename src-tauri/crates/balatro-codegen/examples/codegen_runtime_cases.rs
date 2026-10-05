@@ -2794,6 +2794,66 @@ fn append_joker_selection_size_cases(cases: &mut Vec<Value>) {
         "assert(actor.ability.extra.amount==4)");
 }
 
+fn append_required_flags_cases(cases: &mut Vec<Value>) {
+    let frontend_code = |field: Option<(&str, Value)>| {
+        let mut input = json!({
+            "objectKey":"runtime_test", "name":"Runtime Test", "description":"Test",
+            "cost":4, "rarity":"common", "unlocked":true, "discovered":true, "rules":[]
+        });
+        if let Some((key, value)) = field { input[key] = value; }
+        let input: export::JokerDataInput = serde_json::from_value(input).unwrap();
+        let definition = export::joker_data_to_def(&input, "mod", export::AtlasPosInput { x:0, y:0 }, None);
+        Emitter::new().emit_chunk(&compile_joker(&definition, "mod"))
+    };
+    let emit_flag_code = |change: &str| Emitter::new().emit_chunk(&compile_joker(&joker(json!([{
+        "id":"change_flag", "trigger":"hand_played", "effects":[{
+            "effect_type":"emit_flag", "params":{"flag_name":"1 active-flag!", "change":change, "display_message":"n"}
+        }]
+    }])), "mod"));
+    cases.push(json!({"kind":"rule_options", "name":"required_flags_frontend_emit_set_clear_and_rounds",
+        "pool_dispatch_runtime":true,
+        "code":format!("{}\nrequired=test_definition\n{}\nsetter=test_definition\n{}\nclearer=test_definition",
+            frontend_code(Some(("appearFlags", json!(["1 active-flag!"])))),
+            emit_flag_code("true"), emit_flag_code("false")),
+        "prepare":"setter_card={ability=copy_table(setter.config)};clearer_card={ability=copy_table(clearer.config)};G.GAME.pool_flags=nil",
+        "invoke":"assert(not SMODS.add_to_pool(required,{source='shop'}),'unset required flag must reject');setter:calculate(setter_card,{joker_main=true});assert(SMODS.add_to_pool(required,{source='shop'}),'Emit Flag must enable the advanced restriction');G.GAME.current_round={};assert(SMODS.add_to_pool(required,{source='shop'}),'required flags must survive a new round');clearer:calculate(clearer_card,{joker_main=true})",
+        "verify":"assert(not SMODS.add_to_pool(required,{source='shop'}),'cleared flag must immediately reject');assert(G.GAME.pool_flags.mod_1_active_flag_==false);assert(#status_messages==0)"}));
+
+    for (name, field, flags) in [
+        ("frontend_array", "appearFlags", json!(["enabled", "second", "not blocked"])),
+        ("legacy_array", "appear_flags", json!(["enabled", "second", "not blocked"])),
+        ("legacy_csv", "appear_flags", json!(" enabled, second , not blocked ")),
+        ("frontend_csv", "appearFlags", json!(" enabled, second , not blocked ")),
+    ] {
+        cases.push(json!({"kind":"rule_options", "name":format!("required_flags_{name}_all_and_negated"),
+            "pool_dispatch_runtime":true, "code":frontend_code(Some((field, flags))),
+            "prepare":"G.GAME.pool_flags={mod_enabled=true}",
+            "invoke":"assert(not SMODS.add_to_pool(test_definition,{source='shop'}),'all required flags must be active');G.GAME.pool_flags.mod_second=true;assert(SMODS.add_to_pool(test_definition,{source='shop'}),'unset negated flag must permit');G.GAME.pool_flags.mod_blocked=true;assert(not SMODS.add_to_pool(test_definition,{source='shop'}),'active negated flag must reject');G.GAME.pool_flags.mod_blocked=false;assert(SMODS.add_to_pool(test_definition,{source='shop'}),'clearing a negated flag must permit');G.GAME.pool_flags.mod_enabled=false",
+            "verify":"assert(not SMODS.add_to_pool(test_definition,{source='shop'}))"}));
+    }
+    for (name, field) in [
+        ("missing", None), ("null", Some(("appearFlags", json!(null)))),
+        ("empty_array", Some(("appearFlags", json!([])))),
+        ("empty_csv", Some(("appear_flags", json!(" , , ")))),
+    ] {
+        cases.push(json!({"kind":"rule_options", "name":format!("required_flags_unrestricted_{name}"),
+            "pool_dispatch_runtime":true, "code":frontend_code(field), "setup":"G=nil",
+            "invoke":"assert(test_definition.in_pool==nil)",
+            "verify":"assert(SMODS.add_to_pool(test_definition,{source='shop'}),'no flags must preserve native pool eligibility')"}));
+    }
+    for (name, setup) in [("missing_global", "G=nil"), ("missing_game", "G={}"), ("missing_pool_flags", "G={GAME={}}"),
+        ("no_round", "G={GAME={pool_flags={mod_enabled=true}}}")] {
+        cases.push(json!({"kind":"rule_options", "name":format!("required_flags_safe_{name}"),
+            "pool_dispatch_runtime":true,
+            "code":format!("{}\npositive=test_definition\n{}\nnegative=test_definition",
+                frontend_code(Some(("appearFlags", json!(["enabled"])))),
+                frontend_code(Some(("appearFlags", json!(["not blocked"]))))),
+            "setup":setup,
+            "invoke":format!("assert((not not SMODS.add_to_pool(positive,{{source='shop'}}))=={})", name=="no_round"),
+            "verify":"assert(SMODS.add_to_pool(negative,{source='shop'}),'negated missing flag must be safe and permit')"}));
+    }
+}
+
 fn append_flag_and_variable_cases(cases: &mut Vec<Value>) {
     let flag = "1 active-flag!";
     let mut writer = joker(json!([{
@@ -3153,6 +3213,7 @@ fn main() {
     append_booster_option_cases(&mut cases);
     append_joker_selection_and_key_cases(&mut cases);
     append_joker_selection_size_cases(&mut cases);
+    append_required_flags_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);
     append_global_lifecycle_case(&mut cases);
     append_typed_global_cases(&mut cases);

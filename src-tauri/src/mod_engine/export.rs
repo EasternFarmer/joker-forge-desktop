@@ -97,12 +97,36 @@ pub struct JokerDataInput {
     pub pools: Vec<String>,
     #[serde(default)]
     pub appears_in_shop: Option<bool>,
-    #[serde(default)]
-    pub appear_flags: Option<String>,
+    #[serde(
+        default,
+        rename = "appearFlags",
+        alias = "appear_flags",
+        deserialize_with = "deserialize_appearance_flags"
+    )]
+    pub appear_flags: Vec<String>,
     #[serde(default, rename = "unlockTrigger")]
     pub unlock_trigger: Option<String>,
     #[serde(default, rename = "unlockDescription")]
     pub unlock_description: Option<String>,
+}
+
+fn deserialize_appearance_flags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Flags {
+        Text(String),
+        List(Vec<String>),
+    }
+
+    // Current editors save a list; older projects stored comma-separated text.
+    Ok(match Option::<Flags>::deserialize(deserializer)? {
+        Some(Flags::Text(text)) => vec![text],
+        Some(Flags::List(flags)) => flags,
+        None => Vec::new(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1236,16 +1260,17 @@ fn map_appearance(input: &JokerDataInput) -> Option<AppearanceDef> {
     // cards because SMODS does not pass the ObjectType key to that callback.
     let appears_in = Vec::new();
     let mut not_appears_in = Vec::new();
-    let mut appear_flags = Vec::new();
+    let appear_flags = input
+        .appear_flags
+        .iter()
+        .flat_map(|flags| flags.split(','))
+        .map(str::trim)
+        .filter(|flag| !flag.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
 
     if input.appears_in_shop == Some(false) {
         not_appears_in.push("sho".to_string());
-    }
-
-    if let Some(flags) = &input.appear_flags {
-        for flag in flags.split(',').map(str::trim).filter(|f| !f.is_empty()) {
-            appear_flags.push(flag.to_string());
-        }
     }
 
     if appears_in.is_empty() && not_appears_in.is_empty() && appear_flags.is_empty() {
@@ -2243,6 +2268,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn joker_required_flags_accept_editor_lists_and_legacy_text() {
+        for field in ["appearFlags", "appear_flags"] {
+            for flags in [
+                serde_json::json!([" ready ", "not blocked", "", " "]),
+                serde_json::json!(" ready, not blocked, , "),
+            ] {
+                let mut data = serde_json::json!({
+                    "objectKey": "restricted", "name": "Restricted", "description": "Test",
+                    "cost": 4, "rarity": "common", "appears_in_shop": false
+                });
+                data[field] = flags;
+                let input: JokerDataInput = serde_json::from_value(data).unwrap();
+                let definition = joker_data_to_def(&input, "mod", AtlasPosInput { x: 0, y: 0 }, None);
+                let appearance = definition.appearance.expect("requirements must reach the compiler");
+                assert_eq!(appearance.appear_flags, vec!["ready", "not blocked"]);
+                assert_eq!(appearance.not_appears_in, vec!["sho"]);
+            }
+        }
+    }
+
+    #[test]
+    fn joker_empty_required_flags_do_not_restrict_appearance() {
+        for flags in [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(" , "),
+            serde_json::json!(["", " "]),
+        ] {
+            let input: JokerDataInput = serde_json::from_value(serde_json::json!({
+                "objectKey": "unrestricted", "name": "Unrestricted", "description": "Test",
+                "cost": 4, "rarity": "common", "appearFlags": flags
+            })).unwrap();
+            assert!(map_appearance(&input).is_none());
+        }
+        let input: JokerDataInput = serde_json::from_value(serde_json::json!({
+            "objectKey": "unrestricted", "name": "Unrestricted", "description": "Test",
+            "cost": 4, "rarity": "common"
+        })).unwrap();
+        assert!(map_appearance(&input).is_none());
+    }
+
+    #[test]
     fn size_effect_message_settings_survive_frontend_mapping() {
         for effect_type in ["edit_hand_size", "edit_play_size", "edit_discard_size"] {
             let input: EffectInput = serde_json::from_value(serde_json::json!({
@@ -2618,7 +2685,7 @@ mod tests {
                 info_queues: vec![],
                 pools,
                 appears_in_shop: Some(true),
-                appear_flags: None,
+                appear_flags: vec![],
                 unlock_trigger: None,
                 unlock_description: None,
             },

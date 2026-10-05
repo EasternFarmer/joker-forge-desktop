@@ -149,7 +149,7 @@ export interface JokerData extends GameObjectData {
     rta?: boolean; // rare tag
     uta?: boolean; // uncommon tag
   };
-  appearFlags?: string;
+  appearFlags?: string[] | string;
   ignoreSlotLimit?: boolean;
   scale_w?: number;
   scale_h?: number;

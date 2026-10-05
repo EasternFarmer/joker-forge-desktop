@@ -118,6 +118,57 @@ function editionSaveHandlers(shader = "foil") {
   };
 }
 
+function jokerFlagField(appearFlags) {
+  const item = { id: "joker", name: "Test Joker", appearFlags };
+  const saved = [];
+  const { EditJokerDialog } = loadTypeScript("src/components/edit-dialogs/edit-joker-dialog.tsx", {
+    react: { useCallback: (callback) => callback, useMemo: (callback) => callback() },
+    "react/jsx-runtime": {
+      jsx: (type, props) => ({ type, props }),
+      jsxs: (type, props) => ({ type, props }),
+    },
+    "@/components/pages/generic-item-dialog": { GenericItemDialog: "GenericItemDialog" },
+    "@/components/balatro/balatro-card": {},
+    "@/components/ui/button": {},
+    "@/components/ui/list-input": { ListInput: "ListInput" },
+    "@/lib/balatro/balatro-utils": {
+      COMPARISON_OPERATORS: [], getRarityDropdownOptions: () => [],
+    },
+    "@/lib/media/image-processing-utils": {},
+    "@/lib/items/unlock-utils": { jokerUnlockOptions: {}, unlockTriggerOptions: [] },
+    "@phosphor-icons/react": {},
+  });
+  const dialog = EditJokerDialog({
+    editingItem: item, setEditingItem() {},
+    onSave: (id, updates) => saved.push({ id, updates }),
+  });
+  const field = dialog.props.tabs.flatMap((tab) => tab.groups)
+    .flatMap((group) => group.fields).find((field) => field.id === "appearFlags");
+  const input = field.render(item.appearFlags, (value) => { item.appearFlags = value; }, item);
+  return { item, dialog, field, input, saved };
+}
+
+test("Joker required flags display legacy comma-separated names and retain list edits", () => {
+  for (const value of [" ready, not blocked, ,", ["ready", "not blocked"]]) {
+    const { item, dialog, field, input, saved } = jokerFlagField(value);
+    assert.equal(input.type, "ListInput");
+    assert.deepEqual(Array.from(input.props.value), ["ready", "not blocked"]);
+    assert.match(field.description, /All flags must match/);
+    const updated = ["ready", "not blocked", "enabled"];
+    input.props.onChange(updated);
+    dialog.props.onSave(item.id, { appearFlags: item.appearFlags });
+    assert.equal(item.appearFlags, updated);
+    assert.equal(saved[0].updates.appearFlags, updated);
+  }
+});
+
+test("Joker required flags show an empty editable list when unset or blank", () => {
+  for (const value of [undefined, "", " , ", []]) {
+    const { input } = jokerFlagField(value);
+    assert.deepEqual(Array.from(input.props.value), []);
+  }
+});
+
 test("saving edition rules and other partial edits retains its selected shader", () => {
   for (const shader of ["foil", "holo", "custom_shader", false]) {
     const { data, rules, info, page } = editionSaveHandlers(shader);

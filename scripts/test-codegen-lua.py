@@ -374,6 +374,12 @@ end
 PROBABILITY_RESULT_RUNTIME = steamodded_probability_result_runtime()
 
 
+def steamodded_pool_dispatch_runtime():
+    """Use Steamodded's native dispatch for generated in_pool restrictions."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    return "function SMODS.add_to_pool" + source.split("function SMODS.add_to_pool", 1)[1].split("\nfunction Card:", 1)[0]
+
+
 def rarity_shop_runtime(lua_library):
     """Use native rarity registration, Joker injection, and weighted shop polling."""
     objects = (ROOT / "public/other/smods-main/src/game_object.lua").read_text(encoding="utf-8")
@@ -1418,6 +1424,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + PLAYING_CARD_TRANSFORM_RUNTIME + deck_card_runtime(lua_library)
             if case.get("booster_open_runtime"):
                 source += "\n" + BOOSTER_OPEN_RUNTIME
+            if case.get("pool_dispatch_runtime"):
+                source += "\n" + steamodded_pool_dispatch_runtime()
             if case["kind"] in ("deck_settings", "deck_cards"):
                 source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
             else:

@@ -127,7 +127,7 @@ export interface JokerData extends BaseGameObject {
   perishable_compat?: boolean;
   appears_in_shop: boolean;
   cardAppearance: CardAppearance;
-  appearFlags?: string;
+  appearFlags?: string[] | string;
   pools?: string[];
   scale_w?: number;
   scale_h?: number;
