@@ -361,6 +361,36 @@ fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_consumable_rank_range_cases(cases: &mut Vec<Value>) {
+    for (encoding, value) in [
+        ("range", json!({"value":"RANGE:1|5","valueType":"range"})),
+        ("range_var", json!({"value":"RANGE:1|5","valueType":"range_var"})),
+        ("legacy_string", json!("RANGE:1|5")),
+        ("specific_wrapper", json!({"value":"RANGE:1|5","valueType":"specific"})),
+    ] {
+        for (operation, direction) in [("increment", 1), ("decrement", -1)] {
+            // Follow the desktop export boundary, including the editor's range_var alias.
+            let input: export::ConsumableDataInput = serde_json::from_value(json!({
+                "objectKey":"runtime_test","name":"Runtime Test","description":"Test",
+                "set":"Tarot","rules":[{"id":"rank","trigger":"consumable_used","effects":[{
+                    "id":"rank_effect","type":"increment_rank","params":{"operation":operation,"value":value}
+                }]}]
+            })).unwrap();
+            let definition = export::consumable_data_to_def(&input, export::AtlasPosInput {x:0,y:0}, None);
+            let code = Emitter::new().emit_chunk(&compile_consumable(&definition,"mod"));
+            for endpoint in [1, 5] {
+                cases.push(json!({"kind":"rule_options",
+                    "name":format!("consumable_rank_range_{operation}_{encoding}_{endpoint}"),
+                    "rank_change_runtime":true,"code":code,
+                    "prepare":format!("assert(rank_roll_count==0,'registration must not roll a range');initialize_rank_change_cards();function actor:juice_up() end;assert(test_definition:can_use(actor));if test_definition.loc_vars then test_definition:loc_vars({{}},actor) end;assert(rank_roll_count==0,'tooltip and use checks must not roll a range');rank_roll={endpoint};rank_direction={direction};rank_use_started=true"),
+                    "invoke":"test_definition:use(actor,nil,nil);assert(rank_roll_count==0,'rank ranges must roll inside queued rank-change callbacks');run_events()",
+                    "verify":"verify_rank_changes()"
+                }));
+            }
+        }
+    }
+}
+
 fn size_message_effect(effect_type: &str, operation: &str, mode: Option<&str>, message: Option<&str>) -> Value {
     let mut effect = json!({"id":effect_type,"type":effect_type,"params":{
         "operation":{"value":operation},"value":{"value":2}
@@ -3262,6 +3292,7 @@ fn main() {
     append_description_blank_line_cases(&mut cases);
     append_description_format_cases(&mut cases);
     append_consumable_creation_message_cases(&mut cases);
+    append_consumable_rank_range_cases(&mut cases);
     append_size_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_probability_chain_cases(&mut cases);

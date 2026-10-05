@@ -845,6 +845,66 @@ end
 BOOSTER_OPEN_RUNTIME = steamodded_booster_open_runtime()
 
 
+def steamodded_rank_change_runtime():
+    """Exercise native rank movement and wrapping with queued consumable effects."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    change_base = "function SMODS.change_base(" + source.split("function SMODS.change_base(", 1)[1]
+    change_base = change_base.split("\n-- Modify a card's rank", 1)[0]
+    modify_rank = "function SMODS.modify_rank(" + source.split("function SMODS.modify_rank(", 1)[1]
+    modify_rank = modify_rank.split("\n-- Return an array", 1)[0]
+    return change_base + modify_rank + """
+SMODS.Suits={Spades={key='Spades',card_key='S'}}
+SMODS.Ranks={};G.P_CARDS={}
+local ranks={'2','3','4','5','6','7','8','9','10','Jack','Queen','King','Ace'}
+for index,rank in ipairs(ranks) do
+ SMODS.Ranks[rank]={key=rank,card_key=tostring(index+1),
+  next={ranks[index%13+1]},prev={ranks[(index-2)%13+1]}}
+ G.P_CARDS['S_'..(index+1)]={suit='Spades',value=rank,id=index+1}
+end
+rank_roll_count=0;rank_amounts={};rank_use_started=false
+function pseudorandom(seed,minimum,maximum)
+ assert(rank_use_started,'rank ranges must not roll during registration or tooltip lookup')
+ assert(seed=='RANGE:1|5' and minimum==1 and maximum==5,'rank range must retain its configured bounds')
+ rank_roll_count=rank_roll_count+1
+ return rank_roll
+end
+local native_modify_rank=SMODS.modify_rank
+function SMODS.modify_rank(card,amount,...)
+ assert(type(amount)=='number' and amount%1==0,'rank changes require a numeric integer')
+ assert(amount==rank_direction*rank_roll,'rank change must respect increment/decrement and the roll')
+ rank_amounts[#rank_amounts+1]=amount
+ return native_modify_rank(card,amount,...)
+end
+function initialize_rank_change_cards()
+ local function playing_card(rank)
+  local card={base=G.P_CARDS['S_'..rank],flip_count=0,juice_count=0}
+  function card:set_base(base) self.base=base end
+  function card:flip() self.flip_count=self.flip_count+1 end
+  function card:juice_up() self.juice_count=self.juice_count+1 end
+  return card
+ end
+ rank_cards={playing_card(13),playing_card(2)}
+ G.hand={cards=rank_cards,highlighted={rank_cards[1],rank_cards[2]}}
+ function G.hand:unhighlight_all() self.highlighted={} end
+end
+function play_sound() end
+function delay() end
+function verify_rank_changes()
+ assert(rank_roll_count==2 and #rank_amounts==2,'each selected card must receive one bounded roll')
+ for index,card in ipairs(rank_cards) do
+  local initial=index==1 and 13 or 2
+  local expected=(initial-2+rank_direction*rank_roll)%13+2
+  assert(card.base.id==expected,'native rank change or rank wrapping failed')
+  assert(card.flip_count==2 and card.juice_count==2,'rank-change animation must finish')
+ end
+ assert(#G.hand.highlighted==0 and #event_queue==0,'consumable must finish queued effects and clear selection')
+end
+"""
+
+
+RANK_CHANGE_RUNTIME = steamodded_rank_change_runtime()
+
+
 def deck_card_runtime(lua_library):
     """Use native edition/base setters and the game's shuffle on starting-card subsets."""
     source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
@@ -1403,7 +1463,10 @@ def run_checks(lua, cases, lua_library):
             continue
         if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings", "deck_cards"):
             state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
-            source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
+            source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "")
+            if case.get("rank_change_runtime"):
+                source += "\n" + RANK_CHANGE_RUNTIME
+            source += "\n" + case["code"]
             if case.get("card_selection"):
                 source += "\n" + card_area_selection_runtime(lua_library)
             if case.get("post_trigger_runtime"):

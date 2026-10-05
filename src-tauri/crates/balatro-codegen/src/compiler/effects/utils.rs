@@ -1,5 +1,7 @@
 use crate::compiler::context::CompileContext;
-use crate::compiler::values::{is_game_variable_type, is_user_variable_type, resolve_value};
+use crate::compiler::values::{
+    is_game_variable_type, is_range_type, is_user_variable_type, resolve_value,
+};
 use crate::types::{EffectDef, ParamValue};
 
 pub fn get_str(effect: &EffectDef, key: &str) -> Option<String> {
@@ -60,7 +62,7 @@ pub fn is_literal_one_param(effect: &EffectDef, key: &str) -> bool {
 }
 
 /// Resolve a value parameter as Lua string while registering config vars for literals.
-/// Keeps support for user vars, typed user vars, and known game vars.
+/// Keeps support for user vars, game vars, and random ranges.
 pub fn value_to_lua_str(
     effect: &EffectDef,
     param_key: &str,
@@ -74,18 +76,18 @@ pub fn value_to_lua_str(
     // Older projects can encode the reference as a plain string, while newer
     // projects wrap it in a typed value. Both need the same checked resolver.
     if let Some(value) = effect.params.get(param_key) {
-        let is_game_reference = match value {
-            ParamValue::Str(value) => value.starts_with("GAMEVAR:"),
+        let is_dynamic_reference = match value {
+            ParamValue::Str(value) => value.starts_with("GAMEVAR:") || value.starts_with("RANGE:"),
             ParamValue::Typed(value) => {
                 is_game_variable_type(&value.value_type)
-                    || value
-                        .value
-                        .as_str()
-                        .is_some_and(|value| value.starts_with("GAMEVAR:"))
+                    || is_range_type(&value.value_type)
+                    || value.value.as_str().is_some_and(|value| {
+                        value.starts_with("GAMEVAR:") || value.starts_with("RANGE:")
+                    })
             }
             _ => false,
         };
-        if is_game_reference {
+        if is_dynamic_reference {
             return resolve_value(value, ctx.object_type, None).to_string();
         }
     }
@@ -193,6 +195,26 @@ mod tests {
         assert!(raw.contains("G.deck"), "{raw}");
         assert!(!raw.contains("GAMEVAR:"), "{raw}");
         assert!(!raw.contains("cards_in_deck"), "{raw}");
+    }
+
+    #[test]
+    fn raw_and_typed_range_references_resolve_to_random_rolls() {
+        let reference = "RANGE:1|5";
+        let expected = "pseudorandom('RANGE:1|5', 1, 5)";
+        assert_eq!(
+            resolve_effect_value(ParamValue::Str(reference.to_string())),
+            expected,
+        );
+        for value_type in ["range", "range_var", "specific"] {
+            assert_eq!(
+                resolve_effect_value(ParamValue::Typed(TypedValue {
+                    value: json!(reference),
+                    value_type: value_type.to_string(),
+                })),
+                expected,
+                "value type: {value_type}",
+            );
+        }
     }
 
     #[test]
