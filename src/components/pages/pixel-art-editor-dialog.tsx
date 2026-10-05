@@ -174,14 +174,6 @@ const normalizeHex = (value: string) => {
   return "#000000";
 };
 
-const hexToRgba = (hex: string, alpha: number) => {
-  const n = normalizeHex(hex);
-  const r = parseInt(n.slice(1, 3), 16);
-  const g = parseInt(n.slice(3, 5), 16);
-  const b = parseInt(n.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-};
-
 const clamp = (v: number, lo: number, hi: number) =>
   Math.max(lo, Math.min(hi, v));
 
@@ -645,7 +637,7 @@ export function PixelArtEditorDialog({
         ctx.restore();
       }
 
-      if (px === null || py === null) return;
+      if (px === null || py === null || !lastHoverInBoundsRef.current) return;
 
       const t = toolRef.current;
       if (t === "select") {
@@ -680,27 +672,48 @@ export function PixelArtEditorDialog({
       if (t !== "pen" && t !== "eraser") return;
 
       const radius = Math.floor(penSizeRef.current / 2);
-      ctx.fillStyle =
-        t === "pen"
-          ? hexToRgba(currentColorRef.current, 0.65)
-          : "rgba(255,255,255,0.25)";
+      const containsBrushPixel = (dx: number, dy: number) =>
+        dx * dx + dy * dy <= radius * radius &&
+        px + dx >= 0 &&
+        px + dx < CANVAS_WIDTH &&
+        py + dy >= 0 &&
+        py + dy < CANVAS_HEIGHT;
 
+      ctx.save();
+      ctx.setLineDash([]);
+      ctx.lineCap = "square";
+      ctx.translate(0.5, 0.5);
+      ctx.beginPath();
       for (let dy = -radius; dy <= radius; dy++) {
         for (let dx = -radius; dx <= radius; dx++) {
-          if (dx * dx + dy * dy <= radius * radius) {
-            const x = px + dx,
-              y = py + dy;
-            if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT) {
-              ctx.fillRect(
-                x * DISPLAY_SCALE,
-                y * DISPLAY_SCALE,
-                DISPLAY_SCALE,
-                DISPLAY_SCALE,
-              );
-            }
+          if (!containsBrushPixel(dx, dy)) continue;
+          const x = (px + dx) * DISPLAY_SCALE;
+          const y = (py + dy) * DISPLAY_SCALE;
+          if (!containsBrushPixel(dx, dy - 1)) {
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + DISPLAY_SCALE, y);
+          }
+          if (!containsBrushPixel(dx + 1, dy)) {
+            ctx.moveTo(x + DISPLAY_SCALE, y);
+            ctx.lineTo(x + DISPLAY_SCALE, y + DISPLAY_SCALE);
+          }
+          if (!containsBrushPixel(dx, dy + 1)) {
+            ctx.moveTo(x + DISPLAY_SCALE, y + DISPLAY_SCALE);
+            ctx.lineTo(x, y + DISPLAY_SCALE);
+          }
+          if (!containsBrushPixel(dx - 1, dy)) {
+            ctx.moveTo(x, y + DISPLAY_SCALE);
+            ctx.lineTo(x, y);
           }
         }
       }
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
     },
     [],
   );
