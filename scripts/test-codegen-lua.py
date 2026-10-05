@@ -687,6 +687,87 @@ end
 """
 
 
+TEXT_VARIABLE_DESCRIPTION_RUNTIME = """
+function same_localization(a,b)
+ if type(a)~=type(b) then return false end
+ if type(a)~='table' then return a==b end
+ for key,value in pairs(a) do if not same_localization(value,b[key]) then return false end end
+ for key in pairs(b) do if a[key]==nil then return false end end
+ return true
+end
+function collect_description_nodes(nodes,result,background)
+ for _,node in ipairs(nodes) do
+  if node.n==G.UIT.C then
+   collect_description_nodes(node.nodes,result,node.config.colour or background)
+  elseif node.n==G.UIT.O then
+   local object=node.config.object
+   result[#result+1]={text=object.string[1],colour=object.colours[1],scale=object.scale,
+    float=object.float,bump=object.bump,spacing=object.spacing,background=background}
+  else
+   result[#result+1]={text=node.config.text,colour=node.config.colour,scale=node.config.scale,background=background}
+  end
+ end
+end
+function assert_text_description(card,expected,label)
+ local result=test_definition:loc_vars({},card)
+ assert(result.vars[text_slot]==label,'text loc_vars value was changed')
+ if duplicate_text_slot then assert(result.vars[duplicate_text_slot]==label,'duplicate text binding was lost') end
+ assert(result.vars[numeric_slot]==123 and type(result.vars[numeric_slot])=='number','native numeric loc_vars value was changed')
+ if not native_description_localization then return result end
+ if result.colours then
+  assert(result.vars.colours==result.colours,'dynamic description must forward colours into native vars')
+ end
+ assert(result.key=='jf_text_variables:'..description_key,'dynamic text must use a separate bounded key')
+ assert(result.name_key==description_key,'dynamic text must preserve the original localized name')
+ assert(localize{type='name_text',set=description_set,key=result.name_key}==description_source.name,
+  'dynamic description changed the localized name')
+ local descriptions=G.localization.descriptions[description_set]
+ assert(descriptions[description_key]==description_source,'base localization entry was replaced')
+ assert(same_localization(description_source,description_snapshot),'base localization entry was modified')
+ local count=0;for _ in pairs(descriptions) do count=count+1 end
+ assert(count==2,'dynamic descriptions must reuse one entry per definition')
+ local center=descriptions[result.key]
+ assert(#center.text_parsed==#expected,'dynamic text line count changed')
+ local nodes={}
+ localize{type='descriptions',set=description_set,key=result.key,vars=result.vars,nodes=nodes}
+ assert(#nodes==#expected,'dynamic text rows were lost in native localization')
+ assert(#desc_from_rows(nodes).nodes[1].nodes==#expected,'dynamic text rows were lost in UI layout')
+ for index,line in ipairs(expected) do
+  local parsed=center.text_parsed[index]
+  assert(#parsed==#line,'dynamic text segment count changed on line '..index)
+  for part_index,part in ipairs(line) do
+   assert(same_localization(parsed[part_index].control,part.control),'dynamic formatting controls changed')
+  end
+  for _,rendered_nodes in ipairs({nodes[index],SMODS.localize_box(parsed,{vars=result.vars})}) do
+   local rendered={};collect_description_nodes(rendered_nodes,rendered)
+   assert(#rendered==#line,'dynamic render segment count changed')
+   for part_index,part in ipairs(line) do
+    local actual=rendered[part_index];local control=part.control
+    assert(actual.text==part.text,'dynamic text did not render: '..tostring(actual.text)..' / '..part.text)
+    assert(actual.colour==(part.colour or loc_colour(control.C)),'dynamic text colour did not reach the render node')
+    assert(math.abs(actual.scale-0.32*(tonumber(control.s) or 1))<0.000001,'dynamic text scale was lost')
+    assert(actual.float==(control.E=='1' and true or nil),'dynamic floating effect was lost')
+    assert(actual.bump==(control.E=='2' and true or nil),'dynamic bump effect was lost')
+   end
+  end
+ end
+ return result
+end
+function assert_native_numeric_placeholder(result)
+ if not native_description_localization then return end
+ local found=false
+ for _,line in ipairs(G.localization.descriptions[description_set][result.key].text_parsed) do
+  for _,part in ipairs(line) do
+   for _,subpart in ipairs(part.strings) do
+    if type(subpart)=='table' and tonumber(subpart[1])==numeric_slot then found=true end
+   end
+  end
+ end
+ assert(found,'numeric placeholders must remain native localization variables')
+end
+"""
+
+
 def consumable_creation_message_runtime(lua_library):
     """Keep native localization while verifying consumable creation stays silent."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -1378,6 +1459,50 @@ KNOWN_VALUES = {
 def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
+        if case["kind"] == "description_text_variables":
+            source = HELPERS + POPULATED + "\n" + case["code"]
+            source += "\n" + description_localization_runtime(lua_library) + TEXT_VARIABLE_DESCRIPTION_RUNTIME
+            source += "\ndescription_set=" + lua_data(case["set"]) + ";description_key=" + lua_data(case["key"]) + ";"
+            source += "text_slot=" + lua_data(case.get("text_slot", 1)) + ";numeric_slot=" + lua_data(case.get("numeric_slot", 2)) + ";duplicate_text_slot=" + lua_data(case.get("duplicate_text_slot")) + ";"
+            source += "test_definition.key=" + lua_data(case["self_key"]) + ";test_definition.set=description_set;"
+            if case.get("localization"):
+                source += "local translations=(function()\n" + case["localization"] + "\nend)();"
+                source += "description_source=translations.descriptions[description_set][description_key];"
+            else:
+                source += "description_source=copy_table(test_definition.loc_txt);"
+            source += "G.localization={misc={v_dictionary={},v_text={},tutorial={},quips={}},descriptions={[description_set]={[description_key]=description_source}}};"
+            if case.get("suit_colours"):
+                source += "G.C=G.C or {};G.C.SUITS={Spades='suit:Spades',Hearts='suit:Hearts'};G.localization.misc.suits_singular={Spades='Spades',Hearts='Hearts'};"
+                source += "if not native_description_localization then function localize(value) return value end end;"
+            source += "if native_description_localization then init_localization() end;description_snapshot=copy_table(description_source);"
+            source += "actor={ability=copy_table(test_definition.config or {}),edition=copy_table(test_definition.config or {})};actor.ability.seal=copy_table(test_definition.config or {});"
+            source += "actor.ability.extra=actor.ability.extra or {};"
+            source += "expected=" + lua_data(case["parts"]) + ";"
+            source += "local first=assert_text_description(actor,expected," + lua_data(case["initial"]) + ");"
+            if case.get("numeric_placeholder"):
+                source += "assert_native_numeric_placeholder(first);"
+            if case.get("isolation"):
+                source += "local original=actor;actor=copy_table(actor);actor.ability.extra.label='{C:green}Other{}';actor.ability.extra.count=123;"
+                source += "assert_text_description(actor,{{{text='Other',control={C='green'}},{text=' +123',control={}}}},actor.ability.extra.label);"
+                source += "assert(first.vars[1]=='{C:red}Boost{}','rendering another card mutated an earlier result');actor=original;assert_text_description(actor,expected,actor.ability.extra.label);"
+            for step in case["steps"]:
+                if "text" in step:
+                    source += case["path"] + ".label=" + lua_data(step["text"]) + ";"
+                if step.get("invoke"):
+                    source += step["invoke"] + ";"
+                source += "assert_text_description(actor," + lua_data(step["parts"]) + "," + case["path"] + ".label);"
+            source += "G.GAME=nil;"
+            for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):
+                source += "assert_text_description(" + tooltip_card + ",expected," + lua_data(case["initial"]) + ");"
+            if not case.get("suit_colours"):
+                source += "G=nil;local fallback=test_definition:loc_vars({},nil);assert(fallback.vars[text_slot]==" + lua_data(case["initial"]) + " and fallback.vars[numeric_slot]==123);"
+            source += "return 1"
+            try:
+                evaluate(lua, source)
+            except AssertionError as error:
+                raise AssertionError(f"description_text_variables {case['name']}: {error}") from error
+            checks += 1
+            continue
         if case["kind"] == "edition_shader":
             source = HELPERS + edition_shader_runtime(lua_library) + "\n" + case["code"]
             source += "\nassert_edition_shader(" + lua_data(case["shader"]) + "," + lua_data(case["custom"]) + ");return 1"

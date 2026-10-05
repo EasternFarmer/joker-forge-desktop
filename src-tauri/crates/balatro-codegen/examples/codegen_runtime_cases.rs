@@ -318,6 +318,138 @@ fn append_description_format_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_text_variable_description_cases(cases: &mut Vec<Value>) {
+    let red = json!({"C":"red"});
+    let blue = json!({"C":"blue"});
+    let plain = json!({});
+    let fixtures = [
+        ("formatted_content", "#1#", "{C:red,E:1,s:1.5}Boost{}",
+            json!([[{"text":"Boost","control":{"C":"red","E":"1","s":"1.5"}}]]), json!([])),
+        ("colour_control_rule", "{C:#1#}Joker{}", "red",
+            json!([[{"text":"Joker","control":red}]]),
+            json!([{"invoke":"test_definition:calculate(actor,{joker_main=true})","parts":[[{"text":"Joker","control":blue}]]}])),
+        ("formatted_to_plain", "#1#", "{C:red}Boost{}",
+            json!([[{"text":"Boost","control":red}]]),
+            json!([{"text":"Plain","parts":[[{"text":"Plain","control":plain}]]}])),
+        ("mixed_numeric", "#1# +#2#", "{C:red}Boost{}",
+            json!([[{"text":"Boost","control":red},{"text":" +123","control":plain}]]), json!([])),
+        ("literal_hash_percent_self_reference", "#1#", "50% C# #1# #2#",
+            json!([[{"text":"50% C# #1# #2#","control":plain}]]), json!([])),
+        ("multiline_blank_rows", "#1#", "{C:red}First\n\nLast{}",
+            json!([[{"text":"First","control":red}],[{"text":" ","control":{"s":"1"}}],[{"text":"Last","control":red}]]), json!([])),
+        ("alternate_breaks", "#1#", "{C:blue,E:2}First[s]<br />Last{}",
+            json!([[{"text":"First","control":{"C":"blue","E":"2"}}],[{"text":" ","control":{"s":"1"}}],[{"text":"Last","control":{"C":"blue","E":"2"}}]]), json!([])),
+        ("inherited_controls", "{C:blue}Before #1# After{}", "First\nSecond",
+            json!([[{"text":"Before First","control":blue}],[{"text":"Second After","control":blue}]]), json!([])),
+        ("quotes_and_backslashes", "#1#", "It's \\\"ready\\\" at 100%",
+            json!([[{"text":"It's \\\"ready\\\" at 100%","control":plain}]]), json!([])),
+    ];
+    for (name, description, initial, parts, steps) in fixtures {
+        let rules = if name == "colour_control_rule" {
+            json!([{"id":"colour","trigger":"hand_played","effects":[{
+                "id":"change_colour","type":"change_text_variable",
+                "params":{"variable_name":"label","change_type":"custom_text","text":"blue"}
+            }]}])
+        } else { json!([]) };
+        let entry: export::BatchJokerEntry = serde_json::from_value(json!({
+            "jokerData":{
+                "objectKey":"runtime_test","name":"Runtime Test","description":description,
+                "cost":4,"rarity":"common","rules":rules,
+                "localizations":[{"language":"fr","name":"Essai","description":format!("FR {description}")}],
+                "userVariables":[{"name":"label","type":"text","initialText":initial},
+                    {"name":"count","type":"number","initialValue":123}],
+                "descriptionVariables":[{"kind":"user","name":"label"},{"kind":"user","name":"count"}]
+            },"pos":{"x":0,"y":0},"fileName":"runtime_test.lua"
+        })).unwrap();
+        let definition = export::joker_data_to_def(&entry.joker_data,"mod",entry.pos.clone(),None);
+        let mut case = json!({"kind":"description_text_variables","name":format!("description_text_variables_{name}"),
+            "code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "set":"Joker","key":"j_mod_runtime_test","self_key":"j_mod_runtime_test",
+            "path":"actor.ability.extra","initial":initial,"parts":parts,"steps":steps,
+            "isolation":name=="mixed_numeric","numeric_placeholder":name=="mixed_numeric"});
+        cases.push(case.clone());
+        if name == "mixed_numeric" {
+            let files=export::build_localization_lua_files("mod","en-us",&[entry],&[],&[],&[],&[],&[],&[],&[]);
+            case["code"]=json!(Emitter::new().emit_chunk(&balatro_codegen::compile_joker_with_options(&definition,"mod",false)));
+            for locale in ["en-us","fr"] {
+                case["name"]=json!(format!("description_text_variables_mixed_numeric_{locale}"));
+                case["localization"]=json!(files[locale]);
+                case["parts"]=if locale=="fr" {json!([[{"text":"FR ","control":plain},{"text":"Boost","control":red},{"text":" +123","control":plain}]])} else {parts.clone()};
+                // The isolation check below uses an unprefixed inline description.
+                case["isolation"]=json!(false);
+                cases.push(case.clone());
+            }
+        }
+    }
+    let suit_entry:export::BatchJokerEntry=serde_json::from_value(json!({"jokerData":{
+        "objectKey":"runtime_test","name":"Runtime Test","cost":4,"rarity":"common",
+        "description":"#1# {V:1}#3#{} +#2#","rules":[],
+        "userVariables":[{"name":"label","type":"text","initialText":"{C:red}Boost{}"},
+            {"name":"count","type":"number","initialValue":123},
+            {"name":"chosen","type":"suit","initialSuit":"Spades"}],
+        "descriptionVariables":[{"kind":"user","name":"label"},{"kind":"user","name":"count"},
+            {"kind":"user","name":"chosen"}]
+    },"pos":{"x":0,"y":0},"fileName":"runtime_test.lua"})).unwrap();
+    let suit_definition=export::joker_data_to_def(&suit_entry.joker_data,"mod",suit_entry.pos,None);
+    cases.push(json!({"kind":"description_text_variables","name":"description_text_variables_suit_colour",
+        "code":Emitter::new().emit_chunk(&compile_joker(&suit_definition,"mod")),
+        "set":"Joker","key":"j_mod_runtime_test","self_key":"j_mod_runtime_test","path":"actor.ability.extra",
+        "initial":"{C:red}Boost{}","numeric_placeholder":true,"suit_colours":true,
+        "parts":[[{"text":"Boost","control":red},{"text":" ","control":plain},
+            {"text":"Spades","control":{"V":"1"},"colour":"suit:Spades"},{"text":" +123","control":plain}]],
+        "steps":[{"invoke":"actor.ability.extra.chosen='Hearts'",
+            "parts":[[{"text":"Boost","control":red},{"text":" ","control":plain},
+                {"text":"Hearts","control":{"V":"1"},"colour":"suit:Hearts"},{"text":" +123","control":plain}]]}]}));
+    for legacy in [false,true] {
+        let mut data=json!({"objectKey":"runtime_test","name":"Runtime Test","cost":4,"rarity":"common",
+            "description":if legacy {"#1# +#2#"} else {"#1# #2# #3#"},"rules":[],
+            "userVariables":[{"name":"unused","type":"text","initialText":"Ignored","isGlobal":true},
+                {"name":"label","type":"text","initialText":"{C:red}Boost{}"},
+                {"name":"count","type":"number","initialValue":123}]});
+        if !legacy { data["descriptionVariables"]=json!([{"kind":"user","name":"count"},
+            {"kind":"user","name":"label"},{"kind":"user","name":"label"}]); }
+        let entry:export::BatchJokerEntry=serde_json::from_value(json!({"jokerData":data,
+            "pos":{"x":0,"y":0},"fileName":"runtime_test.lua"})).unwrap();
+        let definition=export::joker_data_to_def(&entry.joker_data,"mod",entry.pos,None);
+        cases.push(json!({"kind":"description_text_variables",
+            "name":if legacy {"description_text_variables_legacy_filtered_globals"} else {"description_text_variables_reordered_duplicate_slots"},
+            "code":Emitter::new().emit_chunk(&compile_joker(&definition,"mod")),
+            "set":"Joker","key":"j_mod_runtime_test","self_key":"j_mod_runtime_test","path":"actor.ability.extra",
+            "initial":"{C:red}Boost{}","numeric_placeholder":true,"steps":[],
+            "text_slot":if legacy {1} else {2},"numeric_slot":if legacy {2} else {1},
+            "duplicate_text_slot":if legacy {None} else {Some(3)},
+            "parts":if legacy {json!([[{"text":"Boost","control":red},{"text":" +123","control":plain}]])}
+                else {json!([[{"text":"123 ","control":plain},{"text":"Boost","control":red},
+                    {"text":" ","control":plain},{"text":"Boost","control":red}]])}}));
+    }
+    for (object, set, key, self_key, path) in [
+        ("consumable","Tarot","c_mod_runtime_test","c_mod_runtime_test","actor.ability.extra"),
+        ("enhancement","Enhanced","m_mod_runtime_test","m_mod_runtime_test","actor.ability.extra"),
+        ("seal","Other","mod_runtime_test_seal","mod_Runtime_Test","actor.ability.seal.extra"),
+        ("edition","Edition","e_mod_runtime_test","e_mod_runtime_test","actor.edition.extra"),
+        ("voucher","Voucher","v_mod_runtime_test","v_mod_runtime_test","actor.ability.extra"),
+        ("deck","Back","b_mod_runtime_test","b_mod_runtime_test","test_definition.config.extra"),
+    ] {
+        let input=json!({"key":"runtime_test","name":"Runtime Test","description":["#1# +#2#"],
+            "set":"Tarot","atlas":"Runtime","pos":{"x":0,"y":0},"rules":[],
+            "user_variables":[{"name":"label","var_type":"text","initial_value":"{C:red}Boost{}"},
+                {"name":"count","var_type":"number","initial_value":123}],
+            "description_variables":[{"kind":"user","name":"label"},{"kind":"user","name":"count"}]});
+        let chunk=match object {
+            "consumable"=>compile_consumable(&serde_json::from_value::<ConsumableDef>(input).unwrap(),"mod"),
+            "enhancement"=>compile_enhancement(&serde_json::from_value::<EnhancementDef>(input).unwrap(),"mod"),
+            "seal"=>compile_seal(&serde_json::from_value::<SealDef>(input).unwrap(),"mod"),
+            "edition"=>compile_edition(&serde_json::from_value::<EditionDef>(input).unwrap(),"mod"),
+            "voucher"=>compile_voucher(&serde_json::from_value::<VoucherDef>(input).unwrap(),"mod"),
+            _=>compile_deck(&serde_json::from_value::<DeckDef>(input).unwrap(),"mod"),
+        };
+        cases.push(json!({"kind":"description_text_variables","name":format!("description_text_variables_{object}"),
+            "code":Emitter::new().emit_chunk(&chunk),"set":set,"key":key,"self_key":self_key,"path":path,
+            "initial":"{C:red}Boost{}","parts":[[{"text":"Boost","control":red},{"text":" +123","control":plain}]],
+            "steps":[],"numeric_placeholder":true}));
+    }
+}
+
 fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
     for (name, object, source_set, create_set, key, count, loops, expected_key, expected_set) in [
         ("self_tarot", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
@@ -3291,6 +3423,7 @@ fn main() {
     append_rarity_shop_cases(&mut cases);
     append_description_blank_line_cases(&mut cases);
     append_description_format_cases(&mut cases);
+    append_text_variable_description_cases(&mut cases);
     append_consumable_creation_message_cases(&mut cases);
     append_consumable_rank_range_cases(&mut cases);
     append_size_message_cases(&mut cases);

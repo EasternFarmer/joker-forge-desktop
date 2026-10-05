@@ -1,6 +1,7 @@
 pub mod colors;
 pub mod conditions;
 pub mod context;
+mod description;
 pub mod effects;
 pub mod triggers;
 pub mod values;
@@ -1277,9 +1278,10 @@ fn description_user_value(ctx: &CompileContext, name: &str) -> (Expr, Option<Exp
     }
 }
 
-fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<TableEntry>) {
+fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<TableEntry>, Vec<usize>) {
     let mut body = Vec::new();
     let mut vars = Vec::new();
+    let mut text_slots = Vec::new();
     let mut colours = Vec::new();
     let mut probabilities = std::collections::HashMap::<String, (String, String)>::new();
     for (index, binding) in ctx
@@ -1291,6 +1293,11 @@ fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<Table
         let value = match binding {
             DescriptionVariableBinding::Literal { value } => description_literal_value(value),
             DescriptionVariableBinding::User { name } => {
+                if ctx.user_vars().iter().any(|uv| {
+                    uv.name == *name && uv.var_type == UserVarType::Text
+                }) {
+                    text_slots.push(index + 1);
+                }
                 let (value, colour) = description_user_value(ctx, name);
                 if let Some(colour) = colour {
                     colours.push(TableEntry::Value(colour));
@@ -1385,7 +1392,7 @@ fn build_ordered_description_vars(ctx: &CompileContext) -> (Vec<Stmt>, Vec<Table
             lua_table_raw(colours),
         ));
     }
-    (body, entries)
+    (body, entries, text_slots)
 }
 
 /// Build the `loc_vars` function for localization variables.
@@ -1433,20 +1440,24 @@ fn build_loc_vars(
     }
 
     if ctx.description_variables().is_some() {
-        let (statements, entries) = build_ordered_description_vars(ctx);
+        let (statements, entries, text_slots) = build_ordered_description_vars(ctx);
         body.extend(statements);
-        body.push(lua_return(lua_table_raw(entries)));
+        body.extend(description::return_loc_vars(ctx, entries, &text_slots));
         return Some(Expr::Function { params: vec!["self".into(), "info_queue".into(), "card".into()], body });
     }
 
     let mut var_refs: Vec<TableEntry> = Vec::new();
     let mut colour_refs: Vec<TableEntry> = Vec::new();
+    let mut text_slots = Vec::new();
     for uv in ctx.user_vars() {
         if uv.is_global && !referenced_user_vars.contains(&uv.name) {
             continue;
         }
         let (value, colour) = description_user_value(ctx, &uv.name);
         var_refs.push(TableEntry::Value(value));
+        if uv.var_type == UserVarType::Text {
+            text_slots.push(var_refs.len());
+        }
         if let Some(colour) = colour {
             colour_refs.push(TableEntry::Value(colour));
         }
@@ -1500,7 +1511,7 @@ fn build_loc_vars(
             lua_table_raw(colour_refs),
         ));
     }
-    body.push(lua_return(lua_table_raw(return_entries)));
+    body.extend(description::return_loc_vars(ctx, return_entries, &text_slots));
 
     Some(Expr::Function {
         params: vec!["self".into(), "info_queue".into(), "card".into()],
@@ -2211,8 +2222,8 @@ pub(crate) fn build_shared_loc_vars(
     _rule_outputs: &[RuleOutput],
 ) -> Option<Expr> {
     if ctx.description_variables().is_some() {
-        let (mut body, entries) = build_ordered_description_vars(ctx);
-        body.push(lua_return(lua_table_raw(entries)));
+        let (mut body, entries, text_slots) = build_ordered_description_vars(ctx);
+        body.extend(description::return_loc_vars(ctx, entries, &text_slots));
         return Some(Expr::Function { params: vec!["self".into(), "info_queue".into(), "card".into()], body });
     }
     let vars = ctx.config_vars();
@@ -2228,6 +2239,7 @@ pub(crate) fn build_shared_loc_vars(
     let mut body: Vec<Stmt> = Vec::new();
 
     let mut var_refs: Vec<TableEntry> = Vec::new();
+    let mut text_slots = Vec::new();
     // Use the card's current value, with definition defaults for collection previews.
     for uv in ctx
         .user_vars()
@@ -2235,6 +2247,9 @@ pub(crate) fn build_shared_loc_vars(
         .filter(|uv| !uv.is_global || ctx.user_var_is_referenced(&uv.name))
     {
         var_refs.push(TableEntry::Value(description_user_value(ctx, &uv.name).0));
+        if uv.var_type == UserVarType::Text {
+            text_slots.push(var_refs.len());
+        }
     }
 
     var_refs.extend(
@@ -2280,7 +2295,7 @@ pub(crate) fn build_shared_loc_vars(
         "vars".to_string(),
         lua_table_raw(var_refs),
     )];
-    body.push(lua_return(lua_table_raw(return_entries)));
+    body.extend(description::return_loc_vars(ctx, return_entries, &text_slots));
 
     Some(Expr::Function {
         params: vec!["self".into(), "info_queue".into(), "card".into()],
