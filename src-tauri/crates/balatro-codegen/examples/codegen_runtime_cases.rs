@@ -74,6 +74,54 @@ fn append_rarity_shop_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_description_blank_line_cases(cases: &mut Vec<Value>) {
+    for (name, description, translated, expected, translated_expected) in [
+        ("markers", "First #1#[s][s][s]Last #2#", "Premier #1#[s][s][s]Dernier #2#",
+            vec!["First #1#", " ", " ", "Last #2#"], vec!["Premier #1#", " ", " ", "Dernier #2#"]),
+        ("newlines", "First #1#\n\n\nLast #2#", "Premier #1#\n\n\nDernier #2#",
+            vec!["First #1#", " ", " ", "Last #2#"], vec!["Premier #1#", " ", " ", "Dernier #2#"]),
+        ("windows_newlines", "First #1#\r\n\r\n\r\nLast #2#", "Premier #1#\r\n\r\n\r\nDernier #2#",
+            vec!["First #1#", " ", " ", "Last #2#"], vec!["Premier #1#", " ", " ", "Dernier #2#"]),
+        ("html_breaks", "First #1#<br/><br><br />Last #2#", "Premier #1#<br/><br><br />Dernier #2#",
+            vec!["First #1#", " ", " ", "Last #2#"], vec!["Premier #1#", " ", " ", "Dernier #2#"]),
+        ("edge_breaks", "[s]First #1#[s][s]Last #2#[s]", "[s]Premier #1#[s][s]Dernier #2#[s]",
+            vec![" ", "First #1#", " ", "Last #2#", " "], vec![" ", "Premier #1#", " ", "Dernier #2#", " "]),
+        ("whole_empty", "[s][s]", "\n\n", vec!["No description"], vec!["No description"]),
+    ] {
+        let entry: export::BatchJokerEntry = serde_json::from_value(json!({
+            "jokerData":{
+                "objectKey":"runtime_test","name":"Runtime Test","description":description,
+                "cost":4,"rarity":"common",
+                "localizations":[{"language":"fr","name":"Essai","description":translated}],
+                "descriptionVariables":[
+                    {"kind":"game","id":"current_money","multiplier":2,"startsFrom":3},
+                    {"kind":"config","name":"mult0","effect_id":"money_mult","fallback":{
+                        "value":"GAMEVAR:current_money|2|3","valueType":"gameVariable"
+                    }}
+                ],
+                "rules":[{"id":"score","trigger":"hand_played","effects":[{
+                    "id":"money_mult","type":"add_mult","params":{"value":{
+                        "value":"GAMEVAR:current_money|2|3","valueType":"gameVariable"
+                    }}
+                }]}]
+            },
+            "pos":{"x":0,"y":0},"fileName":"runtime_test.lua"
+        })).unwrap();
+        let definition = export::joker_data_to_def(&entry.joker_data, "mod", entry.pos.clone(), None);
+        let inline = Emitter::new().emit_chunk(&compile_joker(&definition, "mod"));
+        let external = Emitter::new().emit_chunk(&balatro_codegen::compile_joker_with_options(&definition, "mod", false));
+        let localizations = export::build_localization_lua_files(
+            "mod", "en-us", &[entry], &[], &[], &[], &[], &[], &[], &[],
+        );
+        cases.push(json!({"kind":"description_layout","name":format!("description_blank_lines_{name}_inline"),
+            "code":inline,"expected":expected}));
+        for (locale, lines) in [("en-us", &expected), ("fr", &translated_expected)] {
+            cases.push(json!({"kind":"description_layout","name":format!("description_blank_lines_{name}_{locale}"),
+                "code":external,"localization":localizations[locale],"expected":lines}));
+        }
+    }
+}
+
 fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
     for (name, object, source_set, create_set, key, count, loops, expected_key, expected_set) in [
         ("self_tarot", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
@@ -2573,6 +2621,7 @@ fn main() {
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
     append_rarity_shop_cases(&mut cases);
+    append_description_blank_line_cases(&mut cases);
     append_consumable_creation_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);

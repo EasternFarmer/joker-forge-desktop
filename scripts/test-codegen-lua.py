@@ -383,6 +383,74 @@ end
 """
 
 
+def description_localization_runtime(lua_library):
+    """Exercise installed Balatro's parser, localization, and text-node sizing."""
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if not executable.is_file():
+        # A standalone Lua installation can still verify exported text entries.
+        return "native_description_localization=false\n"
+    with zipfile.ZipFile(executable) as archive:
+        functions = archive.read("functions/misc_functions.lua").decode("utf-8-sig")
+        definitions = archive.read("functions/UI_definitions.lua").decode("utf-8-sig")
+        ui = archive.read("engine/ui.lua").decode("utf-8-sig")
+    sections = [
+        ("function init_localization()", "\nfunction playing_card_joker_effects"),
+        ("function loc_parse_string(line)", "\n--UTF8 handler"),
+        ("function localize(args, misc_cat)", "\nfunction get_stake_sprite"),
+    ]
+    native = "\n".join(start + functions.split(start, 1)[1].split(end, 1)[0]
+                       for start, end in sections)
+    rows = "function desc_from_rows" + definitions.split("function desc_from_rows", 1)[1]
+    rows = rows.split("function transparent_multiline_text", 1)[0]
+    sizing = "function UIBox:calculate_xywh" + ui.split("function UIBox:calculate_xywh", 1)[1]
+    sizing = sizing.split("\nfunction UIBox:", 1)[0]
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    box = "function SMODS.localize_box" + utils.split("function SMODS.localize_box", 1)[1]
+    box = box.split("\nfunction SMODS.get_multi_boxes", 1)[0]
+    return """
+native_description_localization=true
+UIBox={}
+SMODS.Fonts={}
+function loc_colour() return {} end
+function format_ui_value(value) return value end
+G.LANG={font={DESCSCALE=1,FONTSCALE=1,TEXT_HEIGHT_SCALE=1,squish=1,
+ FONT={getWidth=function(self,text) return #text end,getHeight=function() return 1 end}}}
+G.FONTS={};G.TILESCALE=1;G.TILESIZE=1
+G.UIT={T=1,R=2,C=3,O=4,B=5,padding=0}
+G.C={CLEAR={},UI={BACKGROUND_WHITE={},TEXT_LIGHT={},TEXT_DARK={}}}
+""" + native + rows + sizing + box + """
+assert(loc_parse_string('')==nil,'regression must preserve native empty-string behavior')
+function assert_description_layout(center,vars,expected)
+ G.localization={misc={v_dictionary={},v_text={},tutorial={},quips={}},descriptions={Joker={test=center}}}
+ init_localization()
+ assert(#center.text_parsed==#expected,'blank lines were lost during native localization parsing')
+ local nodes={}
+ localize{type='descriptions',set='Joker',key='test',vars=vars,nodes=nodes}
+ assert(#nodes==#expected,'blank lines were lost during native localization')
+ local layout=desc_from_rows(nodes)
+ local rows=layout.nodes[1].nodes
+ assert(#rows==#expected,'blank lines were lost from description rows')
+ for i,row in ipairs(rows) do
+  local text=''
+  for _,node in ipairs(row.nodes) do text=text..node.config.text end
+  assert(text==expected[i],'unexpected localized line '..i..': '..text)
+  assert(#row.nodes>0,'blank lines must contain a measurable text node')
+  for _,node in ipairs(row.nodes) do
+   node.UIT=node.n;node.ARGS={}
+   function node:set_values(transform) self.T=copy_table(transform) end
+   local width,height=UIBox:calculate_xywh(node,{x=0,y=0,w=0,h=0})
+   assert(height==0.32,'blank lines must reserve the same height as ordinary description text')
+  end
+  -- Steamodded's multi-box path uses its own native line builder.
+  local smods_nodes=SMODS.localize_box(center.text_parsed[i],{vars=vars})
+  local smods_text=''
+  for _,node in ipairs(smods_nodes) do smods_text=smods_text..node.config.text end
+  assert(smods_text==expected[i],'Steamodded localized line changed')
+ end
+end
+"""
+
+
 def consumable_creation_message_runtime(lua_library):
     """Resolve messages with Balatro's real dictionary and localize implementation."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -877,6 +945,32 @@ KNOWN_VALUES = {
 def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
+        if case["kind"] == "description_layout":
+            for scenario in ("collection_game", "populated_game"):
+                for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):
+                    source = HELPERS + GAME_STATES[scenario] + "\ncontext=nil;" + case["code"]
+                    source += "\n" + description_localization_runtime(lua_library)
+                    source += f"\nlocal vars=test_definition:loc_vars({{}},{tooltip_card}).vars;"
+                    expected_value = 53 if scenario == "populated_game" else 3
+                    source += f"assert(vars[1]=={expected_value} and vars[2]=={expected_value},'game variables must resolve before localization');"
+                    if case.get("localization"):
+                        source += "local translations=(function()\n" + case["localization"] + "\nend)();"
+                        source += "local center=translations.descriptions.Joker.j_mod_runtime_test;"
+                    else:
+                        source += "local center=test_definition.loc_txt;"
+                    expected = [line.replace("#1#", str(expected_value)).replace("#2#", str(expected_value))
+                                for line in case["expected"]]
+                    source += "local expected=" + "{" + ",".join(json.dumps(line, ensure_ascii=False) for line in expected) + "};"
+                    source += "assert(#center.text==#expected,'exported description line count changed');"
+                    for index, line in enumerate(case["expected"], 1):
+                        source += f"assert(center.text[{index}]=={json.dumps(line, ensure_ascii=False)},'exported description line changed');"
+                    source += "if native_description_localization then assert_description_layout(center,vars,expected) end;return 1"
+                    try:
+                        evaluate(lua, source)
+                    except AssertionError as error:
+                        raise AssertionError(f"description_layout {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
+                    checks += 1
+            continue
         if case["kind"] == "rarity_shop":
             source = HELPERS + rarity_shop_runtime(lua_library) + "\n" + case["code"]
             source += "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"

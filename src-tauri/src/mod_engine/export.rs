@@ -1111,9 +1111,9 @@ fn is_vanilla_rarity_key(value: &str) -> bool {
 
 /// Split an HTML-formatted description string into individual lines.
 ///
-/// Mirrors the TypeScript `splitDescription` helper: replaces `<br>` variants
-/// with newlines, trims each line: and filters empties. Falls back to
-/// `["No description"]` if the result would be empty.
+/// Replaces `<br>` variants and `[s]` with newlines and trims each line.
+/// Keep blank rows as a space because Balatro's localization parser drops
+/// empty strings. Entirely blank descriptions use `["No description"]`.
 fn split_description(desc: &str) -> Vec<String> {
     // Handle common <br> variants case-insensitively without pulling in a regex dep
     let normalized = desc
@@ -1128,13 +1128,15 @@ fn split_description(desc: &str) -> Vec<String> {
     let lines: Vec<String> = normalized
         .split('\n')
         .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
         .collect();
 
-    if lines.is_empty() {
+    if lines.iter().all(|line| line.is_empty()) {
         vec!["No description".to_string()]
     } else {
         lines
+            .into_iter()
+            .map(|line| if line.is_empty() { " ".to_string() } else { line })
+            .collect()
     }
 }
 
@@ -2204,6 +2206,53 @@ pub fn build_mod_json(metadata: &ModMetadataInput) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn description_line_breaks_preserve_each_blank_row() {
+        for description in [
+            "First\n\n\nLast",
+            "First\r\n\r\n\r\nLast",
+            "First[s][s][s]Last",
+            "First<br><br/><br />Last",
+            "First<BR><BR/><BR />Last",
+            "First\n \n\t\nLast",
+        ] {
+            assert_eq!(
+                split_description(description),
+                vec!["First", " ", " ", "Last"],
+                "description {description:?}"
+            );
+        }
+        assert_eq!(split_description("\nFirst\n"), vec![" ", "First", " "]);
+        assert_eq!(split_description("  First  \n  Last  "), vec!["First", "Last"]);
+        for description in ["", " \t", "\n\n", "[s][s]", "<br><br />"] {
+            assert_eq!(split_description(description), vec!["No description"]);
+        }
+    }
+
+    #[test]
+    fn joker_description_spacing_survives_inline_and_localization_exports() {
+        let entry: BatchJokerEntry = serde_json::from_value(serde_json::json!({
+            "jokerData": {
+                "objectKey": "spaced", "name": "Spaced", "cost": 4, "rarity": "common",
+                "description": "First[s][s][s]Last",
+                "localizations": [{"language": "fr", "name": "Espacé", "description": "Premier\n\n\nDernier"}]
+            },
+            "pos": {"x": 0, "y": 0}, "fileName": "spaced.lua"
+        })).unwrap();
+        let definition = joker_data_to_def(&entry.joker_data, "mod", entry.pos.clone(), None);
+        assert_eq!(definition.description, vec!["First", " ", " ", "Last"]);
+        let inline = balatro_codegen::Emitter::new().emit_chunk(&balatro_codegen::compile_joker(&definition, "mod"));
+        assert!(inline.contains("[2] = ' '") && inline.contains("[3] = ' '"), "{inline}");
+        let localized = build_localization_lua_files(
+            "mod", "en-us", &[entry], &[], &[], &[], &[], &[], &[], &[],
+        );
+        for (locale, first, last) in [("en-us", "First", "Last"), ("fr", "Premier", "Dernier")] {
+            let lua = &localized[locale];
+            let expected = format!("[1] = '{first}',\n          [2] = ' ',\n          [3] = ' ',\n          [4] = '{last}'");
+            assert!(lua.contains(&expected), "{lua}");
+        }
+    }
 
     fn make_booster_entry() -> BatchBoosterEntry {
         serde_json::from_value(serde_json::json!({
