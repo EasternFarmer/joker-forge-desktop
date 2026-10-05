@@ -37,10 +37,55 @@ fn normalized_joker_key(joker_key: &str) -> String {
     }
 }
 
-pub fn specific_joker_owned(condition: &ConditionDef) -> Option<Expr> {
+pub fn specific_joker_owned(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr> {
     let selection_method = get_param(condition, &["type", "selection_method"])
         .and_then(|v| v.as_str())
         .unwrap_or("key");
+
+    if selection_method == "pool" {
+        let Some(pool) = super::utils::str_param(condition, &["pool", "joker_pool"]) else {
+            return Some(super::utils::invalid_condition(
+                "specific_joker", "no pool selected",
+            ));
+        };
+        let local_pool = local_registry_key(pool, &ctx.mod_prefix);
+        return Some(lua_raw_expr(format!(
+            "(function() local pools = G and G.P_CENTER_POOLS; local pool = pools and (pools[{pool}] or pools[{local_pool}]); if not pool then return false end; local members = {{}}; for _, center in pairs(pool) do if type(center) == 'table' and center.key then members[center.key] = true end end; for _, v in ipairs((G and G.jokers and G.jokers.cards) or {{}}) do if v.config and v.config.center and members[v.config.center.key] then return true end end; return false end)()",
+            pool = lua_str(pool), local_pool = lua_str(local_pool),
+        )));
+    }
+
+    if selection_method == "rarity" {
+        let rarity = get_param(condition, &["rarity"])
+            .map(|v| v.to_string_lossy())
+            .unwrap_or_else(|| "common".into());
+        let rarity = rarity.trim();
+        if rarity.is_empty() {
+            return Some(super::utils::invalid_condition(
+                "specific_joker", "no rarity selected",
+            ));
+        }
+        let vanilla = match rarity.to_ascii_lowercase().as_str() {
+            "common" | "1" => Some((1, "Common")),
+            "uncommon" | "2" => Some((2, "Uncommon")),
+            "rare" | "3" => Some((3, "Rare")),
+            "legendary" | "4" => Some((4, "Legendary")),
+            _ => None,
+        };
+        let matcher = if let Some((number, name)) = vanilla {
+            format!(
+                "(tonumber(v.config.center.rarity) == {number} or v.config.center.rarity == {})",
+                lua_str(name),
+            )
+        } else {
+            let local_rarity = local_registry_key(rarity, &ctx.mod_prefix);
+            format!(
+                "v.config.center.rarity == (function() if SMODS and SMODS.Rarities and SMODS.Rarities[{rarity}] then return {rarity} end; return {local_rarity} end)()",
+                rarity = lua_str(rarity), local_rarity = lua_str(local_rarity),
+            )
+        };
+        return Some(owned_joker_match(&matcher));
+    }
 
     let matcher = if selection_method == "variable" {
         let key_var = match super::utils::str_param(condition, &["key_variable", "keyVar"]) {
@@ -52,7 +97,14 @@ pub fn specific_joker_owned(condition: &ConditionDef) -> Option<Expr> {
                 ))
             }
         };
-        format!("v.config.center.key == card.ability.extra.{}", key_var)
+        let Some(expected) = joker_key_variable_expr(ctx, key_var) else {
+            return Some(super::utils::invalid_condition(
+                "specific_joker", "unknown key variable",
+            ));
+        };
+        return Some(lua_raw_expr(format!(
+            "(function() local expected = {expected}; if type(expected) ~= 'string' or expected == '' then return false end; if expected:sub(1, 2) ~= 'j_' then expected = 'j_' .. expected end; for _, v in ipairs((G and G.jokers and G.jokers.cards) or {{}}) do if v.config and v.config.center and v.config.center.key == expected then return true end end; return false end)()"
+        )));
     } else {
         let joker_key = get_param(condition, &["joker_key", "jokerKey", "value"])
             .map(|v| v.to_string_lossy())
@@ -63,14 +115,46 @@ pub fn specific_joker_owned(condition: &ConditionDef) -> Option<Expr> {
                 "no joker key given",
             ));
         }
-        let normalized = normalized_joker_key(&joker_key);
-        format!("v.config.center.key == '{}'", normalized)
+        let normalized = normalized_joker_key(joker_key.trim());
+        format!("v.config.center.key == {}", lua_str(normalized))
     };
 
-    Some(lua_raw_expr(format!(
-        "(function() for _, v in ipairs(G.jokers.cards or {{}}) do if v.config and v.config.center and {} then return true end end return false end)()",
-        matcher
-    )))
+    Some(owned_joker_match(&matcher))
+}
+
+fn owned_joker_match(matcher: &str) -> Expr {
+    lua_raw_expr(format!(
+        "(function() for _, v in ipairs((G and G.jokers and G.jokers.cards) or {{}}) do if v.config and v.config.center and {matcher} then return true end end; return false end)()"
+    ))
+}
+
+fn local_registry_key(key: &str, mod_prefix: &str) -> String {
+    if mod_prefix.is_empty() || key.starts_with(&format!("{mod_prefix}_")) {
+        key.to_string()
+    } else {
+        format!("{mod_prefix}_{key}")
+    }
+}
+
+fn joker_key_variable_expr(ctx: &CompileContext, name: &str) -> Option<String> {
+    if !ctx.has_user_var(name) {
+        return None;
+    }
+    let base = if ctx.user_var_is_global(name) {
+        if ctx.user_var_is_persistent(name) {
+            "JF_GLOBALS".into()
+        } else {
+            "G.GAME.jf_global_vars".into()
+        }
+    } else {
+        ctx.ability_path()
+    };
+    let parts: Vec<&str> = base.split('.').collect();
+    let guarded_base = (1..=parts.len())
+        .map(|end| parts[..end].join("."))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    Some(format!("({guarded_base} and {base}[{}])", lua_str(name)))
 }
 
 pub fn joker_rarity_count(condition: &ConditionDef, ctx: &mut CompileContext) -> Option<Expr> {
@@ -253,24 +337,9 @@ pub fn joker_key(condition: &ConditionDef, ctx: &CompileContext) -> Option<Expr>
                 ))
             }
         };
-        if !ctx.has_user_var(key_var) {
+        let Some(expected) = joker_key_variable_expr(ctx, key_var) else {
             return Some(super::utils::invalid_condition("joker_key", "unknown key variable"));
-        }
-        let base = if ctx.user_var_is_global(key_var) {
-            if ctx.user_var_is_persistent(key_var) {
-                "JF_GLOBALS"
-            } else {
-                "G.GAME.jf_global_vars"
-            }
-        } else {
-            ctx.ability_path()
         };
-        let parts: Vec<&str> = base.split('.').collect();
-        let guarded_base = (1..=parts.len())
-            .map(|end| parts[..end].join("."))
-            .collect::<Vec<_>>()
-            .join(" and ");
-        let expected = format!("({} and {}[{}])", guarded_base, base, lua_str(key_var));
         return Some(joker_key_match(&expected));
     }
 

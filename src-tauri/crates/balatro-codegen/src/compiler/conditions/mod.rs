@@ -52,7 +52,7 @@ pub fn compile_condition(
 
         // Joker conditions
         "specific_joker" | "specific_joker_owned" | "owned_joker" => {
-            joker::specific_joker_owned(condition)?
+            joker::specific_joker_owned(condition, ctx)?
         }
         "joker_rarity_count" => joker::joker_rarity_count(condition, ctx)?,
         "joker_position" => joker::joker_position(condition, ctx)?,

@@ -487,6 +487,83 @@ const paletteCatalogPromise = (async () => {
   return catalog;
 })();
 
+test("Owned Joker exposes key, variable, rarity, and pool matching with only the selected field", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = catalog.getConditionTypeById("specific_joker");
+  const mode = condition.params.find((parameter) => parameter.id === "type");
+  assert.deepEqual(Array.from(mode.options, (option) => option.value), [
+    "key", "variable", "rarity", "pool",
+  ]);
+  for (const [value, field] of [
+    ["key", "joker_key"], ["variable", "key_variable"],
+    ["rarity", "rarity"], ["pool", "pool"],
+  ]) {
+    const visible = condition.params
+      .filter((parameter) => isParameterVisible(parameter, condition.params, {
+        type: { value },
+      }))
+      .map((parameter) => parameter.id);
+    assert.deepEqual(Array.from(visible), ["type", field], value);
+  }
+  const pool = condition.params.find((parameter) => parameter.id === "pool");
+  assert.equal(pool.type, "text");
+  assert.equal(pool.default, "", "Pool matching requires an explicit pool name");
+  assert.match(pool.description, /full registered pool name/);
+  assert.match(pool.description, /unprefixed custom pool name from this mod/);
+});
+
+test("existing Owned Joker rules retain key matching when the mode was not saved", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = catalog.getConditionTypeById("specific_joker");
+  assert.equal(condition.params.find((parameter) => parameter.id === "type").default, "key");
+  assert.equal(condition.params.find((parameter) => parameter.id === "joker_key").default, "joker");
+  const oldParams = { joker_key: { value: "greedy_joker" } };
+  const visible = condition.params
+    .filter((parameter) => isParameterVisible(parameter, condition.params, oldParams))
+    .map((parameter) => parameter.id);
+  assert.deepEqual(Array.from(visible), ["type", "joker_key"]);
+  assert.deepEqual(oldParams, { joker_key: { value: "greedy_joker" } });
+});
+
+test("Owned Joker rarity choices include vanilla and live custom rarities", async () => {
+  const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
+  const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));
+  const common = readCatalog("common.json");
+  const balatroUtils = loadTypeScript("src/lib/balatro/balatro-utils.ts", {
+    "@/lib/items/unlock-utils": {},
+  });
+  const catalog = loadTypeScript("src/components/rule-builder/rule-catalog.ts", {
+    "@phosphor-icons/react": {},
+    "@/lib/balatro/balatro-utils": balatroUtils,
+    "@/lib/services/entity-bridge": { entityBridge: {
+      async getRulebuilderCatalog() {
+        return {
+          triggers: readCatalog("triggers.json"), effects: readCatalog("effects.json"),
+          conditions: readCatalog("conditions.json"), generic_triggers: common.genericTriggers,
+          all_objects: common.allObjects, trigger_groups: common.triggerGroups,
+          option_sources: common.optionSources, option_sets: common.optionSets,
+        };
+      },
+    } },
+  });
+  await catalog.initializeRuleCatalogFromRust();
+  const rarity = catalog.getConditionTypeById("specific_joker").params
+    .find((parameter) => parameter.id === "rarity");
+  assert.equal(rarity.default, "common");
+  assert.equal(rarity.optionSource, "rarities");
+  assert.deepEqual(Array.from(rarity.options(), (option) => [option.value, option.label]), [
+    ["common", "Common"], ["uncommon", "Uncommon"],
+    ["rare", "Rare"], ["legendary", "Legendary"],
+  ]);
+  balatroUtils.DataRegistry.update(
+    [], [{ key: "mythic", name: "Mythic" }], [], [], [], [], [], [], [], [], [], "test",
+  );
+  assert.deepEqual(Array.from(rarity.options(), (option) => [option.value, option.label]), [
+    ["common", "Common"], ["uncommon", "Uncommon"],
+    ["rare", "Rare"], ["legendary", "Legendary"], ["mythic", "Mythic"],
+  ], "Custom rarities appear without reloading the rule catalog");
+});
+
 async function searchablePalette(itemType = "joker", trigger = null) {
   const catalog = await paletteCatalogPromise;
   const categories = [

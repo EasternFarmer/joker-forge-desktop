@@ -1611,7 +1611,7 @@
       {
         "id": "type",
         "type": "select",
-        "label": "Joker",
+        "label": "Match By",
         "options": [
           {
             "value": "key",
@@ -1620,6 +1620,14 @@
           {
             "value": "variable",
             "label": "Joker Variable"
+          },
+          {
+            "value": "rarity",
+            "label": "Joker Rarity"
+          },
+          {
+            "value": "pool",
+            "label": "Joker Pool"
           }
         ],
         "default": "key"
@@ -1642,6 +1650,28 @@
         "showWhen": {
           "parameter": "type",
           "values": ["variable"]
+        }
+      },
+      {
+        "id": "rarity",
+        "type": "select",
+        "label": "Joker Rarity",
+        "default": "common",
+        "optionSource": "rarities",
+        "showWhen": {
+          "parameter": "type",
+          "values": ["rarity"]
+        }
+      },
+      {
+        "id": "pool",
+        "type": "text",
+        "label": "Joker Pool",
+        "description": "Enter the full registered pool name, or an unprefixed custom pool name from this mod.",
+        "default": "",
+        "showWhen": {
+          "parameter": "type",
+          "values": ["pool"]
         }
       }
     ],

@@ -2554,6 +2554,70 @@ fn joker_condition_case(
     }));
 }
 
+fn append_owned_joker_cases(cases: &mut Vec<Value>) {
+    // Exercise the saved frontend shape as well as generated Lua: selector
+    // parameters must survive export before their ownership tests can work.
+    let emit = |params: Value, negate: bool| {
+        let params: serde_json::Map<String, Value> = params.as_object().unwrap().iter()
+            .map(|(name,value)| (name.clone(),json!({"value":value}))).collect();
+        let input: export::JokerDataInput = serde_json::from_value(json!({
+            "objectKey":"runtime_test", "name":"Runtime Test", "description":"Test",
+            "cost":4, "rarity":"common", "userVariables":[
+                {"name":"source", "type":"key", "initialKey":"j_second"},
+                {"name":"global_source", "type":"key", "initialKey":"j_third", "isGlobal":true},
+                {"name":"persistent_source", "type":"key", "initialKey":"j_first", "isGlobal":true, "isPersistent":true}
+            ],
+            "rules":[{"id":"owned", "trigger":"hand_played", "conditionGroups":[{
+                "operator":"and", "conditions":[{"id":"owned_condition", "type":"specific_joker", "negate":negate, "params":params}]
+            }], "effects":[{"id":"bonus", "type":"add_mult", "params":{"value":{"value":9}}}]}]
+        })).unwrap();
+        let definition = export::joker_data_to_def(&input,"mod",export::AtlasPosInput{x:0,y:0},None);
+        Emitter::new().emit_chunk(&compile_joker(&definition,"mod"))
+    };
+    for (name, params, prepare, negate, expected) in [
+        ("legacy_default_key", json!({"joker_key":"j_second"}), "", false, true),
+        ("legacy_bare_key", json!({"type":"key","joker_key":"second"}), "", false, true),
+        ("key_missing", json!({"type":"key","joker_key":"j_missing"}), "", false, false),
+        ("escaped_key", json!({"type":"key","joker_key":"quote'\\key"}), r#"owned_jokers[2].config.center.key="j_quote'\\key""#, false, true),
+        ("local_key_variable", json!({"type":"variable","key_variable":"source"}), "", false, true),
+        ("global_key_variable", json!({"type":"variable","key_variable":"global_source"}), "", false, true),
+        ("persistent_key_variable", json!({"type":"variable","key_variable":"persistent_source"}), "", false, true),
+        ("missing_key_variable", json!({"type":"variable","key_variable":"missing"}), "", false, false),
+        ("rarity_common_name", json!({"type":"rarity","rarity":"common"}), "owned_jokers[1].config.center.rarity=1", false, true),
+        ("rarity_uncommon_name", json!({"type":"rarity","rarity":"uncommon"}), "owned_jokers[2].config.center.rarity=2", false, true),
+        ("rarity_rare_name", json!({"type":"rarity","rarity":"rare"}), "owned_jokers[3].config.center.rarity=3", false, true),
+        ("rarity_legendary_name", json!({"type":"rarity","rarity":"legendary"}), "owned_jokers[3].config.center.rarity=4", false, true),
+        ("rarity_rare_number", json!({"type":"rarity","rarity":3}), "owned_jokers[3].config.center.rarity=3", false, true),
+        ("rarity_number_string", json!({"type":"rarity","rarity":"3"}), "owned_jokers[3].config.center.rarity=3", false, true),
+        ("rarity_custom_bare", json!({"type":"rarity","rarity":"superrare"}), "owned_jokers[2].config.center.rarity='mod_superrare'", false, true),
+        ("rarity_custom_full", json!({"type":"rarity","rarity":"mod_superrare"}), "owned_jokers[2].config.center.rarity='mod_superrare'", false, true),
+        ("rarity_external_full", json!({"type":"rarity","rarity":"other_mythic"}), "owned_jokers[2].config.center.rarity='other_mythic'", false, true),
+        ("rarity_miss", json!({"type":"rarity","rarity":"rare"}), "for _,c in ipairs(owned_jokers) do c.config.center.rarity=1 end", false, false),
+        ("rarity_debuffed_malformed_cards", json!({"type":"rarity","rarity":"rare"}), "owned_jokers[2].config.center.rarity=3;owned_jokers[2].debuff=true;G.jokers.cards={{},{config={}},owned_jokers[2]}", false, true),
+        ("rarity_negated_match", json!({"type":"rarity","rarity":"rare"}), "owned_jokers[2].config.center.rarity=3", true, false),
+        ("pool_custom_bare", json!({"type":"pool","pool":"chosen_pool"}), "function get_current_pool() error('ownership must not query shop eligibility') end", false, true),
+        ("pool_custom_full", json!({"type":"pool","pool":"mod_chosen_pool"}), "", false, true),
+        ("pool_external_full", json!({"type":"pool","pool":"other_pool"}), "G.P_CENTER_POOLS.other_pool={owned_jokers[3].config.center}", false, true),
+        ("pool_escaped_name", json!({"type":"pool","pool":"quote'\\pool"}), r#"G.P_CENTER_POOLS["mod_quote'\\pool"]={owned_jokers[2].config.center}"#, false, true),
+        ("pool_builtin_joker", json!({"type":"pool","pool":"Joker"}), "", false, true),
+        ("pool_only_nonowned", json!({"type":"pool","pool":"mod_unowned"}), "G.P_CENTER_POOLS.mod_unowned={{key='j_not_owned',set='Joker'}}", false, false),
+        ("pool_empty", json!({"type":"pool","pool":"chosen_pool"}), "G.P_CENTER_POOLS.mod_chosen_pool={}", false, false),
+        ("pool_banned_locked_debuffed_owned", json!({"type":"pool","pool":"chosen_pool"}), "G.P_CENTER_POOLS.mod_chosen_pool[1].unlocked=false;owned_jokers[2].debuff=true;G.GAME.banned_keys={j_second=true};G.GAME.used_jokers={j_second=true};function get_current_pool() error('owned cards count even when excluded from future spawning') end", false, true),
+        ("pool_negated_miss", json!({"type":"pool","pool":"unknown"}), "", true, true),
+        ("key_no_inventory", json!({"type":"key","joker_key":"j_second"}), "G.jokers.cards=nil", false, false),
+        ("rarity_no_area", json!({"type":"rarity","rarity":"common"}), "G.jokers=nil", false, false),
+        ("pool_no_game", json!({"type":"pool","pool":"chosen_pool"}), "G=nil", false, false),
+        ("pool_no_registry", json!({"type":"pool","pool":"chosen_pool"}), "G.P_CENTER_POOLS=nil", false, false),
+    ] {
+        cases.push(json!({"kind":"rule_options", "name":format!("owned_joker_{name}"),
+            "code":emit(params,negate),
+            "prepare":format!("G.GAME.jf_global_vars={{global_source='j_third'}};JF_GLOBALS={{persistent_source='j_first'}};SMODS.Rarities.mod_superrare={{key='mod_superrare'}};SMODS.Rarities.other_mythic={{key='other_mythic'}};{prepare}"),
+            "invoke":"comparison_result=test_definition:calculate(actor,{joker_main=true})",
+            "verify":if expected {"assert(comparison_result and comparison_result.mult==9)"} else {"assert(not comparison_result or comparison_result.mult==nil)"}
+        }));
+    }
+}
+
 fn append_joker_selection_and_key_cases(cases: &mut Vec<Value>) {
     for (name, params, prepare, expected) in [
         ("any_multiple", json!({"check_key":"any"}), "G.jokers.highlighted={owned_jokers[1],owned_jokers[2]}", true),
@@ -3212,6 +3276,7 @@ fn main() {
     append_rule_option_cases(&mut cases);
     append_booster_option_cases(&mut cases);
     append_joker_selection_and_key_cases(&mut cases);
+    append_owned_joker_cases(&mut cases);
     append_joker_selection_size_cases(&mut cases);
     append_required_flags_cases(&mut cases);
     append_flag_and_variable_cases(&mut cases);
