@@ -24,6 +24,7 @@ import {
 import { PixelArtEditorDialog } from "@/components/pages/pixel-art-editor-dialog";
 import { cn } from "@/lib/core/utils";
 import { ItemBadgeSelect } from "@/components/balatro/item-badge-select";
+import { EditionShaderPreview } from "@/components/balatro/edition-shader-preview";
 import {
   formatBalatroText,
   applyAutoFormatting,
@@ -105,6 +106,8 @@ interface GenericItemCardProps {
     selectedAce?: AceSelection;
     replaceBaseCard?: boolean;
     shader?: string | false;
+    imageSrc?: string;
+    disableBaseShader?: boolean;
   };
 }
 
@@ -459,52 +462,63 @@ export const GenericItemCard = memo(function GenericItemCard({
               !isReadOnly && editAction && "cursor-pointer",
             )}
           >
-            {cardPreview?.type === "seal" && (
-              <img
-                src="/images/back.png"
-                alt="Card Back"
-                className="absolute inset-0 w-full h-full object-contain [image-rendering:pixelated] pointer-events-none z-0"
-                draggable="false"
+            {cardPreview?.type === "edition" ? (
+              <EditionShaderPreview
+                shader={cardPreview.shader}
+                baseImage={
+                  hasBaseAce
+                    ? getAceImagePath(
+                        cardPreview.selectedAce as Exclude<AceSelection, "none">,
+                        "acesbg",
+                      )
+                    : undefined
+                }
+                image={cardPreview.imageSrc}
+                overlayImage={overlayImage}
+                disableBaseShader={cardPreview.disableBaseShader}
+                animate={false}
+                className="absolute inset-0 w-full h-full pointer-events-none"
               />
-            )}
-            <div
-              className={cn(
-                "w-full h-full flex items-center justify-center",
-                cardPreview?.type === "seal" ? "relative z-20" : "",
-              )}
-            >
-              {image}
-            </div>
-            {hasBaseAce && (
-              <img
-                src={getAceImagePath(
-                  cardPreview.selectedAce as Exclude<AceSelection, "none">,
-                  cardPreview.type === "edition" ? "acesbg" : "aces",
+            ) : (
+              <>
+                {cardPreview?.type === "seal" && (
+                  <img
+                    src="/images/back.png"
+                    alt="Card Back"
+                    className="absolute inset-0 w-full h-full object-contain [image-rendering:pixelated] pointer-events-none z-0"
+                    draggable="false"
+                  />
                 )}
-                alt="Base Card"
-                className={cn(
-                  "absolute inset-0 w-full h-full object-contain [image-rendering:pixelated] pointer-events-none",
-                  cardPreview?.type === "seal"
-                    ? "z-10"
-                    : cardPreview?.type === "enhancement"
-                      ? "z-20"
-                      : "z-10",
+                <div
+                  className={cn(
+                    "w-full h-full flex items-center justify-center",
+                    cardPreview?.type === "seal" ? "relative z-20" : "",
+                  )}
+                >
+                  {image}
+                </div>
+                {hasBaseAce && (
+                  <img
+                    src={getAceImagePath(
+                      cardPreview.selectedAce as Exclude<AceSelection, "none">,
+                      "aces",
+                    )}
+                    alt="Base Card"
+                    className={cn(
+                      "absolute inset-0 w-full h-full object-contain [image-rendering:pixelated] pointer-events-none",
+                      cardPreview?.type === "seal"
+                        ? "z-10"
+                        : cardPreview?.type === "enhancement"
+                          ? "z-20"
+                          : "z-10",
+                    )}
+                    draggable="false"
+                  />
                 )}
-                draggable="false"
-              />
-            )}
-            {cardPreview?.type === "edition" && (
-              <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none px-4">
-                <span className="bg-black/60 text-white text-xs font-bold rounded px-2 py-1 text-center break-all">
-                  {typeof cardPreview.shader === "string" &&
-                  cardPreview.shader.trim()
-                    ? cardPreview.shader
-                    : "No Shader"}
-                </span>
-              </div>
+              </>
             )}
           </div>
-          {overlayImage && (
+          {overlayImage && cardPreview?.type !== "edition" && (
             <img
               src={overlayImage}
               alt="Overlay"

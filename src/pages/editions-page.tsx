@@ -243,6 +243,7 @@ export default function EditionsPage() {
         locVars={getItemLocVarsFromUserVariables(item)}
         idValue={item.orderValue}
         imageLayers={item.imageLayers}
+        overlayImage={item.overlayImage}
         onUpdate={(updates) => handleUpdate(item.id, updates)}
         onDuplicate={() => {
           const duplicatedItem: EditionData = {
@@ -272,6 +273,8 @@ export default function EditionsPage() {
           type: "edition",
           selectedAce: context.selectedAce,
           shader: item.shader,
+          imageSrc: item.image,
+          disableBaseShader: item.disable_base_shader,
         }}
         properties={[
           {
@@ -413,6 +416,8 @@ export default function EditionsPage() {
           type: "edition",
           selectedAce: context.selectedAce,
           shader: item.shader,
+          imageSrc: item.image,
+          disableBaseShader: item.disable_base_shader,
         }}
         actions={[
           {

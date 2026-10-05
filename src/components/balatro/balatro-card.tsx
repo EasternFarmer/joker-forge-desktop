@@ -7,6 +7,7 @@ import {
   Spade,
 } from "@phosphor-icons/react";
 import IconButton from "@/components/ui/icon-button";
+import { EditionShaderPreview } from "@/components/balatro/edition-shader-preview";
 import { BalatroText } from "@/lib/balatro/balatro-text-formatter";
 import { getDescriptionVariablePlaceholdersEnabled } from "@/lib/services/storage";
 import { getItemLocVarsFromUserVariables } from "@/lib/description/description-loc-vars";
@@ -225,8 +226,20 @@ export function BalatroCard({
         type === "enhancement" || objectType === "enhancement";
       const isSealCard = type === "seal" || isSeal || objectType === "seal";
 
+      if (type === "edition") {
+        return (
+          <EditionShaderPreview
+            shader={(data as Partial<EditionData>).shader}
+            disableBaseShader={(data as Partial<EditionData>).disable_base_shader}
+            baseImage={showBaseAce ? `/images/acesbg/${effectiveSelectedAce}.png` : undefined}
+            image={hasImage ? data.image : undefined}
+            overlayImage={data.overlayImage}
+            className="relative w-full h-full"
+          />
+        );
+      }
+
       if (
-        type === "edition" ||
         type === "card" ||
         type === "enhancement" ||
         type === "seal"
@@ -344,23 +357,6 @@ export function BalatroCard({
               showBaseAce && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-50"></div>
               )
-            )}
-
-            {type === "edition" && !hasImage && (
-              <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none px-3">
-                {(() => {
-                  const shaderValue = (data as Partial<EditionData>).shader;
-                  const shaderText =
-                    typeof shaderValue === "string" && shaderValue.trim()
-                      ? shaderValue
-                      : "No Shader";
-                  return (
-                    <span className="bg-black/60 text-white text-xs font-bold rounded px-2 py-1 text-center break-all">
-                      {shaderText}
-                    </span>
-                  );
-                })()}
-              </div>
             )}
 
             {data.overlayImage && (

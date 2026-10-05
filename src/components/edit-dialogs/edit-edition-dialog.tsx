@@ -239,15 +239,20 @@ export function EditEditionDialog({
 
   const renderPreview = useCallback(
     (item: EditionData | null) => (
-      <BalatroCard
-        type="edition"
-        data={{
-          ...item,
-          shader: item?.shader === "" ? undefined : item?.shader,
-        }}
-        editionBadgeColor={item?.badge_colour}
-        size="lg"
-      />
+      <div className="flex flex-col items-center gap-3">
+        <BalatroCard
+          type="edition"
+          data={{
+            ...item,
+            shader: item?.shader === "" ? undefined : item?.shader,
+          }}
+          editionBadgeColor={item?.badge_colour}
+          size="lg"
+        />
+        <p className="max-w-56 text-center text-xs text-muted-foreground">
+          Preview approximates the in-game effect.
+        </p>
+      </div>
     ),
     [],
   );
