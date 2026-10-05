@@ -2,6 +2,7 @@
 
 SMODS.Edition {
     key = 'e_card_scored_bonus',
+    shader = false,
     config = {
         extra = { chips0 = 5 }
     },

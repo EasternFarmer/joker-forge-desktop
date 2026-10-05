@@ -34,6 +34,42 @@ fn deck(rules: Value) -> DeckDef {
     .unwrap()
 }
 
+fn append_edition_shader_cases(cases: &mut Vec<Value>) {
+    for (name, shader) in [
+        ("missing", None), ("null", Some(json!(null))), ("boolean_false", Some(json!(false))),
+        ("empty", Some(json!(""))), ("whitespace", Some(json!(" \t\n "))),
+        ("string_false", Some(json!("false"))),
+    ] {
+        let mut input = json!({"objectKey":"runtime_test","name":"Runtime Test","description":"Test",
+            "apply_to_float":true,"rules":[{"id":"score","trigger":"card_scored","effects":[{
+                "id":"mult","type":"add_mult","params":{"value":7}
+            }]}]});
+        if let Some(shader) = shader { input["shader"] = shader; }
+        let input: export::EditionDataInput = serde_json::from_value(input).unwrap();
+        cases.push(json!({"kind":"edition_shader","name":format!("edition_shader_frontend_{name}"),
+            "code":Emitter::new().emit_chunk(&compile_edition(&export::edition_data_to_def(&input),"mod")),
+            "shader":false,"custom":false}));
+    }
+    for (name, shader, expected, custom) in [
+        ("missing", None, json!(false), false),
+        ("empty", Some(""), json!(false), false),
+        ("whitespace", Some(" \t\n "), json!(false), false),
+        ("string_false", Some("false"), json!(false), false),
+        ("vanilla", Some("polychrome"), json!("polychrome"), false),
+        ("custom", Some("shimmer"), json!("mod_shimmer"), true),
+    ] {
+        let mut input = json!({"key":"runtime_test","name":"Runtime Test","description":["Test"],
+            "apply_to_float":true,"rules":[{"id":"score","trigger":"card_scored","effects":[{
+                "id":"mult","effect_type":"add_mult","params":{"value":7}
+            }]}]});
+        if let Some(shader) = shader { input["shader"] = json!(shader); }
+        let definition: EditionDef = serde_json::from_value(input).unwrap();
+        cases.push(json!({"kind":"edition_shader","name":format!("edition_shader_direct_{name}"),
+            "code":Emitter::new().emit_chunk(&compile_edition(&definition,"mod")),
+            "shader":expected,"custom":custom}));
+    }
+}
+
 fn append_blind_win_cases(cases: &mut Vec<Value>) {
     let emit = |trigger: &str, scope: &str, consumable: bool| {
         let rules = json!([{"id":"win_rule","trigger":trigger,"effects":[{
@@ -2888,6 +2924,7 @@ fn main() {
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
     append_blind_win_cases(&mut cases);
+    append_edition_shader_cases(&mut cases);
     append_rarity_shop_cases(&mut cases);
     append_description_blank_line_cases(&mut cases);
     append_description_format_cases(&mut cases);

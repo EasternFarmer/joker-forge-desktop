@@ -2,6 +2,7 @@
 
 SMODS.Edition {
     key = 'e_economy_and_slots',
+    shader = false,
     config = {
         extra = {
             interest_cap0 = 1,

@@ -28,6 +28,14 @@ fn is_vanilla_shader(shader: &str) -> bool {
     VANILLA_SHADERS.contains(&shader)
 }
 
+fn selected_shader(edition: &EditionDef) -> Option<&str> {
+    edition
+        .shader
+        .as_deref()
+        .map(str::trim)
+        .filter(|shader| !shader.is_empty() && *shader != "false")
+}
+
 /// Compile an edition definition into a Lua chunk.
 pub fn compile_edition(edition: &EditionDef, mod_prefix: &str) -> Chunk {
     let mut ctx = CompileContext::new(
@@ -46,7 +54,7 @@ pub fn compile_edition(edition: &EditionDef, mod_prefix: &str) -> Chunk {
     stmts.push(lua_comment(format!(" {}", edition.name)));
 
     // If custom shader, register it before the edition
-    if let Some(shader) = &edition.shader {
+    if let Some(shader) = selected_shader(edition) {
         if is_custom_shader(shader) {
             stmts.push(Stmt::ExprStmt(lua_table_call(
                 lua_path(&["SMODS", "Shader"]),
@@ -81,23 +89,21 @@ fn build_edition_table(
     entries.push(kv("key", lua_str(&edition.key)));
 
     // Shader
-    if let Some(shader) = &edition.shader {
-        if shader == "false" {
-            entries.push(kv("shader", lua_bool(false)));
-        } else {
-            entries.push(kv("shader", lua_str(shader)));
+    if let Some(shader) = selected_shader(edition) {
+        entries.push(kv("shader", lua_str(shader)));
 
-            // Vanilla shaders need prefix_config to disable prefixing
-            if is_vanilla_shader(shader) {
-                entries.push(TableEntry::KeyValue(
-                    "prefix_config".to_string(),
-                    lua_table_raw(vec![TableEntry::KeyValue(
-                        "shader".to_string(),
-                        lua_bool(false),
-                    )]),
-                ));
-            }
+        // Vanilla shaders need prefix_config to disable prefixing
+        if is_vanilla_shader(shader) {
+            entries.push(TableEntry::KeyValue(
+                "prefix_config".to_string(),
+                lua_table_raw(vec![TableEntry::KeyValue(
+                    "shader".to_string(),
+                    lua_bool(false),
+                )]),
+            ));
         }
+    } else {
+        entries.push(kv("shader", lua_bool(false)));
     }
 
     // Config extra

@@ -449,6 +449,107 @@ end
 """
 
 
+def edition_shader_runtime(lua_library):
+    """Exercise native required parameters, prefixing, injection, and draw guards."""
+    objects = (ROOT / "public/other/smods-main/src/game_object.lua").read_text(encoding="utf-8")
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    draw = (ROOT / "public/other/smods-main/src/card_draw.lua").read_text(encoding="utf-8")
+    sections = [
+        ("SMODS.GameObject = Object:extend()", "    function SMODS.GameObject:process_loc_text()"),
+        ("SMODS.Centers = {}", "------- API CODE GameObject.Center.Joker"),
+        ("SMODS.Shaders = {}", "----- API CODE GameObject.ScreenShader"),
+        ("SMODS.Edition = SMODS.Center:extend", "    function SMODS.Edition:get_card_limit_key()"),
+    ]
+    registration = "\n".join(start + objects.split(start, 1)[1].split(end, 1)[0]
+                              for start, end in sections)
+    native_utils = "\n".join(start + utils.split(start, 1)[1].split(end, 1)[0] for start, end in [
+        ("function SMODS.merge_defaults", "\nV = require"),
+        ("function SMODS.insert_pool", "\nfunction SMODS.juice_up_blind"),
+    ])
+    draw_steps = "\n".join("SMODS.DrawStep {" + section for section in draw.split("SMODS.DrawStep {")[1:]
+                            if "key = 'edition'," in section or "key = 'floating_sprite'," in section)
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            object_base = archive.read("engine/object.lua").decode("utf-8-sig")
+            sprite_source = archive.read("engine/sprite.lua").decode("utf-8-sig")
+        sprite = "function Sprite:draw_shader" + sprite_source.split("function Sprite:draw_shader", 1)[1]
+        sprite = sprite.split("\nfunction Sprite:", 1)[0]
+    else:
+        object_base = """
+Object={};Object.__index=Object
+function Object:extend()
+ local cls={};for k,v in pairs(self) do if k:find('__')==1 then cls[k]=v end end
+ cls.__index=cls;cls.super=self;setmetatable(cls,self);return cls
+end
+"""
+        # The native drawing steps still run with standalone Lua installations.
+        sprite = "function Sprite:draw_shader(shader) assert(G.SHADERS[shader or 'dissolve']);self:draw_self() end"
+    return object_base + """
+G={P_CENTERS={},P_CENTER_POOLS={Edition={}},C={DARK_EDITION=1,CLEAR=0,MULT=1},
+ GAME={edition_rate=1},play={cards={}},hand={cards={}},TIMERS={REAL=1},
+ SETTINGS={reduced_motion=true},CONTROLLER={cursor_position={x=0,y=0}},CANV_SCALE=1,TILESCALE=1,TILESIZE=1,SHADERS={}}
+SMODS.current_mod={prefix='mod',path='test_mod/'};SMODS.ObjectTypes={}
+function sendWarnMessage(message) error(message) end
+SMODS.NFS={read=function(path)
+ assert(path=='test_mod/assets/shaders/shimmer.fs','unexpected shader file: '..path)
+ return 'custom_shader_source'
+end}
+local NFS=SMODS.NFS
+local function shader(key)
+ return {key=key,send=function(self,name) assert(type(name)=='string','invalid shader uniform') end}
+end
+G.SHADERS.dissolve=shader('dissolve');G.SHADERS.polychrome=shader('polychrome')
+rendered_shaders={}
+love={graphics={newShader=function(source)
+ assert(source=='custom_shader_source');return shader('mod_shimmer')
+end,setShader=function(value)
+ if value then rendered_shaders[#rendered_shaders+1]=value.key end
+end}}
+Sprite={}
+function Sprite:get_pos_pixel() return {} end
+function Sprite:get_image_dims() return {} end
+function Sprite:draw_self() self.draws=(self.draws or 0)+1 end
+function Sprite:draw_from() self:draw_self() end
+function test_sprite()
+ return setmetatable({role={},ARGS={},VT={x=0,y=0,scale=1},ID=1,shadow_parrallax={x=0,y=0}}, {__index=Sprite})
+end
+draw_steps={};SMODS.DrawStep=function(step) draw_steps[step.key]=step end
+""" + native_utils + registration + sprite + draw_steps + """
+-- The same constructor must reject an omitted shader and accept explicit false.
+local ok,message=pcall(function() SMODS.Edition{key='missing_shader_probe'} end)
+assert(not ok and message:find('Missing required parameter') and message:find('shader'),
+ 'native required-shader validation must be active')
+function assert_edition_shader(expected,custom)
+ local definition=SMODS.Centers.e_mod_runtime_test
+ assert(definition and definition.registered and definition.shader==expected,'edition shader registration changed')
+ assert(#SMODS.Edition.obj_buffer==1,'edition must register exactly once')
+ assert(#SMODS.Shader.obj_buffer==(custom and 1 or 0),'unexpected custom shader registration')
+ if custom then
+  local registered=SMODS.Shaders.mod_shimmer
+  assert(registered and registered.path=='shimmer.fs' and registered.original_key=='shimmer')
+  registered:inject();assert(G.SHADERS.mod_shimmer)
+ elseif expected then
+  assert(definition.prefix_config.shader==false,'vanilla shader must not be prefixed')
+ end
+ definition:inject();assert(G.P_CENTERS.e_mod_runtime_test==definition and #G.P_CENTER_POOLS.Edition==1)
+ local card={ability={name='Test',set='Default'},edition=copy_table(definition.config),
+  config={center={key='c_base',soul_pos={},discovered=true}},ARGS={},children={center=test_sprite(),front=test_sprite(),floating_sprite=test_sprite()}}
+ card.edition.key=definition.key;card.edition[definition.key:sub(3)]=true
+ function card:should_hide_front() return false end
+ draw_steps.edition.func(card,'both')
+ assert((card.children.center.draws or 0)==(expected and 1 or 0),'shaderless edition must skip overlay')
+ assert((card.children.front.draws or 0)==(expected and 1 or 0),'shaderless front must skip overlay')
+ -- Floating art uses native Sprite's dissolve fallback when shader is false.
+ draw_steps.floating_sprite.func(card)
+ assert(card.children.floating_sprite.draws==3,'floating card art must remain drawable')
+ local effect=definition:calculate(card,{main_scoring=true,cardarea=G.play,other_card=card})
+ assert(effect and effect.mult==7,'shaderless edition must retain its scoring ability')
+ if #rendered_shaders>0 then assert(rendered_shaders[#rendered_shaders]==(expected or 'dissolve')) end
+end
+"""
+
+
 def description_localization_runtime(lua_library):
     """Exercise installed Balatro's parser, localization, and text-node sizing."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -1210,6 +1311,15 @@ KNOWN_VALUES = {
 def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
+        if case["kind"] == "edition_shader":
+            source = HELPERS + edition_shader_runtime(lua_library) + "\n" + case["code"]
+            source += "\nassert_edition_shader(" + lua_data(case["shader"]) + "," + lua_data(case["custom"]) + ");return 1"
+            try:
+                evaluate(lua, source)
+            except AssertionError as error:
+                raise AssertionError(f"edition_shader {case['name']}: {error}") from error
+            checks += 1
+            continue
         if case["kind"] in ("description_layout", "description_format"):
             for scenario in ("collection_game", "populated_game"):
                 for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):
