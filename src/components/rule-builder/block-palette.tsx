@@ -141,12 +141,15 @@ const BlockPalette: React.FC<BlockPaletteProps> = ({
   }, [selectedRule, getEffectsForTriggerFn, itemType]);
 
   const categorizedItems = useMemo(() => {
-    const normalizedSearch = searchTerm.toLowerCase();
+    const searchWords = searchTerm.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const matchesSearch = (...fields: string[]) => {
+      const text = fields.join(" ").toLowerCase();
+      return searchWords.every((word) => text.includes(word));
+    };
 
     const filteredTriggers = triggers.filter(
       (trigger) =>
-        trigger.label[itemType].toLowerCase().includes(normalizedSearch) ||
-        trigger.description[itemType].toLowerCase().includes(normalizedSearch),
+        matchesSearch(trigger.label[itemType], trigger.description[itemType]),
     );
 
     const triggersByCategory: Record<
@@ -190,8 +193,7 @@ const BlockPalette: React.FC<BlockPaletteProps> = ({
 
     const filteredConditions = availableConditions.filter(
       (condition) =>
-        condition.label.toLowerCase().includes(normalizedSearch) ||
-        condition.description.toLowerCase().includes(normalizedSearch),
+        matchesSearch(condition.label, condition.description),
     );
 
     const conditionsByCategory: Record<
@@ -228,8 +230,7 @@ const BlockPalette: React.FC<BlockPaletteProps> = ({
 
     const filteredEffects = availableEffects.filter(
       (effect) =>
-        effect.label.toLowerCase().includes(normalizedSearch) ||
-        effect.description.toLowerCase().includes(normalizedSearch),
+        matchesSearch(effect.label, effect.description),
     );
 
     const effectsByCategory: Record<

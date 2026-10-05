@@ -464,3 +464,126 @@ test("CLI requests preserve message settings for normal, random, and loop effect
     assert.equal(Object.hasOwn(list[3], "messageMode"), false, "Legacy mode is not invented");
   }
 });
+
+const paletteCatalogPromise = (async () => {
+  const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
+  const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));
+  const common = readCatalog("common.json");
+  const catalog = loadTypeScript("src/components/rule-builder/rule-catalog.ts", {
+    "@phosphor-icons/react": {},
+    "@/lib/balatro/balatro-utils": {},
+    "@/lib/services/entity-bridge": { entityBridge: {
+      async getRulebuilderCatalog() {
+        return {
+          triggers: readCatalog("triggers.json"), effects: readCatalog("effects.json"),
+          conditions: readCatalog("conditions.json"), generic_triggers: common.genericTriggers,
+          all_objects: common.allObjects, trigger_groups: common.triggerGroups,
+        };
+      },
+    } },
+  });
+  await catalog.initializeRuleCatalogFromRust();
+  return catalog;
+})();
+
+async function searchablePalette(itemType = "joker", trigger = null) {
+  const catalog = await paletteCatalogPromise;
+  const categories = [
+    ...catalog.TRIGGER_CATEGORIES, ...catalog.CONDITION_CATEGORIES, ...catalog.EFFECT_CATEGORIES,
+  ];
+  const state = [];
+  let hookIndex = 0;
+  const react = {
+    useState(initial) {
+      const index = hookIndex++;
+      if (!(index in state)) state[index] = index === 1
+        ? new Set([...categories.map((category) => category.label), "Other"])
+        : initial;
+      return [state[index], (value) => {
+        state[index] = typeof value === "function" ? value(state[index]) : value;
+      }];
+    },
+    useEffect() {},
+    useMemo: (factory) => factory(),
+  };
+  const element = (type, props) => ({ type, props });
+  const { default: BlockPalette } = loadTypeScript("src/components/rule-builder/block-palette.tsx", {
+    react: { default: react, ...react },
+    "react/jsx-runtime": { jsx: element, jsxs: element },
+    "@dnd-kit/core": {},
+    "framer-motion": { motion: { div: "motion.div" }, AnimatePresence: "AnimatePresence" },
+    "@phosphor-icons/react": {},
+    "./block-component": { default: "BlockComponent" },
+    "@/components/ui/icon-button": { default: "IconButton" },
+    "./item-type-badge": { default: "ItemTypeBadge" },
+    "./panel": { default: "Panel" },
+    "@/components/ui/help-tooltip-icon": { default: "HelpTooltipIcon" },
+    "./rule-catalog": catalog,
+  });
+  const props = {
+    position: { x: 0, y: 0 }, selectedRule: trigger ? { id: "rule", trigger } : null,
+    itemType, onAddTrigger() {}, onAddCondition() {}, onAddEffect() {},
+    onClose() {}, onPositionChange() {},
+  };
+  const render = () => {
+    hookIndex = 0;
+    return allElements(BlockPalette(props));
+  };
+  return {
+    search(value) {
+      render().find((node) => node.type === "input").props.onChange({ target: { value } });
+      return render().filter((node) => node.props?.blockId).map((node) => node.props.blockId);
+    },
+    tab(value) {
+      const prefix = value === "triggers" ? "Show all trigger" : `Show only ${value}`;
+      const toggle = render().find((node) => node.type === "IconButton"
+        && node.props.tooltip.startsWith(prefix));
+      assert.ok(toggle && !toggle.props.disabled, `${value} tab is available`);
+      toggle.props.onClick();
+    },
+    catalog,
+  };
+}
+
+test("trigger search finds every hand drawn trigger despite intervening label words", async () => {
+  const palette = await searchablePalette();
+  for (const query of ["hand drawn", "  HaNd\t DRAWN  ", "drawn hand"]) {
+    const matches = palette.search(query);
+    assert.ok(matches.includes("hand_drawn"), query);
+    assert.ok(matches.includes("first_hand_drawn"), query);
+    assert.equal(matches.includes("hand_played"), false, "Every search word must match");
+  }
+  assert.deepEqual(palette.search("hand drawn nonexistent"), []);
+});
+
+test("empty and whitespace searches preserve the complete available trigger list", async () => {
+  const palette = await searchablePalette();
+  const expected = Array.from(palette.catalog.getTriggers("joker"), (trigger) => trigger.id).sort();
+  for (const query of ["", " \t\n "]) {
+    assert.deepEqual(palette.search(query).sort(), expected, JSON.stringify(query));
+  }
+});
+
+test("trigger search keeps item availability while combining label and description words", async () => {
+  const jokerPalette = await searchablePalette();
+  assert.ok(jokerPalette.search("drawn player").includes("hand_drawn"),
+    "Words can match the label and its description together");
+  const consumablePalette = await searchablePalette("consumable");
+  assert.deepEqual(consumablePalette.search("hand drawn"), [],
+    "Joker-only triggers remain unavailable to consumables");
+  const expected = Array.from(consumablePalette.catalog.getTriggers("consumable"), (trigger) => trigger.id).sort();
+  assert.deepEqual(consumablePalette.search("").sort(), expected);
+});
+
+test("condition and effect searches use the same word matching within compatible results", async () => {
+  const palette = await searchablePalette("joker", "hand_played");
+  assert.ok(palette.search("poker type").includes("hand_type"),
+    "Condition words may appear in a different order in the description");
+  assert.deepEqual(palette.search("poker type nonexistent"), []);
+  palette.tab("effects");
+  assert.ok(palette.search("  SIZE\tEDIT ").includes("edit_hand_size"),
+    "Effect search handles order, case, and whitespace consistently");
+  assert.deepEqual(palette.search("size edit nonexistent"), []);
+  const expected = Array.from(palette.catalog.getEffectsForTrigger("hand_played", "joker"), (effect) => effect.id).sort();
+  assert.deepEqual(palette.search("").sort(), expected, "Search does not expand the compatibility set");
+});
