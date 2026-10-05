@@ -30,6 +30,10 @@ function loadTypeScript(relativePath, mockImports = {}) {
 }
 
 const { isParameterVisible } = loadTypeScript("src/components/rule-builder/parameter-visibility.ts");
+const {
+  generateBoosterTypeConditionTitle,
+  normalizeBoosterTypeConditionParams,
+} = loadTypeScript("src/components/rule-builder/booster-type-condition.ts");
 const effects = JSON.parse(fs.readFileSync(path.join(
   __dirname, "..", "src-tauri/src/mod_engine/catalog/effects.json",
 ), "utf8"));
@@ -564,6 +568,80 @@ test("Owned Joker rarity choices include vanilla and live custom rarities", asyn
   ], "Custom rarities appear without reloading the rule catalog");
 });
 
+test("Booster Type selects vanilla and live custom packs for every booster trigger", async () => {
+  const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
+  const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));
+  const common = readCatalog("common.json");
+  const balatroUtils = loadTypeScript("src/lib/balatro/balatro-utils.ts", {
+    "@/lib/items/unlock-utils": {},
+  });
+  const catalog = loadTypeScript("src/components/rule-builder/rule-catalog.ts", {
+    "@phosphor-icons/react": {},
+    "@/lib/balatro/balatro-utils": balatroUtils,
+    "@/lib/services/entity-bridge": { entityBridge: {
+      async getRulebuilderCatalog() {
+        return {
+          triggers: readCatalog("triggers.json"), effects: readCatalog("effects.json"),
+          conditions: readCatalog("conditions.json"), generic_triggers: common.genericTriggers,
+          all_objects: common.allObjects, trigger_groups: common.triggerGroups,
+          option_sources: common.optionSources, option_sets: common.optionSets,
+        };
+      },
+    } },
+  });
+  await catalog.initializeRuleCatalogFromRust();
+  const condition = catalog.getConditionTypeById("booster_type");
+  const booster = condition.params.find((parameter) => parameter.id === "booster_key");
+  assert.equal(booster.type, "select");
+  assert.equal(booster.optionSource, "boosters");
+  assert.equal(booster.default, "p_arcana_normal_1");
+  assert.deepEqual(Array.from(booster.options(), (option) => option.value),
+    Array.from(balatroUtils.VANILLA_BOOSTERS, (option) => option.value));
+  for (const trigger of ["booster_opened", "booster_skipped", "booster_exited"]) {
+    assert.ok(catalog.getConditionsForTrigger(trigger, "joker")
+      .some((entry) => entry.id === condition.id), trigger);
+  }
+  const defaultParams = Object.fromEntries(condition.params.map((parameter) => [
+    parameter.id, { value: parameter.default, valueType: "text" },
+  ]));
+  assert.equal(generateBoosterTypeConditionTitle({ params: defaultParams }, condition),
+    "If Booster Type = Arcana Pack 1");
+
+  balatroUtils.DataRegistry.update(
+    [], [], [], [], [], [{ objectKey: "custom_pack", name: "Custom Pack", booster_type: "joker" }],
+    [], [], [], [], [], "test",
+  );
+  assert.deepEqual(Array.from(booster.options(), (option) => option.value), [
+    ...Array.from(balatroUtils.VANILLA_BOOSTERS, (option) => option.value), "p_test_custom_pack",
+  ], "Custom pack choices refresh without reloading the catalog");
+  assert.equal(generateBoosterTypeConditionTitle({ params: {
+    operator: { value: "not_equal" }, booster_key: { value: "p_test_custom_pack" },
+  } }, condition), "If Booster Type ≠ Custom Pack");
+});
+
+test("Booster Type titles and saved parameters preserve legacy pack selections", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = catalog.getConditionTypeById("booster_type");
+  const legacyParams = {
+    operator: { value: "not_equal" }, value: { value: "p_buffoon_normal_1", valueType: "text" },
+  };
+  const migrated = normalizeBoosterTypeConditionParams(legacyParams);
+  assert.deepEqual(plainSnapshot(migrated.booster_key), legacyParams.value);
+  assert.equal(Object.hasOwn(legacyParams, "booster_key"), false, "Loading does not mutate saved params");
+  assert.equal(generateBoosterTypeConditionTitle({ params: legacyParams }, condition),
+    "If Booster Type ≠ p_buffoon_normal_1");
+  const canonical = { ...legacyParams, booster_key: { value: "p_arcana_normal_1" } };
+  assert.equal(normalizeBoosterTypeConditionParams(canonical).booster_key.value, "p_arcana_normal_1",
+    "An explicit current selection wins over the legacy parameter");
+  assert.equal(normalizeBoosterTypeConditionParams({
+    ...legacyParams, booster_key: { value: "" },
+  }).booster_key.value, "p_buffoon_normal_1", "An empty canonical field does not discard legacy data");
+  for (const params of [{}, { operator: { value: "equals" }, booster_key: { value: "" } }]) {
+    assert.equal(generateBoosterTypeConditionTitle({ params }, condition),
+      "If Booster Type = Choose a booster");
+  }
+});
+
 async function searchablePalette(itemType = "joker", trigger = null) {
   const catalog = await paletteCatalogPromise;
   const categories = [
@@ -990,7 +1068,7 @@ test("the real builder open and item-switch effects reset history before undo", 
   openItem("empty", []);
 });
 
-function builderHandler(name, history, savedRules, selection = {}) {
+function builderHandler(name, history, savedRules, selection = {}, dependencies = {}) {
   const filePath = path.join(__dirname, "..", "src/components/rule-builder/rule-builder.tsx");
   const source = ts.createSourceFile(filePath, fs.readFileSync(filePath, "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -1015,6 +1093,7 @@ function builderHandler(name, history, savedRules, selection = {}) {
     createConditionFromType: (type) => ({ id: `condition-${++nextId}`, type, negate: false, params: {} }),
     setSelectedItem: (item) => selectedItems.push(plainSnapshot(item)),
     setSelectedRuleIds: (ids) => selectedRules.push(Array.from(ids)),
+    ...dependencies,
   };
   const compiled = ts.transpileModule(`(${initializer.getText(source)})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }, fileName: filePath,
@@ -1024,6 +1103,37 @@ function builderHandler(name, history, savedRules, selection = {}) {
     selectedItems, selectedRules,
   };
 }
+
+test("the builder preserves saved Booster Type keys before defaults and shows their actual title", async () => {
+  const catalog = await paletteCatalogPromise;
+  const definition = catalog.getConditionTypeById("booster_type");
+  const { detectValueType } = loadTypeScript("src/lib/rules/value-type-utils.ts");
+  const resolveParameterDefaultValue = builderHandler("resolveParameterDefaultValue", {}, []).run;
+  const normalizeParamsForDefinition = builderHandler("normalizeParamsForDefinition", {}, [], {}, {
+    detectValueType, resolveParameterDefaultValue,
+  }).run;
+  const normalize = builderHandler("normalizeConditionFromCatalog", {}, [], {}, {
+    getConditionTypeById: catalog.getConditionTypeById,
+    normalizeParamsForDefinition, normalizeBoosterTypeConditionParams,
+  }).run;
+  const title = builderHandler("generateAutoTitle", {}, [], {}, {
+    generateBoosterTypeConditionTitle,
+  }).run;
+  const legacyCondition = {
+    id: "condition", type: "booster_type", negate: false,
+    params: { operator: { value: "equals" }, value: { value: "p_buffoon_normal_1", valueType: "text" } },
+  };
+  const loadedCondition = normalize(legacyCondition);
+  assert.equal(loadedCondition.params.booster_key.value, "p_buffoon_normal_1",
+    "The new Arcana default does not replace an existing legacy selection");
+  assert.equal(title(loadedCondition, definition, true), "If Booster Type = p_buffoon_normal_1");
+  assert.equal(Object.hasOwn(legacyCondition.params, "booster_key"), false);
+  const newCondition = builderHandler("createConditionFromType", {}, [], {}, {
+    getConditionType: catalog.getConditionTypeById, resolveParameterDefaultValue, detectValueType,
+  }).run("booster_type");
+  assert.equal(newCondition.params.booster_key.value, "p_arcana_normal_1");
+  assert.equal(title(newCondition, definition, true), "If Booster Type = p_arcana_normal_1");
+});
 
 test("adding a condition selects its actual group with deferred history updates", () => {
   for (const mode of ["new group", "first group", "selected group"]) {

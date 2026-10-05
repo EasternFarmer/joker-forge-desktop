@@ -2023,6 +2023,98 @@ fn rule_option_case(
         "code":Emitter::new().emit_chunk(&chunk),"prepare":prepare,"invoke":invoke,"verify":verify}));
 }
 
+fn append_booster_condition_cases(cases: &mut Vec<Value>) {
+    let emit = |trigger: &str, condition_type: &str, parameter: &str,
+                key: Option<&str>, operator: &str, negate: bool| {
+        let mut params = json!({"operator":{"value":operator}});
+        if let Some(key) = key {
+            params[parameter] = json!({"value":key,"valueType":"text"});
+        }
+        let input: export::JokerDataInput = serde_json::from_value(json!({
+            "objectKey":"runtime_test", "name":"Runtime Test", "description":"Test",
+            "cost":4, "rarity":"common",
+            "rules":[{"id":"booster", "trigger":trigger, "conditionGroups":[{
+                "operator":"and", "conditions":[{
+                    "id":"booster_condition", "type":condition_type, "negate":negate,
+                    "params":params
+                }]
+            }], "effects":[{"id":"bonus", "type":"add_mult", "params":{"value":{"value":9}}}]}]
+        })).unwrap();
+        let definition = export::joker_data_to_def(&input,"mod",export::AtlasPosInput{x:0,y:0},None);
+        Emitter::new().emit_chunk(&compile_joker(&definition,"mod"))
+    };
+    let verify = |expected: bool| if expected {
+        "assert(comparison_result and comparison_result.mult==9)"
+    } else {
+        "assert(not comparison_result or comparison_result.mult==nil)"
+    };
+    for (shape, trigger, context) in [
+        ("opened_card", "booster_opened", "{open_booster=true,main_eval=true,card={config={center={key='PACK_KEY'}}}}"),
+        ("opened_center", "booster_opened", "{open_booster=true,main_eval=true,booster={key='PACK_KEY'}}"),
+        ("skipped_center", "booster_skipped", "{skipping_booster=true,booster={key='PACK_KEY'}}"),
+        ("exited_center", "booster_exited", "{ending_booster=true,booster={key='PACK_KEY'}}"),
+    ] {
+        for (match_name, actual_key, matches) in [
+            ("matching", "p_arcana_normal_1", true),
+            ("different", "p_celestial_normal_1", false),
+        ] {
+            for operator in ["equals", "not_equal"] {
+                for negate in [false, true] {
+                    let expected = (if operator == "equals" { matches } else { !matches }) != negate;
+                    cases.push(json!({"kind":"rule_options",
+                        "name":format!("booster_condition_{shape}_{match_name}_{operator}_negate_{negate}"),
+                        "code":emit(trigger,"booster_type","booster_key",Some("p_arcana_normal_1"),operator,negate),
+                        "invoke":format!("comparison_result=test_definition:calculate(actor,{})",context.replace("PACK_KEY",actual_key)),
+                        "verify":verify(expected)
+                    }));
+                }
+            }
+        }
+    }
+    for (name, trigger, context) in [
+        ("opened_missing", "booster_opened", "{open_booster=true,main_eval=true}"),
+        ("opened_empty_card", "booster_opened", "{open_booster=true,main_eval=true,card={}}"),
+        ("opened_empty_center", "booster_opened", "{open_booster=true,main_eval=true,card={config={center={}}},booster={}}"),
+        ("skipped_missing", "booster_skipped", "{skipping_booster=true}"),
+        ("exited_missing", "booster_exited", "{ending_booster=true}"),
+    ] {
+        for operator in ["equals", "not_equal"] {
+            cases.push(json!({"kind":"rule_options",
+                "name":format!("booster_condition_{name}_{operator}"),
+                "code":emit(trigger,"booster_type","booster_key",Some("p_arcana_normal_1"),operator,false),
+                "invoke":format!("comparison_result=test_definition:calculate(actor,{context})"),
+                "verify":verify(false)
+            }));
+        }
+    }
+    for (name, condition_type, parameter, key, context) in [
+        ("legacy_value", "booster_type", "value", "p_arcana_normal_1",
+            "{skipping_booster=true,booster={key='p_arcana_normal_1'}}"),
+        ("web_import", "booster_pack_type", "value", "p_arcana_normal_1",
+            "{skipping_booster=true,booster={key='p_arcana_normal_1'}}"),
+        ("custom_full_key", "booster_type", "booster_key", "p_other_quote'\\key",
+            r#"{skipping_booster=true,booster={key="p_other_quote'\\key"}}"#),
+    ] {
+        cases.push(json!({"kind":"rule_options", "name":format!("booster_condition_{name}"),
+            "code":emit("booster_skipped",condition_type,parameter,Some(key),"equals",false),
+            "invoke":format!("comparison_result=test_definition:calculate(actor,{context})"),
+            "verify":verify(true)
+        }));
+    }
+    for (name, key) in [("missing_selection", None), ("blank_selection", Some(" \t "))] {
+        cases.push(json!({"kind":"rule_options", "name":format!("booster_condition_{name}"),
+            "code":emit("booster_skipped","booster_type","booster_key",key,"equals",false),
+            "invoke":"comparison_result=test_definition:calculate(actor,{skipping_booster=true,booster={key='p_arcana_normal_1'}})",
+            "verify":verify(false)
+        }));
+    }
+    cases.push(json!({"kind":"rule_options", "name":"booster_condition_legacy_not_equals",
+        "code":emit("booster_skipped","booster_type","booster_key",Some("p_arcana_normal_1"),"not_equals",false),
+        "invoke":"comparison_result=test_definition:calculate(actor,{skipping_booster=true,booster={key='p_celestial_normal_1'}})",
+        "verify":verify(true)
+    }));
+}
+
 fn append_booster_option_cases(cases: &mut Vec<Value>) {
     rule_option_case(cases,"booster_voucher_choice_add","voucher","edit_booster_packs",
         json!({"selected_type":"choice","operation":"add","value":2}),"",
@@ -3439,6 +3531,7 @@ fn main() {
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
     append_booster_option_cases(&mut cases);
+    append_booster_condition_cases(&mut cases);
     append_joker_selection_and_key_cases(&mut cases);
     append_owned_joker_cases(&mut cases);
     append_joker_selection_size_cases(&mut cases);

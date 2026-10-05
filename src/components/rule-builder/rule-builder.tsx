@@ -102,6 +102,10 @@ import { usePanelState } from "./panel-state";
 import { useRuleHistory } from "./use-rule-history";
 import { getChanceGroupOptions } from "./probability-sources";
 import {
+  generateBoosterTypeConditionTitle,
+  normalizeBoosterTypeConditionParams,
+} from "./booster-type-condition";
+import {
   getSelectedCondition,
   getSelectedEffect,
   getSelectedLoopGroup,
@@ -394,7 +398,12 @@ const normalizeConditionFromCatalog = (condition: Condition): Condition => {
   if (!definition) return condition;
   return {
     ...condition,
-    params: normalizeParamsForDefinition(condition.params, definition.params),
+    params: normalizeParamsForDefinition(
+      condition.type === "booster_type"
+        ? normalizeBoosterTypeConditionParams(condition.params)
+        : condition.params,
+      definition.params,
+    ),
   };
 };
 
@@ -1860,6 +1869,10 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     typeDefinition: GlobalConditionTypeDefinition | GlobalEffectTypeDefinition,
     isCondition: boolean,
   ): string => {
+    if (isCondition && typeDefinition.id === "booster_type") {
+      return generateBoosterTypeConditionTitle(item, typeDefinition);
+    }
+
     if (
       isCondition &&
       typeDefinition.id === "check_flag" &&

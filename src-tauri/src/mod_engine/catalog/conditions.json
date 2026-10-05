@@ -4125,9 +4125,10 @@
       },
       {
         "id": "booster_key",
-        "type": "text",
-        "label": "Booster Key",
-        "default": ""
+        "type": "select",
+        "label": "Booster Pack",
+        "optionSource": "boosters",
+        "default": "p_arcana_normal_1"
       }
     ],
     "category": "Game State"

@@ -366,12 +366,27 @@ pub fn probability_part_compare(
 /// Booster Type: check booster pack type.
 pub fn booster_type(condition: &ConditionDef) -> Option<Expr> {
     let operator = str_param(condition, &["operator"]).unwrap_or("equals");
-    let booster_key = str_param(condition, &["booster_key"]).unwrap_or("");
+    let Some(booster_key) = str_param(condition, &["booster_key", "value"]) else {
+        return Some(super::utils::invalid_condition("booster_type", "no booster selected"));
+    };
 
-    Some(comparison_op(
-        operator,
-        lua_path(&["context", "booster", "config", "center", "key"]),
-        lua_str(booster_key),
+    let pack_key = lua_or(
+        lua_and(
+            lua_path(&["context", "booster"]),
+            lua_path(&["context", "booster", "key"]),
+        ),
+        lua_and_chain(vec![
+            lua_path(&["context", "open_booster"]),
+            lua_path(&["context", "card"]),
+            lua_path(&["context", "card", "config"]),
+            lua_path(&["context", "card", "config", "center"]),
+            lua_path(&["context", "card", "config", "center", "key"]),
+        ]),
+    );
+
+    Some(lua_and(
+        pack_key.clone(),
+        comparison_op(operator, pack_key, lua_str(booster_key)),
     ))
 }
 
