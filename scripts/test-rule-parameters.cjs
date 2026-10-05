@@ -587,3 +587,437 @@ test("condition and effect searches use the same word matching within compatible
   const expected = Array.from(palette.catalog.getEffectsForTrigger("hand_played", "joker"), (effect) => effect.id).sort();
   assert.deepEqual(palette.search("").sort(), expected, "Search does not expand the compatibility set");
 });
+
+// Queue reducer actions until the next render, as React does for batched events.
+function ruleHistoryHarness() {
+  const slots = [];
+  const pendingActions = [];
+  let hookIndex = 0;
+  const react = {
+    useReducer(reducer, initial, initialize) {
+      const index = hookIndex++;
+      if (!slots[index]) {
+        slots[index] = {
+          state: initialize ? initialize(initial) : initial,
+          dispatch: (action) => pendingActions.push({ index, action }),
+        };
+      }
+      slots[index].reducer = reducer;
+      return [slots[index].state, slots[index].dispatch];
+    },
+    useCallback(callback, dependencies) {
+      const index = hookIndex++;
+      const previous = slots[index];
+      if (!previous || dependencies.length !== previous.dependencies.length
+        || dependencies.some((value, position) => !Object.is(value, previous.dependencies[position]))) {
+        slots[index] = { callback, dependencies };
+      }
+      return slots[index].callback;
+    },
+    useMemo: (factory) => factory(),
+  };
+  const { useRuleHistory } = loadTypeScript("src/components/rule-builder/use-rule-history.ts", {
+    react: { default: react, ...react },
+  });
+  const render = () => {
+    for (const { index, action } of pendingActions.splice(0)) {
+      slots[index].state = slots[index].reducer(slots[index].state, action);
+    }
+    hookIndex = 0;
+    return useRuleHistory();
+  };
+  return { render, initial: render() };
+}
+
+function historyRules(id = "joker", chips = 10) {
+  return [{
+    id, trigger: "hand_played", blueprintCompatible: true,
+    position: { x: 20, y: 40 }, conditionGroups: [], randomGroups: [], loops: [],
+    effects: [{ id: `${id}-chips`, type: "add_chips", params: { value: { value: chips } } }],
+  }];
+}
+
+const historyChips = (history) => history.rules[0]?.effects[0]?.params.value.value;
+const plainSnapshot = (value) => JSON.parse(JSON.stringify(value));
+
+test("opening populated rule history makes initial undo and redo harmless", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  const savedRules = historyRules();
+  callbacks.resetHistory(savedRules);
+  callbacks.resetHistory(savedRules);
+  callbacks.handleUndo();
+  callbacks.handleRedo();
+  let history = harness.render();
+  assert.deepEqual(plainSnapshot(history.rules), savedRules);
+  assert.equal(history.canUndo, false);
+  assert.equal(history.canRedo, false);
+  assert.equal(history.historyTimeline.length, 1);
+  assert.equal(history.historyCurrentIndex, 0);
+  savedRules[0].effects[0].params.value.value = 999;
+  history = harness.render();
+  assert.equal(historyChips(history), 10, "Loaded rules are independent of the saved item object");
+});
+
+test("the first rule in a genuinely empty builder can undo to empty and redo", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory([]);
+  callbacks.handleUndo();
+  assert.deepEqual(plainSnapshot(harness.render().rules), []);
+  callbacks.setRules((rules) => [...rules, ...historyRules("new")]);
+  assert.deepEqual(plainSnapshot(harness.render().rules), historyRules("new"));
+  callbacks.handleUndo();
+  let history = harness.render();
+  assert.deepEqual(plainSnapshot(history.rules), []);
+  assert.equal(history.canRedo, true);
+  callbacks.handleRedo();
+  history = harness.render();
+  assert.deepEqual(plainSnapshot(history.rules), historyRules("new"));
+  assert.equal(history.canRedo, false);
+});
+
+test("real rule changes undo and redo the complete saved blocks", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules());
+  harness.render();
+  const edited = historyRules("joker", 25);
+  callbacks.setRules(edited);
+  let history = harness.render();
+  assert.equal(historyChips(history), 25);
+  assert.equal(history.canUndo, true);
+  assert.equal(history.canRedo, false);
+  edited[0].position.x = 999;
+  edited[0].effects[0].params.value.value = 999;
+  callbacks.handleUndo();
+  history = harness.render();
+  assert.deepEqual(plainSnapshot(history.rules), historyRules());
+  assert.equal(history.canUndo, false);
+  assert.equal(history.canRedo, true);
+  callbacks.handleRedo();
+  history = harness.render();
+  assert.deepEqual(plainSnapshot(history.rules), historyRules("joker", 25),
+    "Later input mutations do not corrupt the redo snapshot");
+});
+
+test("queued edits and rapid undo redo always operate on the latest history", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  const increaseChips = (rules) => rules.map((rule) => ({
+    ...rule, effects: rule.effects.map((effect) => ({
+      ...effect, params: { ...effect.params, value: { value: effect.params.value.value + 1 } },
+    })),
+  }));
+  callbacks.resetHistory(historyRules());
+  callbacks.setRules(increaseChips);
+  callbacks.setRules(increaseChips);
+  callbacks.handleUndo();
+  callbacks.handleUndo();
+  callbacks.handleRedo();
+  let history = harness.render();
+  assert.equal(historyChips(history), 11);
+  assert.equal(history.historyCurrentIndex, 1);
+  assert.equal(history.canUndo, true);
+  assert.equal(history.canRedo, true);
+  for (const name of ["setRules", "resetHistory", "handleUndo", "handleRedo", "restoreHistoryAt"]) {
+    assert.equal(history[name], callbacks[name], `${name} remains stable between renders`);
+  }
+  callbacks.handleRedo();
+  callbacks.handleUndo();
+  callbacks.handleRedo();
+  history = harness.render();
+  assert.equal(historyChips(history), 12);
+  assert.equal(history.canRedo, false);
+});
+
+test("equivalent rule updates and unchanged positions preserve available redo", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules());
+  callbacks.setRules(historyRules("joker", 25));
+  callbacks.handleUndo();
+  let history = harness.render();
+  callbacks.setRules((rules) => rules);
+  callbacks.setRules((rules) => plainSnapshot(rules));
+  callbacks.setRules((rules) => rules.map((rule) => ({
+    ...rule, position: { x: rule.position.x, y: rule.position.y },
+  })));
+  history = harness.render();
+  assert.equal(history.historyTimeline.length, 2);
+  assert.equal(history.historyCurrentIndex, 0);
+  assert.equal(history.canRedo, true, "A no-op drag or update cannot erase redo");
+  callbacks.handleRedo();
+  assert.equal(historyChips(harness.render()), 25);
+});
+
+test("editing after undo replaces only the abandoned future", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules());
+  callbacks.setRules(historyRules("joker", 20));
+  callbacks.setRules(historyRules("joker", 30));
+  callbacks.handleUndo();
+  callbacks.setRules(historyRules("joker", 40));
+  callbacks.handleRedo();
+  let history = harness.render();
+  assert.equal(historyChips(history), 40);
+  assert.equal(history.canRedo, false);
+  assert.equal(history.historyTimeline.length, 3);
+  callbacks.handleUndo();
+  history = harness.render();
+  assert.equal(historyChips(history), 20, "The earlier real edit is retained");
+});
+
+test("reopening or switching items establishes a fresh undo baseline", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules("first"));
+  callbacks.setRules(historyRules("first", 20));
+  callbacks.handleUndo();
+  harness.render();
+  for (const savedRules of [historyRules("first", 30), [], historyRules("second", 50)]) {
+    callbacks.resetHistory(savedRules);
+    callbacks.handleUndo();
+    callbacks.handleRedo();
+    const history = harness.render();
+    assert.deepEqual(plainSnapshot(history.rules), savedRules);
+    assert.equal(history.canUndo, false);
+    assert.equal(history.canRedo, false);
+    assert.equal(history.historyTimeline.length, 1);
+  }
+});
+
+test("history panel jumps preserve undo redo and branch from the selected state", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules("joker", 0));
+  for (const amount of [1, 2, 3]) callbacks.setRules(historyRules("joker", amount));
+  callbacks.restoreHistoryAt(0);
+  let history = harness.render();
+  assert.equal(historyChips(history), 0);
+  assert.equal(history.canUndo, false);
+  assert.equal(history.canRedo, true);
+  callbacks.restoreHistoryAt(2);
+  callbacks.restoreHistoryAt(2);
+  history = harness.render();
+  assert.equal(historyChips(history), 2);
+  assert.equal(history.historyCurrentIndex, 2);
+  assert.equal(history.historyTimeline.length, 4);
+  assert.equal(history.canUndo, true);
+  assert.equal(history.canRedo, true);
+  callbacks.handleRedo();
+  callbacks.handleUndo();
+  callbacks.setRules(historyRules("joker", 9));
+  history = harness.render();
+  assert.equal(historyChips(history), 9);
+  assert.equal(history.canRedo, false);
+  callbacks.handleUndo();
+  assert.equal(historyChips(harness.render()), 2);
+});
+
+test("bounded rule history retains the newest 64 undo steps and all corresponding redo", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules("joker", 0));
+  for (let amount = 1; amount <= 70; amount++) callbacks.setRules(historyRules("joker", amount));
+  let history = harness.render();
+  assert.equal(history.historyTimeline.length, 65);
+  assert.equal(history.historyCurrentIndex, 64);
+  for (let count = 0; count < 75; count++) callbacks.handleUndo();
+  history = harness.render();
+  assert.equal(historyChips(history), 6);
+  assert.equal(history.canUndo, false);
+  assert.equal(history.canRedo, true);
+  for (let count = 0; count < 75; count++) callbacks.handleRedo();
+  history = harness.render();
+  assert.equal(historyChips(history), 70);
+  assert.equal(history.canRedo, false);
+  assert.equal(history.historyTimeline.length, 65);
+});
+
+function ruleBuilderInitialization(history) {
+  const filePath = path.join(__dirname, "..", "src/components/rule-builder/rule-builder.tsx");
+  const source = ts.createSourceFile(filePath, fs.readFileSync(filePath, "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let initialization;
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === "useEffect") {
+      const dependencies = node.arguments[1];
+      if (dependencies && ts.isArrayLiteralExpression(dependencies)
+        && dependencies.elements.length === 2
+        && ts.isIdentifier(dependencies.elements[0]) && dependencies.elements[0].text === "isOpen"
+        && ts.isPropertyAccessExpression(dependencies.elements[1])
+        && dependencies.elements[1].expression.getText(source) === "item"
+        && dependencies.elements[1].name.text === "id") {
+        initialization = node.arguments[0];
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(initialization, "The real builder item/open initialization effect is present");
+
+  // Run that effect with the real history hook; other editor state is incidental.
+  const context = {
+    isOpen: true, item: { id: "first" }, existingRules: [], itemType: "joker", reforged: false,
+    normalizeRuleForBuilder: (rule) => rule, cloneRulesSnapshot: plainSnapshot,
+    resetHistory: history.resetHistory, setRules: history.setRules,
+    setTimeout: () => 1, clearTimeout() {},
+  };
+  for (const name of [
+    "customCodeDebounceRef", "customCodeRef", "lastGeneratedCleanRef", "lastGeneratedSegmentsRef",
+    "lastSegmentsRef", "linkedFieldRangesRef", "fieldSourceRulesRef", "editorCodeRef",
+    "prevRulesSnapshotRef", "rulesRef", "pendingEditorCodeRef",
+  ]) context[name] = { current: null };
+  context.editorRevisionRef = { current: 0 };
+  context.pendingFieldValuesRef = { current: new Map() };
+  context.editedFieldKeysRef = { current: new Set() };
+  for (const name of [
+    "setCustomCode", "setSelectedItem", "setSelectedRuleIds", "setSelectionRect", "setIsDragSelecting",
+    "setSelectedGameVariable", "setLiveCodePreviewTarget", "setLiveCodeWidthPercent",
+    "setIsInitialLoadComplete", "setIsFirstSelection", "setShowNoRulesMessage",
+  ]) context[name] = () => {};
+  const compiled = ts.transpileModule(`(${initialization.getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }, fileName: filePath,
+  }).outputText;
+  const run = vm.runInNewContext(compiled, context, { filename: filePath });
+  return { context, run };
+}
+
+test("the real builder open and item-switch effects reset history before undo", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  const initialization = ruleBuilderInitialization(callbacks);
+  const openItem = (id, rules) => {
+    initialization.context.isOpen = true;
+    initialization.context.item = { id };
+    initialization.context.existingRules = rules;
+    initialization.run();
+    callbacks.handleUndo();
+    callbacks.handleRedo();
+    const history = harness.render();
+    assert.deepEqual(plainSnapshot(history.rules), rules);
+    assert.equal(history.canUndo, false);
+    assert.equal(history.canRedo, false);
+  };
+  openItem("first", historyRules("first"));
+  callbacks.setRules(historyRules("first", 20));
+  harness.render();
+  initialization.context.isOpen = false;
+  initialization.run();
+  openItem("first", historyRules("first", 20));
+  openItem("second", historyRules("second", 30));
+  openItem("empty", []);
+});
+
+function builderHandler(name, history, savedRules, selection = {}) {
+  const filePath = path.join(__dirname, "..", "src/components/rule-builder/rule-builder.tsx");
+  const source = ts.createSourceFile(filePath, fs.readFileSync(filePath, "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let initializer;
+  const visit = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+      initializer = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(initializer, `The real ${name} handler is present`);
+  let nextId = 0;
+  const selectedItems = [];
+  const selectedRules = [];
+  const context = {
+    rulesRef: { current: savedRules }, setRules: history.setRules,
+    selectedItem: selection.item ?? { type: "trigger", ruleId: savedRules[0]?.id },
+    selectedRuleIds: selection.ids ?? [], selectedRuleIdSet: new Set(selection.ids ?? []),
+    crypto: { randomUUID: () => `new-${++nextId}` },
+    useCallback: (callback) => callback,
+    createConditionFromType: (type) => ({ id: `condition-${++nextId}`, type, negate: false, params: {} }),
+    setSelectedItem: (item) => selectedItems.push(plainSnapshot(item)),
+    setSelectedRuleIds: (ids) => selectedRules.push(Array.from(ids)),
+  };
+  const compiled = ts.transpileModule(`(${initializer.getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }, fileName: filePath,
+  }).outputText;
+  return {
+    run: vm.runInNewContext(compiled, context, { filename: filePath }),
+    selectedItems, selectedRules,
+  };
+}
+
+test("adding a condition selects its actual group with deferred history updates", () => {
+  for (const mode of ["new group", "first group", "selected group"]) {
+    const harness = ruleHistoryHarness();
+    const callbacks = harness.initial;
+    const savedRules = historyRules();
+    if (mode !== "new group") savedRules[0].conditionGroups = [
+      { id: "first-group", operator: "and", conditions: [] },
+      { id: "second-group", operator: "or", conditions: [] },
+    ];
+    callbacks.resetHistory(savedRules);
+    const loadedRules = harness.render().rules;
+    const handler = builderHandler("addCondition", callbacks, loadedRules,
+      mode === "selected group" ? {
+        item: { type: "condition", ruleId: "joker", groupId: "second-group" },
+      } : {});
+    handler.run("hand_type");
+    const selected = handler.selectedItems.at(-1);
+    assert.equal(selected?.type, "condition", "Selection is made before reducer evaluation");
+    assert.equal(typeof selected.groupId, "string", "The new group ID is available immediately");
+    const editedRules = harness.render().rules;
+    const group = editedRules[0].conditionGroups.find((entry) => entry.id === selected.groupId);
+    assert.ok(group.conditions.some((condition) => condition.id === selected.itemId), mode);
+    if (mode !== "new group") assert.equal(group.id,
+      mode === "selected group" ? "second-group" : "first-group");
+    callbacks.handleUndo();
+    assert.deepEqual(plainSnapshot(harness.render().rules), savedRules);
+    callbacks.handleRedo();
+    assert.deepEqual(plainSnapshot(harness.render().rules), plainSnapshot(editedRules));
+  }
+});
+
+test("duplicating one rule immediately selects a stable undoable copy", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  callbacks.resetHistory(historyRules());
+  const loaded = harness.render().rules;
+  const handler = builderHandler("duplicateRule", callbacks, loaded);
+  handler.run("joker");
+  const selected = handler.selectedItems.at(-1);
+  assert.equal(selected?.type, "trigger", "Selection is made before reducer evaluation");
+  assert.notEqual(selected.ruleId, "joker");
+  const edited = harness.render().rules;
+  assert.equal(edited.length, 2);
+  assert.equal(edited[1].id, selected.ruleId);
+  assert.deepEqual(plainSnapshot(edited[1].position), { x: 50, y: 70 });
+  assert.notEqual(edited[1].effects[0].id, edited[0].effects[0].id);
+  callbacks.handleUndo();
+  assert.deepEqual(plainSnapshot(harness.render().rules), historyRules());
+  callbacks.handleRedo();
+  assert.deepEqual(plainSnapshot(harness.render().rules), plainSnapshot(edited));
+});
+
+test("duplicating multiple rules selects all copies before deferred history evaluation", () => {
+  const harness = ruleHistoryHarness();
+  const callbacks = harness.initial;
+  const savedRules = [...historyRules("first"), ...historyRules("second")];
+  callbacks.resetHistory(savedRules);
+  const loaded = harness.render().rules;
+  const handler = builderHandler("duplicateSelectedRules", callbacks, loaded, {
+    ids: ["first", "second"],
+  });
+  handler.run();
+  const selected = handler.selectedRules.at(-1);
+  assert.equal(selected?.length, 2, "Selected copy IDs exist before reducer evaluation");
+  assert.equal(new Set(selected).size, 2);
+  assert.equal(handler.selectedItems.at(-1), null);
+  const edited = harness.render().rules;
+  assert.equal(edited.length, 4);
+  assert.deepEqual(Array.from(edited.slice(2), (rule) => rule.id), selected);
+  callbacks.handleUndo();
+  assert.deepEqual(plainSnapshot(harness.render().rules), savedRules);
+  callbacks.handleRedo();
+  assert.deepEqual(plainSnapshot(harness.render().rules), plainSnapshot(edited));
+});

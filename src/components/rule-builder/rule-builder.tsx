@@ -99,6 +99,7 @@ import { motion } from "framer-motion";
 import { UserConfigContext } from "@/components/Contexts";
 import { detectValueType } from "@/lib/rules/value-type-utils";
 import { usePanelState } from "./panel-state";
+import { useRuleHistory } from "./use-rule-history";
 import {
   getSelectedCondition,
   getSelectedEffect,
@@ -131,7 +132,6 @@ export type ItemData = any;
 type ItemType = "joker" | "consumable" | "card" | "voucher" | "deck";
 
 type SnippetNodeParams = Record<string, unknown>;
-const RULE_HISTORY_LIMIT = 64;
 
 type LiveCodeBlockPreviewTarget = {
   type: "trigger" | "condition" | "effect";
@@ -610,7 +610,18 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const getConditionType = getConditionTypeById;
   const getEffectType = getEffectTypeById;
 
-  const [rules, setRules] = useState<Rule[]>([]);
+  const {
+    rules,
+    setRules,
+    resetHistory,
+    handleUndo,
+    handleRedo,
+    restoreHistoryAt,
+    historyTimeline,
+    historyCurrentIndex,
+    canUndo,
+    canRedo,
+  } = useRuleHistory();
   const rulesRef = useRef<Rule[]>(rules);
   rulesRef.current = rules;
   const [selectedItem, setSelectedItem] = useState<SelectedItem>(null);
@@ -672,10 +683,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     originY: number;
     scale: number;
   } | null>(null);
-  const historyPastRef = useRef<Rule[][]>([]);
-  const historyFutureRef = useRef<Rule[][]>([]);
-  const historyPrevRulesRef = useRef<Rule[]>([]);
-  const suppressHistoryRef = useRef(false);
   const copiedRulesRef = useRef<Rule[]>([]);
   const pasteOffsetStepRef = useRef(1);
 
@@ -1244,74 +1251,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     [setSingleSelectedRule],
   );
 
-  const handleUndo = useCallback(() => {
-    const past = historyPastRef.current;
-    if (past.length === 0) return;
-
-    const previous = past[past.length - 1];
-    historyPastRef.current = past.slice(0, -1);
-    historyFutureRef.current = [
-      ...historyFutureRef.current,
-      cloneRulesSnapshot(rules),
-    ].slice(-RULE_HISTORY_LIMIT);
-    suppressHistoryRef.current = true;
-    const snapshot = cloneRulesSnapshot(previous);
-    historyPrevRulesRef.current = snapshot;
-    setRules(snapshot);
-  }, [rules]);
-
-  const handleRedo = useCallback(() => {
-    const future = historyFutureRef.current;
-    if (future.length === 0) return;
-
-    const next = future[future.length - 1];
-    historyFutureRef.current = future.slice(0, -1);
-    historyPastRef.current = [
-      ...historyPastRef.current,
-      cloneRulesSnapshot(rules),
-    ].slice(-RULE_HISTORY_LIMIT);
-    suppressHistoryRef.current = true;
-    const snapshot = cloneRulesSnapshot(next);
-    historyPrevRulesRef.current = snapshot;
-    setRules(snapshot);
-  }, [rules]);
-
-  const restoreHistoryAt = useCallback(
-    (targetIndex: number) => {
-      const past = historyPastRef.current;
-      const future = historyFutureRef.current;
-      const timeline = [...past, rules, ...future.slice().reverse()];
-      const currentIndex = past.length;
-
-      if (
-        targetIndex < 0 ||
-        targetIndex >= timeline.length ||
-        targetIndex === currentIndex
-      ) {
-        return;
-      }
-
-      const target = cloneRulesSnapshot(timeline[targetIndex]);
-      const newPast = timeline
-        .slice(0, targetIndex)
-        .map((snapshot) => cloneRulesSnapshot(snapshot))
-        .slice(-RULE_HISTORY_LIMIT);
-      const futureChronological = timeline
-        .slice(targetIndex + 1)
-        .map((snapshot) => cloneRulesSnapshot(snapshot));
-      const newFuture = futureChronological
-        .reverse()
-        .slice(0, RULE_HISTORY_LIMIT);
-
-      historyPastRef.current = newPast;
-      historyFutureRef.current = newFuture;
-      suppressHistoryRef.current = true;
-      historyPrevRulesRef.current = target;
-      setRules(target);
-    },
-    [rules],
-  );
-
   const handleRecenter = () => {
     if (transformRef.current) {
       transformRef.current.resetTransform();
@@ -1486,11 +1425,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       editorRevisionRef.current += 1;
       prevRulesSnapshotRef.current = "";
       rulesRef.current = initialSnapshot;
-      historyPastRef.current = [];
-      historyFutureRef.current = [];
-      historyPrevRulesRef.current = initialSnapshot;
-      suppressHistoryRef.current = true;
-      setRules(initialSnapshot);
+      resetHistory(initialSnapshot);
       setSelectedItem(null);
       setSelectedRuleIds([]);
       setSelectionRect(null);
@@ -1521,26 +1456,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       setIsDragSelecting(false);
     }
   }, [isOpen, item.id]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    if (suppressHistoryRef.current) {
-      suppressHistoryRef.current = false;
-      historyPrevRulesRef.current = cloneRulesSnapshot(rules);
-      return;
-    }
-
-    const previous = historyPrevRulesRef.current;
-    if (previous === rules) return;
-
-    historyPastRef.current = [
-      ...historyPastRef.current,
-      cloneRulesSnapshot(previous),
-    ].slice(-RULE_HISTORY_LIMIT);
-    historyFutureRef.current = [];
-    historyPrevRulesRef.current = cloneRulesSnapshot(rules);
-  }, [isOpen, rules]);
 
   useEffect(() => {
     setSelectedGameVariable(null);
@@ -2223,44 +2138,40 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       return;
     }
 
-    const newRuleId = crypto.randomUUID();
-    setRules((prevRules) => {
-      const ruleToDuplicate = prevRules.find((r) => r.id === ruleId);
-      if (!ruleToDuplicate) {
-        return prevRules;
-      }
+    const ruleToDuplicate = rulesRef.current.find((rule) => rule.id === ruleId);
+    if (!ruleToDuplicate) return;
 
-      const newRule = {
-        ...ruleToDuplicate,
-        id: newRuleId,
-        position: {
-          x: (ruleToDuplicate.position?.x || 0) + 30,
-          y: (ruleToDuplicate.position?.y || 0) + 30,
-        },
-        conditionGroups: ruleToDuplicate.conditionGroups.map((group) => ({
-          ...group,
-          id: crypto.randomUUID(),
-          conditions: group.conditions.map((condition) => ({
-            ...condition,
-            id: crypto.randomUUID(),
-          })),
-        })),
-        effects: ruleToDuplicate.effects.map((effect) => ({
-          ...effect,
+    const newRuleId = crypto.randomUUID();
+    const newRule = {
+      ...ruleToDuplicate,
+      id: newRuleId,
+      position: {
+        x: (ruleToDuplicate.position?.x || 0) + 30,
+        y: (ruleToDuplicate.position?.y || 0) + 30,
+      },
+      conditionGroups: ruleToDuplicate.conditionGroups.map((group) => ({
+        ...group,
+        id: crypto.randomUUID(),
+        conditions: group.conditions.map((condition) => ({
+          ...condition,
           id: crypto.randomUUID(),
         })),
-        randomGroups: ruleToDuplicate.randomGroups.map((group) => ({
-          ...group,
-          id: crypto.randomUUID(),
-        })),
-        loops: ruleToDuplicate.loops.map((group) => ({
-          ...group,
-          id: crypto.randomUUID(),
-        })),
-      };
-      setSelectedItem({ type: "trigger", ruleId: newRuleId });
-      return [...prevRules, newRule];
-    });
+      })),
+      effects: ruleToDuplicate.effects.map((effect) => ({
+        ...effect,
+        id: crypto.randomUUID(),
+      })),
+      randomGroups: ruleToDuplicate.randomGroups.map((group) => ({
+        ...group,
+        id: crypto.randomUUID(),
+      })),
+      loops: ruleToDuplicate.loops.map((group) => ({
+        ...group,
+        id: crypto.randomUUID(),
+      })),
+    };
+    setRules((prevRules) => [...prevRules, newRule]);
+    setSelectedItem({ type: "trigger", ruleId: newRuleId });
   };
 
   const handleSaveRuleAsTemplate = useCallback(
@@ -2467,18 +2378,24 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     (conditionType: string) => {
       if (!selectedItem) return;
 
-      const newCondition: Condition = createConditionFromType(conditionType);
+      const targetRule = rulesRef.current.find((rule) => rule.id === selectedItem.ruleId);
+      if (!targetRule) return;
+      const targetGroup = selectedItem.type === "condition" && selectedItem.groupId
+        ? targetRule.conditionGroups.find((group) => group.id === selectedItem.groupId)
+        : targetRule.conditionGroups[0];
+      if (selectedItem.type === "condition" && selectedItem.groupId && !targetGroup) return;
 
-      let targetGroupId = selectedItem.groupId;
+      const newCondition: Condition = createConditionFromType(conditionType);
+      const targetGroupId = targetGroup?.id ?? crypto.randomUUID();
 
       setRules((prev) => {
         return prev.map((rule) => {
           if (rule.id === selectedItem.ruleId) {
-            if (selectedItem.groupId && selectedItem.type === "condition") {
+            if (rule.conditionGroups.length > 0) {
               return {
                 ...rule,
                 conditionGroups: rule.conditionGroups.map((group) =>
-                  group.id === selectedItem.groupId
+                  group.id === targetGroupId
                     ? {
                         ...group,
                         conditions: [...group.conditions, newCondition],
@@ -2487,34 +2404,16 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                 ),
               };
             }
-            if (rule.conditionGroups.length === 0) {
-              const newGroupId = crypto.randomUUID();
-              targetGroupId = newGroupId;
-              return {
-                ...rule,
-                conditionGroups: [
-                  {
-                    id: newGroupId,
-                    operator: "and",
-                    conditions: [newCondition],
-                  },
-                ],
-              };
-            } else {
-              targetGroupId = rule.conditionGroups[0].id;
-              return {
-                ...rule,
-                conditionGroups: rule.conditionGroups.map((group, index) => {
-                  if (index === 0) {
-                    return {
-                      ...group,
-                      conditions: [...group.conditions, newCondition],
-                    };
-                  }
-                  return group;
-                }),
-              };
-            }
+            return {
+              ...rule,
+              conditionGroups: [
+                {
+                  id: targetGroupId,
+                  operator: "and",
+                  conditions: [newCondition],
+                },
+              ],
+            };
           }
           return rule;
         });
@@ -3426,12 +3325,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const selectedRandomGroup = getSelectedRandomGroup(rules, selectedItem);
   const selectedLoopGroup = getSelectedLoopGroup(rules, selectedItem);
   const liveCodeIsVisible = panels.liveCode?.isVisible ?? false;
-  const historyTimeline = [
-    ...historyPastRef.current,
-    rules,
-    ...historyFutureRef.current.slice().reverse(),
-  ];
-  const historyCurrentIndex = historyPastRef.current.length;
   const builderWidthPercent = liveCodeIsVisible
     ? Math.max(0, 100 - liveCodeWidthPercent)
     : 100;
@@ -3554,48 +3447,43 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     if (selectedRuleIds.length === 0) return;
 
     const selectedSet = new Set(selectedRuleIds);
-    const newRuleIds: string[] = [];
-
-    setRules((prevRules) => {
-      const duplicated = prevRules
-        .filter((rule) => selectedSet.has(rule.id))
-        .map((rule) => {
-          const newRuleId = crypto.randomUUID();
-          newRuleIds.push(newRuleId);
-          return {
-            ...rule,
-            id: newRuleId,
-            position: {
-              x: (rule.position?.x || 0) + 30,
-              y: (rule.position?.y || 0) + 30,
-            },
-            conditionGroups: rule.conditionGroups.map((group) => ({
-              ...group,
-              id: crypto.randomUUID(),
-              conditions: group.conditions.map((condition) => ({
-                ...condition,
-                id: crypto.randomUUID(),
-              })),
-            })),
-            effects: rule.effects.map((effect) => ({
-              ...effect,
+    const duplicated = rulesRef.current
+      .filter((rule) => selectedSet.has(rule.id))
+      .map((rule) => {
+        const newRuleId = crypto.randomUUID();
+        return {
+          ...rule,
+          id: newRuleId,
+          position: {
+            x: (rule.position?.x || 0) + 30,
+            y: (rule.position?.y || 0) + 30,
+          },
+          conditionGroups: rule.conditionGroups.map((group) => ({
+            ...group,
+            id: crypto.randomUUID(),
+            conditions: group.conditions.map((condition) => ({
+              ...condition,
               id: crypto.randomUUID(),
             })),
-            randomGroups: rule.randomGroups.map((group) => ({
-              ...group,
-              id: crypto.randomUUID(),
-            })),
-            loops: rule.loops.map((group) => ({
-              ...group,
-              id: crypto.randomUUID(),
-            })),
-          };
-        });
-
-      return [...prevRules, ...duplicated];
-    });
+          })),
+          effects: rule.effects.map((effect) => ({
+            ...effect,
+            id: crypto.randomUUID(),
+          })),
+          randomGroups: rule.randomGroups.map((group) => ({
+            ...group,
+            id: crypto.randomUUID(),
+          })),
+          loops: rule.loops.map((group) => ({
+            ...group,
+            id: crypto.randomUUID(),
+          })),
+        };
+      });
+    const newRuleIds = duplicated.map((rule) => rule.id);
 
     if (newRuleIds.length > 0) {
+      setRules((prevRules) => [...prevRules, ...duplicated]);
       setSelectedRuleIds(newRuleIds);
       setSelectedItem(
         newRuleIds.length === 1
@@ -4666,14 +4554,14 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
             label: "Undo",
             icon: ArrowCounterClockwise,
             shortcut: "Ctrl+Z",
-            disabled: historyPastRef.current.length === 0,
+            disabled: !canUndo,
             onSelect: handleUndo,
           },
           {
             label: "Redo",
             icon: ArrowClockwise,
             shortcut: "Ctrl+Y",
-            disabled: historyFutureRef.current.length === 0,
+            disabled: !canRedo,
             onSelect: handleRedo,
           },
         ],
@@ -4779,6 +4667,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     deleteSelectedRules,
     clearRuleSelection,
     contextTargetTitle,
+    canUndo,
+    canRedo,
     handleUndo,
     handleRedo,
     handleRecenter,
