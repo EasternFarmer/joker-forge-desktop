@@ -1853,6 +1853,13 @@ const Inspector: React.FC<InspectorProps> = ({
     if (!selectedEffect || !selectedRule) return null;
     const effectType = getEffectTypeById(selectedEffect.type);
     if (!effectType) return null;
+    const hasMessageOptions = [
+      "edit_hand_size",
+      "edit_play_size",
+      "edit_discard_size",
+    ].includes(selectedEffect.type);
+    const messageMode = selectedEffect.messageMode ??
+      (selectedEffect.customMessage ? "custom" : "default");
 
     const paramsToRender = effectType.params.filter((param) => {
       if (param.type == "checkbox") {
@@ -1933,39 +1940,70 @@ const Inspector: React.FC<InspectorProps> = ({
         <div className="space-y-3">
           <h5 className="text-zinc-100 font-medium text-sm flex items-center gap-2">
             <div className="w-2 h-2 bg-balatro-green rounded-full"></div>
-            Custom Message
+            {hasMessageOptions ? "Message" : "Custom Message"}
           </h5>
           <div className="divide-y divide-border/70">
-            <div className="py-2.5 first:pt-1 last:pb-1">
-              <InputField
-                label="Message"
-                value={selectedEffect.customMessage || ""}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  const validation = validateCustomMessage(value);
-
-                  if (validation.isValid) {
+            {hasMessageOptions && (
+              <div className="py-2.5 first:pt-1 last:pb-1">
+                <Select
+                  value={messageMode}
+                  onValueChange={(value: "default" | "custom" | "none") => {
                     setCustomMessageValidationError("");
-                  } else {
-                    setCustomMessageValidationError(
-                      validation.error || "Invalid message",
-                    );
-                  }
+                    onUpdateEffect(selectedRule.id, selectedEffect.id, {
+                      messageMode: value,
+                    });
+                  }}
+                >
+                  <SelectTrigger aria-label="Message" size="sm" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">Default message</SelectItem>
+                    <SelectItem value="custom">Custom message</SelectItem>
+                    <SelectItem value="none">No message</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {(!hasMessageOptions || messageMode === "custom") && (
+              <div className="py-2.5 first:pt-1 last:pb-1">
+                <InputField
+                  label={hasMessageOptions ? "Custom message" : "Message"}
+                  value={selectedEffect.customMessage || ""}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    const validation = hasMessageOptions
+                      ? value.length > 100
+                        ? { isValid: false, error: "Message must be 100 characters or less" }
+                        : /[\r\n]/.test(value)
+                          ? { isValid: false, error: "Message cannot contain line breaks" }
+                          : { isValid: true, error: undefined }
+                      : validateCustomMessage(value);
 
-                  onUpdateEffect(selectedRule.id, selectedEffect.id, {
-                    customMessage: value || undefined,
-                  });
-                }}
-                placeholder="Leave blank for default message"
-                size="sm"
-              />
-              {customMessageValidationError && (
-                <div className="flex items-center gap-2 mt-1 text-balatro-red text-sm">
-                  <Warning className="h-4 w-4" />
-                  <span>{customMessageValidationError}</span>
-                </div>
-              )}
-            </div>
+                    if (validation.isValid) {
+                      setCustomMessageValidationError("");
+                    } else {
+                      setCustomMessageValidationError(
+                        validation.error || "Invalid message",
+                      );
+                    }
+
+                    onUpdateEffect(selectedRule.id, selectedEffect.id, {
+                      customMessage: value || undefined,
+                      ...(hasMessageOptions ? { messageMode: "custom" } : {}),
+                    });
+                  }}
+                  placeholder="Leave blank for default message"
+                  size="sm"
+                />
+                {customMessageValidationError && (
+                  <div className="flex items-center gap-2 mt-1 text-balatro-red text-sm">
+                    <Warning className="h-4 w-4" />
+                    <span>{customMessageValidationError}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

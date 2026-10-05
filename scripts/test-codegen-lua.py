@@ -187,6 +187,61 @@ reset_score(0,1)
 SCORING_PARAMETERS = steamodded_scoring_parameters()
 
 
+def steamodded_size_message_runtime():
+    """Resolve size edits through native limit APIs and track messages separately."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    limits = "SMODS.hand_limit_strings =" + source.split("SMODS.hand_limit_strings =", 1)[1]
+    limits = limits.split("\nfunction SMODS.draw_cards", 1)[0]
+    return """
+G.C.BLUE=1
+G.GAME.dollars=0
+G.GAME.starting_params={play_limit=5,discard_limit=5}
+G.hand={cards={},highlighted={},config={card_limit=8,highlighted_limit=5}}
+size_change_calls={hand=0,play=0,discard=0}
+function G.hand:change_size(delta)
+ size_change_calls.hand=size_change_calls.hand+1
+ self.config.card_limit=self.config.card_limit+numeric(delta)
+end
+function sendErrorMessage(message) error(message) end
+""" + limits + """
+local native_play=SMODS.change_play_limit
+local native_discard=SMODS.change_discard_limit
+function SMODS.change_play_limit(delta)
+ size_change_calls.play=size_change_calls.play+1
+ native_play(numeric(delta))
+end
+function SMODS.change_discard_limit(delta)
+ size_change_calls.discard=size_change_calls.discard+1
+ native_discard(numeric(delta))
+end
+function assert_size_messages(expected)
+ local actual={}
+ for _,message in ipairs(status_messages) do
+  if message.kind=='extra' then
+   assert(type(message.message)=='string','hidden size edit must not emit an empty status call')
+   actual[#actual+1]=message.message
+  end
+ end
+ assert(#actual==#expected,'size edit announcement count changed: '..#actual..' ~= '..#expected)
+ for index,message in ipairs(expected) do
+  assert(actual[index]==message,'size edit announcement text changed at '..index)
+ end
+end
+function assert_size_change(stat,value,count,messages)
+ local sizes={hand=G.hand.config.card_limit,play=G.GAME.starting_params.play_limit,discard=G.GAME.starting_params.discard_limit}
+ local defaults={hand=8,play=5,discard=5}
+ for key,initial in pairs(defaults) do
+  assert(sizes[key]==(key==stat and value or initial),'size edit changed the wrong stat: '..key)
+  assert(size_change_calls[key]==(key==stat and count or 0),'size edit callback count changed: '..key)
+ end
+ assert_size_messages(messages)
+end
+"""
+
+
+SIZE_MESSAGE_RUNTIME = steamodded_size_message_runtime()
+
+
 def steamodded_card_destruction_runtime():
     """Keep native scoring contexts and destruction bookkeeping in the regression."""
     source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
@@ -1242,6 +1297,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + consumable_creation_message_runtime(lua_library)
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
+            if case.get("size_message_runtime"):
+                source += "\n" + SIZE_MESSAGE_RUNTIME
             if case.get("card_destruction_runtime"):
                 source += "\n" + CARD_DESTRUCTION_RUNTIME
             if case.get("playing_card_transform_runtime"):

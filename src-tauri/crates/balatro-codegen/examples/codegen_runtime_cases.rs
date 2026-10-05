@@ -320,6 +320,113 @@ fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn size_message_effect(effect_type: &str, operation: &str, mode: Option<&str>, message: Option<&str>) -> Value {
+    let mut effect = json!({"id":effect_type,"type":effect_type,"params":{
+        "operation":{"value":operation},"value":{"value":2}
+    }});
+    if let Some(mode) = mode { effect["messageMode"] = json!(mode); }
+    if let Some(message) = message { effect["customMessage"] = json!(message); }
+    effect
+}
+
+fn size_message_list(messages: &[&str]) -> String {
+    // Expected bytes are independent of the compiler's Lua string escaping.
+    format!("{{{}}}", messages.iter().map(|message|
+        format!("string.char({})", message.bytes().map(|byte| byte.to_string()).collect::<Vec<_>>().join(","))
+    ).collect::<Vec<_>>().join(","))
+}
+
+fn size_message_case(cases: &mut Vec<Value>, name: &str, object: &str, rules: Value, prepare: &str, verify: &str) {
+    // Exercise the desktop export boundary, including top-level message fields.
+    let chunk = if object == "consumable" {
+        let input: export::ConsumableDataInput = serde_json::from_value(json!({
+            "objectKey":"runtime_test","name":"Runtime Test","description":"Test",
+            "set":"Tarot","rules":rules
+        })).unwrap();
+        compile_consumable(&export::consumable_data_to_def(&input, export::AtlasPosInput {x:0,y:0}, None), "mod")
+    } else {
+        let input: export::JokerDataInput = serde_json::from_value(json!({
+            "objectKey":"runtime_test","name":"Runtime Test","description":"Test",
+            "cost":4,"rarity":"common","rules":rules
+        })).unwrap();
+        compile_joker(&export::joker_data_to_def(&input, "mod", export::AtlasPosInput {x:0,y:0}, None), "mod")
+    };
+    let invoke = if object == "consumable" {
+        "test_definition:use(actor,nil,nil);run_events()"
+    } else {
+        "resolve_joker({joker_main=true});run_events()"
+    };
+    cases.push(json!({"kind":"scoring","name":format!("size_message_{name}"),
+        "size_message_runtime":true,"code":Emitter::new().emit_chunk(&chunk),
+        "prepare":prepare,"invoke":invoke,"verify":verify}));
+}
+
+fn append_size_message_cases(cases: &mut Vec<Value>) {
+    for (effect_type, label, stat, initial) in [
+        ("edit_hand_size", "Hand Limit", "hand", 8),
+        ("edit_play_size", "Play Size", "play", 5),
+        ("edit_discard_size", "Discard Size", "discard", 5),
+    ] {
+        for operation in ["add", "subtract", "set"] {
+            let expected = match operation { "subtract" => initial - 2, "set" => 2, _ => initial + 2 };
+            let default_message = match operation {
+                "subtract" => format!("-2 {label}"),
+                "set" => format!("{label}  set to 2"),
+                _ => format!("+2 {label}"),
+            };
+            for mode in ["default", "custom", "none"] {
+                let message = format!("Changed {stat}");
+                let effect = size_message_effect(effect_type, operation, Some(mode), Some(&message));
+                let messages = match mode { "none" => size_message_list(&[]), "custom" => size_message_list(&[&message]), _ => size_message_list(&[&default_message]) };
+                size_message_case(cases, &format!("{stat}_{operation}_{mode}"), "joker", json!([{
+                    "id":"change_size","trigger":"hand_played","effects":[effect]
+                }]), "", &format!("assert_size_change('{stat}',{expected},1,{});assert(hand_chips==0 and mult==1)", messages));
+            }
+        }
+    }
+
+    for (name, mode, message, expected_message) in [
+        ("old_default", None, None, "+2 Hand Limit"),
+        ("old_custom", None, Some("Extra room!"), "Extra room!"),
+        ("empty_custom", Some("custom"), Some(""), "+2 Hand Limit"),
+        ("whitespace_custom", Some("custom"), Some(" \t\n "), "+2 Hand Limit"),
+        ("escaped_custom", Some("custom"), Some("Room \"for\" 'more'\\cards\nnext\tline"), "Room \"for\" 'more'\\cards\nnext\tline"),
+    ] {
+        size_message_case(cases,name,"joker",json!([{
+            "id":"change_size","trigger":"hand_played","effects":[size_message_effect("edit_hand_size","add",mode,message)]
+        }]),"",&format!("assert_size_change('hand',10,1,{})",size_message_list(&[expected_message])));
+    }
+
+    let mixed = json!([{
+        "id":"mixed","trigger":"hand_played",
+        "effects":[
+            size_message_effect("edit_hand_size","add",Some("none"),Some("Hidden stale text")),
+            {"id":"chips","type":"add_chips","params":{"value":{"value":7}}}
+        ],
+        "loops":[{"id":"repeat","repetitions":{"value":3},"effects":[
+            size_message_effect("edit_play_size","add",Some("none"),None),
+            size_message_effect("edit_discard_size","subtract",Some("custom"),Some("Less to discard"))
+        ]}],
+        "randomGroups":[{"id":"chance","chance_numerator":{"value":1},"chance_denominator":{"value":2},"effects":[
+            size_message_effect("edit_hand_size","add",Some("custom"),Some("Lucky room!")),
+            {"id":"money","type":"set_dollars","params":{"value":{"value":3},"operation":{"value":"add"}}}
+        ]}]
+    }]);
+    for succeeds in [true,false] {
+        let messages = if succeeds {size_message_list(&["Lucky room!","Less to discard","Less to discard","Less to discard"])} else {size_message_list(&["Less to discard","Less to discard","Less to discard"])};
+        size_message_case(cases,&format!("mixed_loop_chance_{succeeds}"),"joker",mixed.clone(),
+            &format!("SMODS.pseudorandom_probability=function() return {succeeds} end;G.GAME.starting_params.discard_limit=12"),
+            &format!("assert(G.hand.config.card_limit=={} and size_change_calls.hand=={});assert(G.GAME.starting_params.play_limit==11 and size_change_calls.play==3);assert(G.GAME.starting_params.discard_limit==6 and size_change_calls.discard==3);assert_size_messages({messages});assert(hand_chips==7 and mult==1 and G.GAME.dollars=={});assert(message_count('chips')==1 and message_count('dollars')=={})",if succeeds {12}else{10},if succeeds {2}else{1},if succeeds {3}else{0},if succeeds {1}else{0}));
+    }
+    size_message_case(cases,"consumable_mixed_modes","consumable",json!([{
+        "id":"use","trigger":"card_used","effects":[
+            size_message_effect("edit_hand_size","add",Some("none"),Some("Hidden")),
+            size_message_effect("edit_play_size","set",Some("custom"),Some("Play more!")),
+            size_message_effect("edit_discard_size","subtract",Some("default"),Some("Ignored stale text"))
+        ]
+    }]),"","assert(G.hand.config.card_limit==10 and size_change_calls.hand==1);assert(G.GAME.starting_params.play_limit==2 and size_change_calls.play==1);assert(G.GAME.starting_params.discard_limit==3 and size_change_calls.discard==1);assert_size_messages({'Play more!','-2 Discard Size'})");
+}
+
 fn scoring_case(
     cases: &mut Vec<Value>,
     name: &str,
@@ -2785,6 +2892,7 @@ fn main() {
     append_description_blank_line_cases(&mut cases);
     append_description_format_cases(&mut cases);
     append_consumable_creation_message_cases(&mut cases);
+    append_size_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);

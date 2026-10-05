@@ -8,6 +8,8 @@ type EffectInput = {
   id?: string;
   type: string;
   params?: Record<string, ParamLike>;
+  customMessage?: string;
+  messageMode?: "default" | "custom" | "none";
 };
 
 type ConditionInput = {
@@ -84,6 +86,16 @@ const toWrappedParam = (value: ParamLike): { value: unknown; valueType?: string 
   return { value };
 };
 
+const normalizeEffect = (effect: EffectInput): Record<string, unknown> => ({
+  id: effect.id ?? createId(),
+  type: effect.type,
+  ...(effect.customMessage !== undefined ? { customMessage: effect.customMessage } : {}),
+  ...(effect.messageMode !== undefined ? { messageMode: effect.messageMode } : {}),
+  params: Object.fromEntries(
+    Object.entries(effect.params || {}).map(([key, value]) => [key, toWrappedParam(value)]),
+  ),
+});
+
 const defaultTriggerForItemType = (itemType: PreviewCompileItemType): string => {
   if (itemType === "consumable" || itemType === "voucher" || itemType === "deck") {
     return "card_used";
@@ -113,13 +125,7 @@ const normalizeRules = (
         ),
       })),
     })),
-    effects: (rule.effects || []).map((effect) => ({
-      id: effect.id ?? createId(),
-      type: effect.type,
-      params: Object.fromEntries(
-        Object.entries(effect.params || {}).map(([key, value]) => [key, toWrappedParam(value)]),
-      ),
-    })),
+    effects: (rule.effects || []).map(normalizeEffect),
     randomGroups: (rule.randomGroups || []).map((group) => ({
       id: group.id ?? createId(),
       chance_numerator: toWrappedParam(group.chance_numerator ?? { value: 1, valueType: "number" }),
@@ -128,24 +134,12 @@ const normalizeRules = (
       ),
       respect_probability_effects: group.respect_probability_effects ?? true,
       custom_key: group.custom_key ?? "",
-      effects: (group.effects || []).map((effect) => ({
-        id: effect.id ?? createId(),
-        type: effect.type,
-        params: Object.fromEntries(
-          Object.entries(effect.params || {}).map(([key, value]) => [key, toWrappedParam(value)]),
-        ),
-      })),
+      effects: (group.effects || []).map(normalizeEffect),
     })),
     loops: (rule.loops || []).map((group) => ({
       id: group.id ?? createId(),
       repetitions: toWrappedParam(group.repetitions ?? { value: 1, valueType: "number" }),
-      effects: (group.effects || []).map((effect) => ({
-        id: effect.id ?? createId(),
-        type: effect.type,
-        params: Object.fromEntries(
-          Object.entries(effect.params || {}).map(([key, value]) => [key, toWrappedParam(value)]),
-        ),
-      })),
+      effects: (group.effects || []).map(normalizeEffect),
     })),
   }));
 };

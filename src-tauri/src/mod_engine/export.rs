@@ -452,6 +452,10 @@ pub struct EffectInput {
     pub effect_type: String,
     #[serde(default)]
     pub params: HashMap<String, WrappedParamInput>,
+    #[serde(default, rename = "customMessage")]
+    pub custom_message: Option<String>,
+    #[serde(default, rename = "messageMode")]
+    pub message_mode: Option<String>,
 }
 
 /// Mirrors the TypeScript `RandomGroup` interface.
@@ -964,10 +968,19 @@ fn map_condition(c: &ConditionInput) -> ConditionDef {
 }
 
 fn map_effect(e: &EffectInput) -> EffectDef {
+    let mut params = map_params(&e.params);
+    if matches!(e.effect_type.as_str(), "edit_hand_size" | "edit_play_size" | "edit_discard_size") {
+        if let Some(message) = &e.custom_message {
+            params.insert("customMessage".to_string(), ParamValue::Str(message.clone()));
+        }
+        if let Some(mode) = &e.message_mode {
+            params.insert("messageMode".to_string(), ParamValue::Str(mode.clone()));
+        }
+    }
     EffectDef {
         id: e.id.clone(),
         effect_type: e.effect_type.clone(),
-        params: map_params(&e.params),
+        params,
     }
 }
 
@@ -2228,6 +2241,45 @@ pub fn build_mod_json(metadata: &ModMetadataInput) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_effect_message_settings_survive_frontend_mapping() {
+        for effect_type in ["edit_hand_size", "edit_play_size", "edit_discard_size"] {
+            let input: EffectInput = serde_json::from_value(serde_json::json!({
+                "type": effect_type, "customMessage": "Let's play!", "messageMode": "none",
+                "params": {
+                    "value": {"value": 2},
+                    "customMessage": {"value": "Older message"},
+                    "messageMode": {"value": "custom"}
+                }
+            })).unwrap();
+            let effect = map_effect(&input);
+            assert_eq!(effect.params["customMessage"].as_str(), Some("Let's play!"));
+            assert_eq!(effect.params["messageMode"].as_str(), Some("none"));
+            assert_eq!(effect.params["value"].as_i64(), Some(2));
+        }
+    }
+
+    #[test]
+    fn size_effect_message_mapping_preserves_old_projects_and_other_effects() {
+        let legacy: EffectInput = serde_json::from_value(serde_json::json!({
+            "type": "edit_hand_size", "params": {"customMessage": {"value": "Legacy"}}
+        })).unwrap();
+        let mapped = map_effect(&legacy);
+        assert_eq!(mapped.params["customMessage"].as_str(), Some("Legacy"));
+        assert!(!mapped.params.contains_key("messageMode"));
+        let default: EffectInput = serde_json::from_value(serde_json::json!({
+            "type": "edit_play_size", "params": {"value": {"value": 1}}
+        })).unwrap();
+        assert_eq!(map_effect(&default).params.len(), 1);
+        let unrelated: EffectInput = serde_json::from_value(serde_json::json!({
+            "type": "add_mult", "customMessage": "New", "messageMode": "none",
+            "params": {"customMessage": {"value": "Existing"}}
+        })).unwrap();
+        let mapped = map_effect(&unrelated);
+        assert_eq!(mapped.params["customMessage"].as_str(), Some("Existing"));
+        assert!(!mapped.params.contains_key("messageMode"));
+    }
 
     #[test]
     fn description_line_breaks_preserve_each_blank_row() {

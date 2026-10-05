@@ -9,7 +9,10 @@ const ts = require("typescript");
 function loadTypeScript(relativePath, mockImports = {}) {
   const filePath = path.join(__dirname, "..", relativePath);
   const compiled = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+      jsx: ts.JsxEmit.ReactJSX,
+    },
     fileName: filePath,
   });
   const module = { exports: {} };
@@ -304,4 +307,160 @@ test("cyclic visibility dependencies terminate and hide the malformed fields", {
   }), false);
   const self = { id: "self", type: "select", showWhen: { parameter: "self", values: ["yes"] } };
   assert.equal(isParameterVisible(self, [self], { self: { value: "yes" } }), false);
+});
+
+function allElements(node) {
+  if (Array.isArray(node)) return node.flatMap(allElements);
+  if (!node || typeof node !== "object") return [];
+  return [node, ...allElements(node.props?.children)];
+}
+
+function messageInspector(effect, groupType = "effects") {
+  const updates = [];
+  const validationMessages = [];
+  const react = {
+    memo: (component) => component,
+    useEffect() {},
+    useMemo: (factory) => factory(),
+    useState: (initial) => [initial, (value) => validationMessages.push(value)],
+  };
+  const element = (type, props) => ({ type, props });
+  const imports = {
+    react: { default: react, ...react },
+    "react/jsx-runtime": { jsx: element, jsxs: element },
+    "@/lib/balatro/balatro-utils": {},
+    "@/lib/rules/user-variable-utils": { getNumberVariables: () => [] },
+    "@/lib/services/storage": { useProjectData: () => ({ data: { sounds: [] } }) },
+    "@/lib/app/global-user-variables": {
+      collectGlobalVariables: () => [], mergeItemVariablesWithGlobals: (item) => item,
+    },
+    "./rule-catalog": { getEffectTypeById: (id) => effects.find((entry) => entry.id === id) },
+    "./parameter-visibility": { isParameterVisible },
+    "@/components/ui/input": { Input: "Input" },
+    "@/components/ui/button": {},
+    "@/components/ui/select": {
+      Select: "Select", SelectContent: "SelectContent", SelectItem: "SelectItem",
+      SelectTrigger: "SelectTrigger", SelectValue: "SelectValue",
+    },
+    "@phosphor-icons/react": {},
+    "@/lib/core/validation-utils": loadTypeScript("src/lib/core/validation-utils.ts"),
+    "@/lib/content/game-vars": {},
+    "@/components/ui/checkbox": {},
+    "./item-type-badge": {},
+    "@/components/ui/icon-button": {},
+    "@/components/ui/tooltip": {},
+    "@/components/ui/toggle": {},
+    "./panel": {},
+    "@/components/ui/help-tooltip-icon": {},
+  };
+  const { default: Inspector } = loadTypeScript("src/components/rule-builder/inspector.tsx", imports);
+  const rule = { id: "rule", trigger: "hand_played", effects: [], randomGroups: [], loops: [] };
+  if (groupType === "effects") rule.effects = [effect];
+  else rule[groupType] = [{ id: "group", effects: [effect] }];
+  const tree = Inspector({
+    position: { x: 0, y: 0 }, joker: { id: "joker", userVariables: [] },
+    selectedRule: rule, selectedEffect: effect, itemType: "joker",
+    onUpdateEffect: (ruleId, effectId, update) => updates.push({ ruleId, effectId, update }),
+  });
+  const elements = allElements(tree);
+  return {
+    mode: elements.find((node) => node.type === "Select"),
+    options: elements.filter((node) => node.type === "SelectItem"),
+    message: elements.find((node) => node.type === "Input"),
+    updates, validationMessages,
+  };
+}
+
+const sizeEffects = ["edit_hand_size", "edit_play_size", "edit_discard_size"];
+
+test("hand, play, and discard size effects offer default, custom, and silent messages", () => {
+  for (const type of sizeEffects) {
+    for (const groupType of ["effects", "randomGroups", "loops"]) {
+      const inspector = messageInspector({ id: "effect", type, params: {} }, groupType);
+      assert.equal(inspector.mode.props.value, "default", `${type} ${groupType}`);
+      assert.deepEqual(inspector.options.map((node) => [node.props.value, node.props.children]), [
+        ["default", "Default message"], ["custom", "Custom message"], ["none", "No message"],
+      ]);
+      assert.equal(inspector.message, undefined, "Default mode hides custom text");
+      inspector.mode.props.onValueChange("none");
+      assert.deepEqual(JSON.parse(JSON.stringify(inspector.updates)), [{
+        ruleId: "rule", effectId: "effect", update: { messageMode: "none" },
+      }]);
+    }
+  }
+});
+
+test("legacy custom messages remain selected and message toggles preserve saved text", () => {
+  for (const type of sizeEffects) {
+    const effect = { id: "effect", type, params: {}, customMessage: "Let's play!" };
+    const inspector = messageInspector(effect);
+    assert.equal(inspector.mode.props.value, "custom");
+    assert.equal(inspector.message.props.value, effect.customMessage);
+    for (const mode of ["none", "default", "custom"]) {
+      inspector.mode.props.onValueChange(mode);
+      const update = inspector.updates.at(-1).update;
+      assert.deepEqual(Object.keys(update), ["messageMode"], "Toggling retains saved text");
+      const updated = messageInspector({ ...effect, ...update });
+      assert.equal(updated.mode.props.value, mode);
+      assert.equal(updated.message?.props.value, mode === "custom" ? effect.customMessage : undefined);
+    }
+  }
+});
+
+test("custom size messages accept ordinary punctuation and retain single-line length limits", () => {
+  for (const type of sizeEffects) {
+    const inspector = messageInspector({ id: "effect", type, params: {}, messageMode: "custom" });
+    assert.equal(inspector.message.props.placeholder, "Leave blank for default message");
+    for (const value of ["Let's play!", '"Extra" cards', "A\\B", "`Extra`", ""]) {
+      inspector.message.props.onChange({ target: { value } });
+      assert.equal(inspector.validationMessages.at(-1), "", value);
+      assert.equal(inspector.updates.at(-1).update.customMessage, value || undefined);
+      assert.equal(inspector.updates.at(-1).update.messageMode, "custom", "Editing keeps Custom selected");
+    }
+    for (const [value, expected] of [
+      ["x".repeat(101), "Message must be 100 characters or less"],
+      ["First\nSecond", "Message cannot contain line breaks"],
+      ["First\rSecond", "Message cannot contain line breaks"],
+    ]) {
+      inspector.message.props.onChange({ target: { value } });
+      assert.equal(inspector.validationMessages.at(-1), expected);
+    }
+  }
+});
+
+test("other effects retain their existing custom message input", () => {
+  const inspector = messageInspector({
+    id: "effect", type: "add_chips", params: {}, customMessage: "Bonus!", messageMode: "none",
+  });
+  assert.equal(inspector.mode, undefined);
+  assert.equal(inspector.message.props.label, "Message");
+  assert.equal(inspector.message.props.value, "Bonus!");
+  inspector.message.props.onChange({ target: { value: "Let's play!" } });
+  assert.equal(inspector.validationMessages.at(-1), "Message cannot contain quotation marks");
+});
+
+test("CLI requests preserve message settings for normal, random, and loop effects", () => {
+  const { createCliItemRequest, serializeCliItemRequest } = loadTypeScript(
+    "src/lib/export/cli-item-generation.ts",
+  );
+  const effects = sizeEffects.map((type, index) => ({
+    id: `effect${index}`, type, messageMode: ["default", "custom", "none"][index],
+    customMessage: "Saved custom text", params: { value: index + 1 },
+  }));
+  const legacy = { id: "legacy", type: "edit_hand_size", customMessage: "Legacy!", params: {} };
+  const request = createCliItemRequest({ rules: [{
+    id: "rule", effects: [...effects, legacy],
+    randomGroups: [{ id: "random", effects: [...effects, legacy] }],
+    loops: [{ id: "loop", effects: [...effects, legacy] }],
+  }] });
+  const rule = JSON.parse(serializeCliItemRequest(request)).itemData.rules[0];
+  for (const list of [rule.effects, rule.randomGroups[0].effects, rule.loops[0].effects]) {
+    for (let index = 0; index < effects.length; index++) {
+      assert.equal(list[index].messageMode, effects[index].messageMode);
+      assert.equal(list[index].customMessage, "Saved custom text");
+      assert.deepEqual(list[index].params, { value: { value: index + 1 } });
+    }
+    assert.equal(list[3].customMessage, "Legacy!");
+    assert.equal(Object.hasOwn(list[3], "messageMode"), false, "Legacy mode is not invented");
+  }
 });

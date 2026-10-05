@@ -48,6 +48,7 @@ export interface Effect {
   type: string;
   params: Record<string, { value: unknown; valueType?: string }>;
   customMessage?: string;
+  messageMode?: "default" | "custom" | "none";
 }
 
 export interface GlobalTriggerDefinition {

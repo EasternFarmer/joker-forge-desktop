@@ -477,7 +477,12 @@ pub fn edit_item_size_typed(
     size_type: &str,
 ) -> EffectOutput {
     let operation = get_str_default(effect, "operation", "add");
-    let custom_message = get_str(effect, "customMessage");
+    let custom_message = get_str(effect, "customMessage").filter(|message| !message.trim().is_empty());
+    let message_mode = get_str_default(
+        effect,
+        "messageMode",
+        if custom_message.is_some() { "custom" } else { "default" },
+    );
     let data = item_size_data(size_type);
     let value_str = value_to_lua_str(effect, "value", ctx, data.var_name);
 
@@ -498,7 +503,8 @@ pub fn edit_item_size_typed(
     };
 
     let msg_lua = custom_message
-        .map(|m| format!("\"{}\"", m))
+        .filter(|_| message_mode == "custom")
+        .map(|message| Emitter::new().emit_expr_to_string(&lua_str(message)))
         .unwrap_or_else(|| match operation.as_str() {
             "set" => format!(
                 "\"{}  set to \"..tostring({})",
@@ -509,12 +515,17 @@ pub fn edit_item_size_typed(
             _ => format!("\"+\"..tostring({})..' {}'", value_str, data.custom_message),
         });
 
+    let message_code = if message_mode == "none" {
+        String::new()
+    } else {
+        format!("card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {{message = {}, colour = G.C.BLUE}})", msg_lua)
+    };
     let func_body = vec![lua_raw_stmt(format!(
-        "card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {{message = {}, colour = G.C.BLUE}})\n\
+        "{}\n\
         {}\n\
         {}({})\n\
         return true",
-        msg_lua, set_code, data.slots_code, value_arg
+        message_code, set_code, data.slots_code, value_arg
     ))];
 
     EffectOutput {
