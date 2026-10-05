@@ -34,10 +34,6 @@ SMODS.Joker {
         if context.joker_main then
             do
                 if #G.consumeables.cards + (G.GAME.consumeable_buffer or 0) < G.consumeables.config.card_limit then SMODS.add_card({ area = G.consumeables, key = 'c_fool', set = 'Tarot' }) end
-                return {
-                    message = 'Created Consumable!',
-                    colour = G.C.GREEN
-                }
             end
         end
     end

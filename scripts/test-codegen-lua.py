@@ -682,7 +682,7 @@ end
 
 
 def consumable_creation_message_runtime(lua_library):
-    """Resolve messages with Balatro's real dictionary and localize implementation."""
+    """Keep native localization while verifying consumable creation stays silent."""
     executable = Path(lua_library).parent / "Balatro.exe"
     if executable.is_file():
         with zipfile.ZipFile(executable) as archive:
@@ -707,10 +707,14 @@ end
     utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
     add_card = "function SMODS.add_card(t)" + utils.split("function SMODS.add_card(t)", 1)[1]
     add_card = add_card.split("\nfunction SMODS.debuff_card", 1)[0]
+    probability = "function SMODS.pseudorandom_probability(" + utils.split(
+        "function SMODS.pseudorandom_probability(", 1
+    )[1].split("\nfunction SMODS.is_poker_hand_visible", 1)[0]
     return localization + """
 assert(localize('k_plus_tarot')=='+1 Tarot')
 assert(localize('k_plus_consumable')=='ERROR','regression must retain native missing-key behavior')
 created_cards={}
+function pseudorandom() return chance_roll or 0 end
 G.consumeables={cards={},config={card_limit=10}}
 function G.consumeables:emplace(card) self.cards[#self.cards+1]=card end
 function SMODS.create_card(params)
@@ -732,7 +736,7 @@ function register_source_consumable(set)
  actor.config={center=center};actor.ability.set=set
  G.consumeables:emplace(actor)
 end
-function assert_consumable_creation_message(count,key,set,messages)
+function assert_consumable_creation_message(count,key,set)
  assert(#created_cards==count,'unexpected created-card count')
  local source_count=actor.config and actor.config.center.consumeable and 1 or 0
  assert(#G.consumeables.cards==count+source_count,'native SMODS.add_card must emplace each created consumable')
@@ -740,12 +744,9 @@ function assert_consumable_creation_message(count,key,set,messages)
   assert(card.config.center.key==key and card.ability.set==set,'created key or set changed')
   assert(card.added_to_deck,'native SMODS.add_card must add the card to the deck')
  end
- assert(#status_messages==messages,'unexpected status-message count')
- for _,status in ipairs(status_messages) do
-  assert(status.message=='Created Consumable!','unexpected creation status: '..tostring(status.message))
- end
+ assert(#status_messages==0,'consumable creation must not display automatic feedback')
 end
-""" + add_card
+""" + add_card + probability
 
 
 def steamodded_playing_card_transform_runtime():

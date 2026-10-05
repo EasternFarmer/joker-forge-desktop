@@ -327,12 +327,17 @@ fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
         ("custom_set_multiple", "consumable", "mod_Runes", "mod_Runes", "random", 2, 1, "c_mod_runtime_test", "mod_Runes"),
         ("self_in_loop", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 2, 2, "c_mod_runtime_test", "Tarot"),
         ("shared_joker_effect", "joker", "Tarot", "Tarot", "c_first", 1, 1, "c_first", "Tarot"),
+        ("full_slots", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
+        ("chance_success", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
+        ("chance_miss", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
     ] {
         let effect = json!({"id":"create","effect_type":"create_consumable","params":{
             "set":create_set,"specific_card":key,"count":count,"edition":"none","ignore_slots":"n"
         }});
         let mut rule = json!({"id":"creation","trigger":if object=="joker" {"hand_played"} else {"card_used"}});
-        if loops > 1 {
+        if name.starts_with("chance_") {
+            rule["random_groups"] = json!([{"id":"chance","chance_numerator":1,"chance_denominator":2,"effects":[effect]}]);
+        } else if loops > 1 {
             rule["loop_groups"] = json!([{"id":"repeat","count":loops,"effects":[effect]}]);
         } else {
             rule["effects"] = json!([effect]);
@@ -349,9 +354,9 @@ fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
         };
         cases.push(json!({"kind":"rule_options","name":format!("consumable_creation_message_{name}"),
             "consumable_creation_message_runtime":true,"code":Emitter::new().emit_chunk(&chunk),
-            "prepare":if object=="consumable" {format!("register_source_consumable('{source_set}')")} else {String::new()},
-            "invoke":if object=="consumable" {"test_definition:use(actor,nil,nil)"} else {"local effect=test_definition:calculate(actor,{joker_main=true});assert(effect);SMODS.calculate_effect(effect,actor)"},
-            "verify":format!("assert_consumable_creation_message({},'{expected_key}','{expected_set}',{loops})",count*loops)
+            "prepare":if object=="consumable" {format!("register_source_consumable('{source_set}');{}",match name {"full_slots"=>"G.consumeables.config.card_limit=1","chance_miss"=>"chance_roll=0.9",_=>""})} else {String::new()},
+            "invoke":if object=="consumable" {"test_definition:use(actor,nil,nil)"} else {"local effect=test_definition:calculate(actor,{joker_main=true});if effect then SMODS.calculate_effect(effect,actor) end"},
+            "verify":format!("assert_consumable_creation_message({},'{expected_key}','{expected_set}');{}",if name=="full_slots" || name=="chance_miss" {0} else {count*loops},if name.starts_with("chance_") {format!("assert(#SMODS.post_prob==1 and SMODS.post_prob[1].pseudorandom_result and SMODS.post_prob[1].result=={} and SMODS.post_prob[1].trigger_obj==actor,'silent creation must retain native probability result notification')",name=="chance_success")} else {String::new()})
         }));
     }
 }
