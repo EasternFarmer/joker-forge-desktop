@@ -328,6 +328,103 @@ end
 BOOSTER_OPEN_RUNTIME = steamodded_booster_open_runtime()
 
 
+def deck_card_runtime(lua_library):
+    """Use native edition/base setters and the game's shuffle on starting-card subsets."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    change_base = "function SMODS.change_base(" + source.split("function SMODS.change_base(", 1)[1]
+    change_base = change_base.split("\n-- Modify a card's rank", 1)[0]
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            functions = archive.read("functions/misc_functions.lua").decode("utf-8")
+        shuffle = "function pseudoshuffle" + functions.split("function pseudoshuffle", 1)[1]
+        shuffle = shuffle.split("\nfunction ", 1)[0]
+    else:
+        shuffle = """
+function pseudoshuffle(cards,seed)
+ math.randomseed(seed)
+ for i=#cards,2,-1 do local j=math.random(i);cards[i],cards[j]=cards[j],cards[i] end
+end
+"""
+    return change_base + shuffle + """
+function pseudoseed(seed)
+ local value=0;for i=1,#seed do value=(value*31+string.byte(seed,i))%2147483647 end
+ return value
+end
+SMODS.Suits={};SMODS.Ranks={};G.P_CARDS={}
+for _,suit in ipairs({'Hearts','Spades','Diamonds','Clubs'}) do
+ SMODS.Suits[suit]={key=suit,card_key=string.sub(suit,1,1)}
+end
+for id,rank in ipairs({'2','3','4','5','6','7','8','9','10','Jack','Queen','King','Ace'}) do
+ SMODS.Ranks[rank]={key=rank,card_key=tostring(id+1),id=id+1}
+ for suit,spec in pairs(SMODS.Suits) do
+  G.P_CARDS[spec.card_key..'_'..(id+1)]={suit=suit,value=rank,id=id+1,nominal=id+1}
+ end
+end
+G.P_CENTERS.c_base={key='c_base',set='Default'}
+G.P_CENTERS.m_stone={key='m_stone',set='Enhanced'}
+G.P_CENTER_POOLS.Enhanced[#G.P_CENTER_POOLS.Enhanced+1]=G.P_CENTERS.m_stone
+function SMODS.poll_seal() return 'Gold' end
+local native_set_edition=Card.set_edition
+function Card:set_edition(...)
+ self.edition_calls=(self.edition_calls or 0)+1
+ return native_set_edition(self,...)
+end
+function initialize_starting_cards()
+ G.deck={cards={}};G.playing_cards={};initial_deck_cards={}
+ for index,spec in ipairs({{'Hearts','2'},{'Hearts','King'},{'Spades','King'},
+  {'Clubs','Ace'},{'Hearts','King'},{'Diamonds','3'},{'Spades','2'},{'Hearts','Ace'}}) do
+  local card=playing_card();card.sort_id=index;card.area=G.deck
+  card.config.center=G.P_CENTERS.c_base
+  card.base=copy_table(G.P_CARDS[SMODS.Suits[spec[1]].card_key..'_'..SMODS.Ranks[spec[2]].card_key])
+  card.original_suit=spec[1];card.original_rank=spec[2]
+  function card:is_suit(suit) return self.base.suit==suit end
+  function card:set_base(base) assert(base);self.base=copy_table(base) end
+  function card:set_ability(center)
+   assert(center,'enhancement center must exist');self.config.center=center
+   self.ability.set=center.set;self.enhancement_calls=(self.enhancement_calls or 0)+1
+  end
+  function card:set_seal(seal) self.seal=seal;self.seal_calls=(self.seal_calls or 0)+1 end
+  function card:remove()
+   self.removed=true
+   for i=#G.playing_cards,1,-1 do if G.playing_cards[i]==self then table.remove(G.playing_cards,i) end end
+   for i=#G.deck.cards,1,-1 do if G.deck.cards[i]==self then table.remove(G.deck.cards,i) end end
+  end
+  G.playing_cards[index]=card;G.deck.cards[index]=card;initial_deck_cards[index]=card
+ end
+end
+function assert_starting_card_targets(ids,enhancement,edition,seal,suit,rank)
+ local expected={};for _,id in ipairs(ids) do expected[id]=true end
+ for id,card in ipairs(initial_deck_cards) do
+  assert(G.playing_cards[id]==card and G.deck.cards[id]==card,'targeting must preserve deck order '..id)
+  local selected=expected[id] or false
+  assert((card.enhancement_calls or 0)==(selected and enhancement and 1 or 0),'enhancement target '..id)
+  assert((card.edition_calls or 0)==(selected and edition and 1 or 0),'edition target '..id)
+  assert((card.seal_calls or 0)==(selected and seal and 1 or 0),'seal target '..id)
+  assert(card.config.center.key==(selected and enhancement or 'c_base'),'enhancement value '..id)
+  assert((card.edition and card.edition.key)==(selected and edition or nil),'edition value '..id)
+  assert(card.seal==(selected and seal or nil),'seal value '..id)
+  assert(card.base.suit==(selected and suit or card.original_suit),'suit value '..id)
+  assert(card.base.value==(selected and rank or card.original_rank),'rank value '..id)
+ end
+ assert(G.GAME.starting_deck_size==#G.playing_cards)
+end
+function assert_random_starting_targets(count,target_suit,target_rank)
+ local ids={}
+ for id,card in ipairs(initial_deck_cards) do
+  if card.enhancement_calls or card.edition_calls then
+   assert(not target_suit or card.original_suit==target_suit,'random suit filter '..id)
+   assert(not target_rank or card.original_rank==target_rank,'random rank filter '..id)
+   ids[#ids+1]=id
+  end
+ end
+ assert(#ids==count,'expected '..count..' distinct cards, got '..#ids)
+ assert_starting_card_targets(ids,'m_bonus','e_polychrome')
+end
+G.playing_cards=nil;G.deck=nil
+"""
+
+
 def card_area_selection_runtime(lua_library):
     """Exercise installed CardArea selection when Balatro is beside its Lua DLL."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -591,7 +688,7 @@ def run_checks(lua, cases, lua_library):
                         raise AssertionError(f"{case['kind']} {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
                     checks += len(case["ids"])
             continue
-        if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings"):
+        if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings", "deck_cards"):
             state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
             source = HELPERS + EFFECT_RESOLVER + state + case.get("setup", "") + "\n" + case["code"]
             if case.get("card_selection"):
@@ -604,9 +701,11 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + CARD_DESTRUCTION_RUNTIME
             if case.get("playing_card_transform_runtime"):
                 source += "\n" + PLAYING_CARD_TRANSFORM_RUNTIME
+            if case["kind"] == "deck_cards":
+                source += "\n" + PLAYING_CARD_TRANSFORM_RUNTIME + deck_card_runtime(lua_library)
             if case.get("booster_open_runtime"):
                 source += "\n" + BOOSTER_OPEN_RUNTIME
-            if case["kind"] == "deck_settings":
+            if case["kind"] in ("deck_settings", "deck_cards"):
                 source += "\nactor={effect={center=test_definition,config=copy_table(test_definition.config or {})}};\n"
             else:
                 source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};actor.ability.extra=actor.ability.extra or {};\n"

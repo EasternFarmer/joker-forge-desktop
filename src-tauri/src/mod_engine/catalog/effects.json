@@ -7182,10 +7182,77 @@
   },
   {
     "id": "edit_all_starting_cards",
-    "label": "Edit All Starting Cards",
-    "description": "Apply multiple modifications to the starting cards in the deck (enhancement, seal, edition, suit, rank)",
+    "label": "Edit Starting Cards",
+    "description": "Apply enhancements, seals, editions, suit changes, or rank changes to all starting cards, matching suits and ranks, or a random number of matching cards",
     "objectUsers": ["deck"],
     "params": [
+      {
+        "id": "selection_method",
+        "type": "select",
+        "label": "Cards to Edit",
+        "options": [
+          {
+            "value": "all",
+            "label": "All Cards"
+          },
+          {
+            "value": "matching",
+            "label": "Matching Cards"
+          },
+          {
+            "value": "random",
+            "label": "Random Cards"
+          }
+        ],
+        "default": "all"
+      },
+      {
+        "id": "target_suit",
+        "type": "select",
+        "label": "Match Suit",
+        "options": [
+          {
+            "value": "any",
+            "label": "Any Suit"
+          }
+        ],
+        "default": "any",
+        "optionSource": "suits",
+        "showWhen": {
+          "parameter": "selection_method",
+          "values": ["matching", "random"]
+        }
+      },
+      {
+        "id": "target_rank",
+        "type": "select",
+        "label": "Match Rank",
+        "options": [
+          {
+            "value": "any",
+            "label": "Any Rank"
+          }
+        ],
+        "default": "any",
+        "optionSource": "ranks",
+        "showWhen": {
+          "parameter": "selection_method",
+          "values": ["matching", "random"]
+        }
+      },
+      {
+        "id": "count",
+        "type": "number",
+        "label": "Number of Cards",
+        "default": 2,
+        "min": 0,
+        "step": 1,
+        "variableTypes": ["number"],
+        "showWhen": {
+          "parameter": "selection_method",
+          "values": ["random"]
+        }
+      },
       {
         "id": "enhancement",
         "type": "select",

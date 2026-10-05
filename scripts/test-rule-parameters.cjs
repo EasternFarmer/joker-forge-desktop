@@ -40,6 +40,94 @@ const variableCases = [
   ["text", "change_text_variable", "text_variable", "addTextVariablesToOptions"],
 ];
 
+test("Edit Starting Cards shows filters for matching and random selections", () => {
+  const effect = effects.find((entry) => entry.id === "edit_all_starting_cards");
+  assert.ok(effect);
+  for (const [mode, expectedFields] of [
+    ["all", []],
+    ["matching", ["target_suit", "target_rank"]],
+    ["random", ["target_suit", "target_rank", "count"]],
+  ]) {
+    const parentValues = { selection_method: { value: mode } };
+    const visibleFields = effect.params
+      .filter((parameter) => isParameterVisible(parameter, effect.params, parentValues))
+      .map((parameter) => parameter.id);
+    assert.deepEqual(visibleFields, [
+      "selection_method", ...expectedFields,
+      "enhancement", "seal", "edition", "suit", "rank",
+    ], `${mode} exposes the fields needed to choose and modify its cards`);
+  }
+  const count = effect.params.find((entry) => entry.id === "count");
+  assert.equal(count.type, "number");
+  assert.equal(count.default, 2, "Initial count opens in numeric mode");
+  assert.equal(count.min, 0);
+  assert.equal(count.step, 1);
+  assert.deepEqual(count.variableTypes, ["number"]);
+});
+
+test("existing Edit All Starting Cards projects keep the all-cards default", () => {
+  const effect = effects.find((entry) => entry.id === "edit_all_starting_cards");
+  const oldValues = {
+    enhancement: { value: "m_glass" },
+    edition: { value: "polychrome" },
+  };
+  assert.equal(effect.params.find((entry) => entry.id === "selection_method").default, "all");
+  for (const id of ["target_suit", "target_rank", "count"]) {
+    const parameter = effect.params.find((entry) => entry.id === id);
+    assert.equal(isParameterVisible(parameter, effect.params, oldValues), false, id);
+  }
+  for (const id of ["target_suit", "target_rank"]) {
+    assert.equal(effect.params.find((entry) => entry.id === id).default, "any", id);
+  }
+});
+
+test("deck start palette exposes subset editing with every built-in suit and rank", async () => {
+  const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
+  const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));
+  const common = readCatalog("common.json");
+  const balatroUtils = loadTypeScript("src/lib/balatro/balatro-utils.ts", {
+    "@/lib/items/unlock-utils": {},
+  });
+  const catalog = loadTypeScript("src/components/rule-builder/rule-catalog.ts", {
+    "@phosphor-icons/react": {},
+    "@/lib/balatro/balatro-utils": balatroUtils,
+    "@/lib/services/entity-bridge": { entityBridge: {
+      async getRulebuilderCatalog() {
+        return {
+          triggers: readCatalog("triggers.json"),
+          effects: readCatalog("effects.json"),
+          conditions: readCatalog("conditions.json"),
+          generic_triggers: common.genericTriggers,
+          all_objects: common.allObjects,
+          trigger_groups: common.triggerGroups,
+          option_sources: common.optionSources,
+          option_sets: common.optionSets,
+        };
+      },
+    } },
+  });
+  await catalog.initializeRuleCatalogFromRust();
+  assert.ok(catalog.getTriggers("deck").some((trigger) => trigger.id === "card_used"));
+  const availableEffects = catalog.getEffectsForTrigger("card_used", "deck");
+  const effect = availableEffects.find((entry) => entry.id === "edit_all_starting_cards");
+  assert.ok(effect, "Deck start palette includes the compatible saved effect ID");
+  assert.equal(effect.label, "Edit Starting Cards");
+  for (const [id, expectedValues] of [
+    ["target_suit", ["any", "Spades", "Hearts", "Diamonds", "Clubs"]],
+    ["target_rank", ["any", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]],
+  ]) {
+    const parameter = effect.params.find((entry) => entry.id === id);
+    const options = parameter.options({ selection_method: { value: "matching" } });
+    assert.deepEqual(Array.from(options, (option) => option.value), expectedValues, id);
+    assert.equal(options[0].label, id === "target_suit" ? "Any Suit" : "Any Rank");
+  }
+  for (const id of ["edit_starting_suits", "edit_starting_ranks"]) {
+    assert.ok(availableEffects.some((entry) => entry.id === id), `Existing ${id} remains available`);
+  }
+  assert.equal(catalog.getEffectsForTrigger("card_used", "consumable")
+    .some((entry) => entry.id === effect.id), false, "Deck editing stays in the deck palette");
+});
+
 test("consumable use rules expose variable checks and changes for every variable type", async () => {
   const catalogPath = path.join(__dirname, "..", "src-tauri/src/mod_engine/catalog");
   const readCatalog = (name) => JSON.parse(fs.readFileSync(path.join(catalogPath, name), "utf8"));

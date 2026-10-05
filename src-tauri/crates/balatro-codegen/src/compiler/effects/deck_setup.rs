@@ -223,9 +223,52 @@ pub fn add_starting_cards(effect: &EffectDef, ctx: &mut CompileContext) -> Effec
     deck_output(vec![run_start_event(&body)], "G.C.SECONDARY_SET.Spectral")
 }
 
-/// Edit All Starting Cards: apply modifications to every starting card.
+/// Edit Starting Cards
 pub fn edit_all_starting_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
-    let body = card_modification_loop(effect, ctx, None, None);
+    let method = get_str(effect, "selection_method").unwrap_or("all");
+    if !matches!(method, "matching" | "random") {
+        let body = card_modification_loop(effect, ctx, None, None);
+        return deck_output(vec![run_start_event(&body)], "G.C.SECONDARY_SET.Tarot");
+    }
+
+    let mut filters = Vec::new();
+    if let Some(suit) = get_str(effect, "target_suit").filter(|suit| *suit != "any") {
+        filters.push(format!("v:is_suit({})", lua_str(suit)));
+    }
+    if let Some(rank) = get_str(effect, "target_rank").filter(|rank| *rank != "any") {
+        filters.push(format!(
+            "v.base and v.base.value == {}",
+            lua_str(full_rank_key(rank))
+        ));
+    }
+    let filter = if filters.is_empty() {
+        "true".to_string()
+    } else {
+        filters.join(" and ")
+    };
+
+    let mut body = format!(
+        "        local starting_card_targets = {{}}\n        for _, v in ipairs(G.playing_cards) do\n            if {filter} then\n                starting_card_targets[#starting_card_targets + 1] = v\n            end\n        end\n"
+    );
+    if method == "random" {
+        let count = crate::compiler::values::resolve_config_value(
+            &effect.params,
+            "count",
+            ctx,
+            "edit_starting_cards_count",
+        );
+        body.push_str(&format!(
+            "        local target_count = math.min(#starting_card_targets, math.max(0, math.floor(tonumber({}) or 0)))\n        if target_count > 0 then\n            pseudoshuffle(starting_card_targets, pseudoseed('edit_starting_cards'))\n        end\n",
+            count.lua_str
+        ));
+    } else {
+        body.push_str("        local target_count = #starting_card_targets\n");
+    }
+    body.push_str(
+        "        for i = 1, target_count do\n            local v = starting_card_targets[i]\n",
+    );
+    body.push_str(&card_modifications(effect, ctx, None));
+    body.push_str("        end");
     deck_output(vec![run_start_event(&body)], "G.C.SECONDARY_SET.Tarot")
 }
 
@@ -321,6 +364,24 @@ fn card_modification_loop(
     filter: Option<&str>,
     base_override: Option<(&str, &str)>,
 ) -> String {
+    let mods = card_modifications(effect, ctx, base_override);
+    match filter {
+        Some(check) => format!(
+            "        for _, v in pairs(G.playing_cards) do\n            if {} then\n{}            end\n        end",
+            check, mods
+        ),
+        None => format!(
+            "        for _, v in pairs(G.playing_cards) do\n{}        end",
+            mods
+        ),
+    }
+}
+
+fn card_modifications(
+    effect: &EffectDef,
+    ctx: &CompileContext,
+    base_override: Option<(&str, &str)>,
+) -> String {
     let enhancement = get_str(effect, "enhancement").unwrap_or("none");
     let seal = get_str(effect, "seal").unwrap_or("none");
     let edition = get_str(effect, "edition").unwrap_or("none");
@@ -389,16 +450,7 @@ fn card_modification_loop(
         )),
     }
 
-    match filter {
-        Some(check) => format!(
-            "        for _, v in pairs(G.playing_cards) do\n            if {} then\n{}            end\n        end",
-            check, mods
-        ),
-        None => format!(
-            "        for _, v in pairs(G.playing_cards) do\n{}        end",
-            mods
-        ),
-    }
+    mods
 }
 
 fn edition_key(edition: &str, mod_prefix: &str) -> String {

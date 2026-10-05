@@ -1976,7 +1976,25 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
     let title = "";
 
-    if (params.operator && params !== undefined) {
+    if (typeDefinition.id === "edit_all_starting_cards") {
+      const method = params.selection_method || "all";
+      const filters: string[] = [];
+      if (method === "matching" || method === "random") {
+        if (params.target_suit && params.target_suit !== "any") {
+          filters.push(String(params.target_suit));
+        }
+        if (params.target_rank && params.target_rank !== "any") {
+          filters.push(`rank ${params.target_rank}`);
+        }
+      }
+      const target = method === "random"
+        ? `${params.count ?? 2} random ${Number(params.count ?? 2) === 1 ? "card" : "cards"}`
+        : filters.length > 0 ? "cards" : "all cards";
+      title = `${baseLabel}: ${target}${filters.length > 0 ? ` matching ${filters.join(" and ")}` : ""}`;
+      for (const key of ["selection_method", "target_suit", "target_rank", "count"]) {
+        processedParams.add(key);
+      }
+    } else if (params.operator && params !== undefined) {
       const operatorMap: Record<string, string> = {
         equals: "=",
         not_equals: "≠",

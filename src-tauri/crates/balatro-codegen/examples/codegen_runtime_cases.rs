@@ -505,6 +505,174 @@ fn deck_settings_case(
         "prepare":prepare, "invoke":invoke, "verify":verify}));
 }
 
+fn deck_card_rule(params: Value) -> Value {
+    json!([{"id":"targets","trigger":"card_used","effects":[{
+        "effect_type":"edit_all_starting_cards","params":params
+    }]}])
+}
+
+fn deck_cards_case(
+    cases: &mut Vec<Value>,
+    name: &str,
+    definition: DeckDef,
+    prepare: &str,
+    invoke: &str,
+    verify: &str,
+) {
+    cases.push(json!({"kind":"deck_cards","name":format!("deck_cards_{name}"),
+        "code":Emitter::new().emit_chunk(&compile_deck(&definition,"mod")),
+        "prepare":prepare,"invoke":invoke,"verify":verify}));
+}
+
+fn append_deck_card_target_cases(cases: &mut Vec<Value>) {
+    // Deck apply precedes creation of the starting cards. Both target filtering
+    // and game-variable counts must execute in the queued startup callback.
+    let startup="assert(G.playing_cards==nil);test_definition:apply(actor);assert(#event_queue>0);assert(G.playing_cards==nil);initialize_starting_cards();run_events()";
+    for (name, selection, target_suit, target_rank, ids) in [
+        ("legacy_all",None,"Hearts","King","{1,2,3,4,5,6,7,8}"),
+        ("explicit_all",Some("all"),"Hearts","King","{1,2,3,4,5,6,7,8}"),
+        ("unknown_selector_legacy_all",Some("old_value"),"Hearts","King","{1,2,3,4,5,6,7,8}"),
+        ("matching_suit",Some("matching"),"Hearts","any","{1,2,5,8}"),
+        ("matching_rank",Some("matching"),"any","King","{2,3,5}"),
+        ("matching_rank_abbreviation",Some("matching"),"any","A","{4,8}"),
+        ("matching_intersection",Some("matching"),"Hearts","K","{2,5}"),
+        ("matching_any",Some("matching"),"any","any","{1,2,3,4,5,6,7,8}"),
+        ("matching_empty",Some("matching"),"Spades","Ace","{}"),
+    ] {
+        let mut params=json!({"target_suit":target_suit,"target_rank":target_rank,
+            "enhancement":"m_bonus","edition":"polychrome"});
+        if let Some(selection)=selection {
+            params["selection_method"]=json!(selection);
+        }
+        deck_cards_case(cases,name,deck(deck_card_rule(params)),"",startup,
+            &format!("assert_starting_card_targets({ids},'m_bonus','e_polychrome')"));
+    }
+
+    deck_cards_case(cases,"typed_selectors_and_modifications",deck(deck_card_rule(json!({
+        "selection_method":{"value":"matching","valueType":"specific"},
+        "target_suit":{"value":"Hearts","valueType":"specific"},
+        "target_rank":{"value":"K","valueType":"specific"},
+        "enhancement":{"value":"m_mult","valueType":"specific"},
+        "edition":{"value":"e_polychrome","valueType":"specific"}
+    }))),"",startup,"assert_starting_card_targets({2,5},'m_mult','e_polychrome')");
+
+    deck_cards_case(cases,"simultaneous_modifications",deck(deck_card_rule(json!({
+        "selection_method":"matching","target_suit":"Hearts","target_rank":"King",
+        "enhancement":"m_mult","edition":"polychrome","seal":"Gold","suit":"Spades","rank":"A"
+    }))),"",startup,"assert_starting_card_targets({2,5},'m_mult','e_polychrome','Gold','Spades','Ace')");
+
+    for edition in ["shiny","e_mod_shiny"] {
+        deck_cards_case(cases,&format!("custom_edition_{edition}"),deck(deck_card_rule(json!({
+            "selection_method":"matching","target_suit":"Hearts","target_rank":"A","edition":edition
+        }))),"",startup,"assert_starting_card_targets({8},nil,'e_mod_shiny');assert(initial_deck_cards[8].edition.x_mult==2)");
+    }
+
+    // An edition hook can modify another card's suit while applying the first
+    // edition. The eligible set must already have been captured at this point.
+    deck_cards_case(cases,"matching_snapshot_before_edition_hooks",deck(deck_card_rule(json!({
+        "selection_method":"matching","target_suit":"Hearts","target_rank":"King","edition":"polychrome"
+    }))),
+        "G.P_CENTERS.e_polychrome.on_apply=function(card) for _,id in ipairs({2,5}) do if initial_deck_cards[id]~=card then initial_deck_cards[id].base.suit='Clubs' end end end",
+        startup,
+        "for id,card in ipairs(initial_deck_cards) do assert((card.edition_calls or 0)==((id==2 or id==5) and 1 or 0));assert((card.edition and card.edition.key)==((id==2 or id==5) and 'e_polychrome' or nil)) end");
+
+    for (name,count,expected) in [
+        ("random_count",json!(2),2),
+        ("random_zero",json!(0),0),
+        ("random_negative",json!(-3),0),
+        ("random_fractional",json!(2.9),2),
+        ("random_oversized",json!(99),4),
+        ("random_numeric_string",json!("3"),3),
+        ("random_typed_number",json!({"value":2,"valueType":"number"}),2),
+    ] {
+        deck_cards_case(cases,name,deck(deck_card_rule(json!({
+            "selection_method":"random","count":count,"target_suit":"Hearts","target_rank":"any",
+            "enhancement":"m_bonus","edition":"polychrome"
+        }))),"",startup,&format!("assert_random_starting_targets({expected},'Hearts')"));
+    }
+
+    for (name,target_suit,target_rank,count,expected) in [
+        ("random_unfiltered","any","any",3,3),
+        ("random_intersection","Hearts","K",1,1),
+        ("random_intersection_oversized","Hearts","K",5,2),
+        ("random_empty","Spades","Ace",2,0),
+    ] {
+        let suit=if target_suit=="any" {"nil"}else{"'Hearts'"};
+        let suit=if target_suit=="Spades" {"'Spades'"}else{suit};
+        let rank=if target_rank=="any" {"nil"}else if target_rank=="K" {"'King'"}else{"'Ace'"};
+        deck_cards_case(cases,name,deck(deck_card_rule(json!({
+            "selection_method":"random","count":count,"target_suit":target_suit,"target_rank":target_rank,
+            "enhancement":"m_bonus","edition":"polychrome"
+        }))),"",startup,&format!("assert_random_starting_targets({expected},{suit},{rank})"));
+    }
+
+    deck_cards_case(cases,"random_runtime_config_count",deck(deck_card_rule(json!({
+        "selection_method":"random","count":1,"enhancement":"m_bonus","edition":"polychrome"
+    }))),"test_definition.config.extra.edit_starting_cards_count0=3",startup,"assert_random_starting_targets(3)");
+
+    let mut definition=deck(deck_card_rule(json!({
+        "selection_method":"random","count":{"value":"bonus","valueType":"userVariable"},
+        "enhancement":"m_bonus","edition":"polychrome"
+    })));
+    definition.user_variables=serde_json::from_value(json!([
+        {"name":"bonus","var_type":"number","initial_value":2}
+    ])).unwrap();
+    deck_cards_case(cases,"random_user_variable_count",definition,
+        "test_definition.config.extra.bonus=3",startup,"assert_random_starting_targets(3)");
+
+    for (name,count) in [
+        ("random_game_variable_count",json!({"value":"GAMEVAR:cards_in_deck|0.5|0","valueType":"gameVariable"})),
+        ("random_legacy_game_variable_count",json!("GAMEVAR:cards_in_deck|0.5|0")),
+    ] {
+        deck_cards_case(cases,name,deck(deck_card_rule(json!({
+            "selection_method":"random","count":count,"enhancement":"m_bonus","edition":"polychrome"
+        }))),"",startup,"assert_random_starting_targets(4)");
+    }
+
+    deck_cards_case(cases,"random_count_read_after_apply",deck(deck_card_rule(json!({
+        "selection_method":"random","count":1,"enhancement":"m_bonus","edition":"polychrome"
+    }))),"",
+        "test_definition:apply(actor);test_definition.config.extra.edit_starting_cards_count0=3;initialize_starting_cards();run_events()",
+        "assert_random_starting_targets(3)");
+
+    deck_cards_case(cases,"random_modification_values",deck(deck_card_rule(json!({
+        "selection_method":"matching","target_suit":"Spades","target_rank":"King",
+        "enhancement":"random","edition":"random","seal":"random","suit":"random","rank":"random"
+    }))),"",startup,
+        "assert_starting_card_targets({3},'m_bonus','e_holo','Gold','Clubs','10')");
+
+    for (name,effect,params,ids) in [
+        ("legacy_suit_block","edit_starting_suits",json!({"selected_suit":"Hearts","replace_suit":"Spades","enhancement":"m_bonus","edition":"polychrome"}),"{1,2,5,8}"),
+        ("legacy_rank_block","edit_starting_ranks",json!({"specific_selected_Rank":"King","specific_replace_Rank":"Ace","enhancement":"m_bonus","edition":"polychrome"}),"{2,3,5}"),
+    ] {
+        let suit=if effect=="edit_starting_suits" {"'Spades'"}else{"nil"};
+        let rank=if effect=="edit_starting_ranks" {"'Ace'"}else{"nil"};
+        deck_cards_case(cases,name,deck(json!([{"id":"legacy","trigger":"card_used","effects":[{
+            "effect_type":effect,"params":params
+        }]}])),"",startup,&format!("assert_starting_card_targets({ids},'m_bonus','e_polychrome',nil,{suit},{rank})"));
+    }
+
+    deck_cards_case(cases,"multiple_rules",deck(json!([
+        {"id":"hearts","trigger":"card_used","effects":[{"effect_type":"edit_all_starting_cards","params":{
+            "selection_method":"matching","target_suit":"Hearts","enhancement":"m_bonus"
+        }}]},
+        {"id":"kings","trigger":"card_used","effects":[{"effect_type":"edit_all_starting_cards","params":{
+            "selection_method":"matching","target_rank":"K","edition":"polychrome"
+        }}]}
+    ])),"",startup,
+        "for _,card in ipairs(initial_deck_cards) do assert(card.config.center.key==(card.original_suit=='Hearts' and 'm_bonus' or 'c_base'));assert((card.edition and card.edition.key)==(card.original_rank=='King' and 'e_polychrome' or nil)) end;assert(#event_queue==0 and G.GAME.starting_deck_size==8)");
+
+    deck_cards_case(cases,"loop_group",deck(json!([{
+        "id":"looped","trigger":"card_used","loop_groups":[{"id":"repeat","count":2,"effects":[{
+            "effect_type":"edit_all_starting_cards","params":{
+                "selection_method":"matching","target_suit":"Spades","target_rank":"King",
+                "enhancement":"m_bonus","edition":"polychrome"
+            }
+        }]}]
+    }])),"",startup,
+        "for id,card in ipairs(initial_deck_cards) do assert((card.enhancement_calls or 0)==(id==3 and 2 or 0));assert((card.edition_calls or 0)==(id==3 and 2 or 0)) end;assert(#event_queue==0 and G.GAME.starting_deck_size==8)");
+}
+
 fn append_playing_card_transform_cases(cases: &mut Vec<Value>) {
     for edition in [json!("polychrome"),json!("e_polychrome"),json!({"value":"polychrome","valueType":"specific"})] {
         let definition=joker(json!([{"id":"modify","trigger":"card_scored","effects":[{
@@ -2146,6 +2314,7 @@ fn main() {
     append_card_self_destruct_cases(&mut cases);
     append_playing_card_transform_cases(&mut cases);
     append_deck_settings_cases(&mut cases);
+    append_deck_card_target_cases(&mut cases);
     append_joker_creation_cases(&mut cases);
     append_rule_option_cases(&mut cases);
     append_booster_option_cases(&mut cases);
