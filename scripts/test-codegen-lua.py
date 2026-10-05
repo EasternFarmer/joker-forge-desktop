@@ -308,6 +308,81 @@ end
 PROBABILITY_RESULT_RUNTIME = steamodded_probability_result_runtime()
 
 
+def rarity_shop_runtime(lua_library):
+    """Use native rarity registration, Joker injection, and weighted shop polling."""
+    objects = (ROOT / "public/other/smods-main/src/game_object.lua").read_text(encoding="utf-8")
+    utils = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    base = "SMODS.GameObject = Object:extend()" + objects.split("SMODS.GameObject = Object:extend()", 1)[1]
+    base = base.split("    function SMODS.GameObject:process_loc_text()", 1)[0]
+    rarities = "SMODS.Rarities = {}" + objects.split("SMODS.Rarities = {}", 1)[1]
+    rarities = rarities.split("------- API CODE GameObject.ConsumableType", 1)[0]
+    centers = "SMODS.Centers = {}" + objects.split("SMODS.Centers = {}", 1)[1]
+    centers = centers.split("------- API CODE GameObject.Center.Consumable", 1)[0]
+    sections = [
+        ("function SMODS.merge_defaults", "\nV = require"),
+        ("function SMODS.insert_pool", "\nfunction SMODS.juice_up_blind"),
+        ("function SMODS.poll_rarity", "\nfunction "),
+    ]
+    native = "\n".join(start + utils.split(start, 1)[1].split(end, 1)[0]
+                       for start, end in sections)
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            object_base = archive.read("engine/object.lua").decode("utf-8")
+            events = archive.read("functions/common_events.lua").decode("utf-8")
+        pool = "function get_current_pool" + events.split("function get_current_pool", 1)[1]
+        pool = pool.split("\nfunction ", 1)[0]
+        patches = tomllib.loads((ROOT / "public/other/smods-main/lovely/rarity.toml").read_text(encoding="utf-8"))
+        rarity_patch = next(patch["regex"]["payload"] for patch in patches["patches"]
+                            if "regex" in patch and 'SMODS.poll_rarity("Joker"' in patch["regex"]["payload"])
+        first = pool.index("            local rarity = _rarity")
+        last = pool.index("            _starting_pool", first)
+        pool = pool[:first] + rarity_patch + pool[last:]
+    else:
+        # Keep the runner portable when only a Lua shared library is available.
+        # Installed-game runs above also exercise the actual game's pool filtering.
+        object_base = """
+Object={};Object.__index=Object
+function Object:extend()
+ local cls={};for k,v in pairs(self) do if k:find('__')==1 then cls[k]=v end end
+ cls.__index=cls;cls.super=self;setmetatable(cls,self);return cls
+end
+"""
+        pool = """
+function get_current_pool(kind,rarity,legendary,source)
+ local aliases={Common=1,Uncommon=2,Rare=3,Legendary=4}
+ rarity=aliases[rarity] or rarity or SMODS.poll_rarity(kind,source)
+ local result={}
+ for _,center in ipairs(G.P_JOKER_RARITY_POOLS[rarity]) do
+  if center.unlocked~=false then result[#result+1]=center.key end
+ end
+ return result,'Joker'..rarity
+end
+"""
+    return object_base + """
+SMODS.current_mod=nil
+G={P_CENTERS={},P_CENTER_POOLS={Joker={}},P_JOKER_RARITY_POOLS={[1]={},[2]={},[3]={},[4]={}},
+ C={RARITY={}},ARGS={TEMP_POOL={}},GAME={round_resets={ante=1},used_jokers={},pool_flags={},banned_keys={}}}
+Game={init_game_object=function() return copy_table(G.GAME) end}
+function HEX(value) return value end
+function sendWarnMessage(message) error(message) end
+function EMPTY(value) for key in pairs(value) do value[key]=nil end;return value end
+function find_joker() return {} end
+function pseudoseed(seed) return seed end
+function pseudorandom() return rarity_roll end
+""" + native + base + rarities + centers + pool + """
+for rarity=1,3 do SMODS.Joker{key='vanilla_'..rarity,rarity=rarity,unlocked=true} end
+SMODS.current_mod={prefix='mod'}
+rarity_roll=0.99
+function inject_rarity_shop()
+ for _,key in ipairs(SMODS.Rarity.obj_buffer) do SMODS.Rarities[key]:inject() end
+ for _,key in ipairs(SMODS.ObjectType.obj_buffer) do SMODS.ObjectTypes[key]:inject() end
+ for _,key in ipairs(SMODS.Joker.obj_buffer) do SMODS.Centers[key]:inject() end
+ G.GAME=Game:init_game_object()
+end
+"""
+
+
 def steamodded_playing_card_transform_runtime():
     """Apply editions with Steamodded's real Card implementation, not a setter stub."""
     source = (ROOT / "public/other/smods-main/src/overrides.lua").read_text(encoding="utf-8")
@@ -735,6 +810,15 @@ KNOWN_VALUES = {
 def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
+        if case["kind"] == "rarity_shop":
+            source = HELPERS + rarity_shop_runtime(lua_library) + "\n" + case["code"]
+            source += "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
+            try:
+                evaluate(lua, source)
+            except AssertionError as error:
+                raise AssertionError(f"rarity_shop {case['name']}: {error}") from error
+            checks += 1
+            continue
         if case["kind"] in ("tooltip", "description_game"):
             for scenario, setup in GAME_STATES.items():
                 for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):

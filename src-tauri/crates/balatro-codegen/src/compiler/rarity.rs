@@ -10,6 +10,8 @@ pub fn compile_rarity(rarity: &RarityDef, _mod_prefix: &str) -> Chunk {
     entries.push(kv("key", lua_str(&rarity.key)));
     entries.push(kv("badge_colour", lua_call("HEX", vec![lua_str(hex)])));
     entries.push(kv("default_weight", lua_num(rarity.default_weight)));
+    // A weight only participates in shop rolls when the rarity belongs to the Joker pool.
+    entries.push(kv("pools", lua_table(vec![("Joker", lua_bool(true))])));
 
     let loc_txt = lua_table(vec![("name", lua_str(&rarity.name))]);
     entries.push(TableEntry::KeyValue("loc_txt".to_string(), loc_txt));

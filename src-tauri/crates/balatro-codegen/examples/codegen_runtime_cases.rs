@@ -12,7 +12,7 @@ use balatro_codegen::compiler::values::{
 use balatro_codegen::types::{
     ConditionDef, ConsumableDef, DeckDef, EditionDef, EffectDef, EnhancementDef, JokerDef, ObjectType, ParamValue, SealDef, UserVariableDef, VoucherDef,
 };
-use balatro_codegen::{compile_consumable, compile_deck, compile_edition, compile_enhancement, compile_joker, compile_seal, compile_voucher, Emitter};
+use balatro_codegen::{compile_consumable, compile_deck, compile_edition, compile_enhancement, compile_joker, compile_rarity, compile_seal, compile_voucher, Emitter};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -32,6 +32,46 @@ fn deck(rules: Value) -> DeckDef {
         "atlas":"CustomDecks", "pos":{"x":0,"y":0}, "rules":rules
     }))
     .unwrap()
+}
+
+fn append_rarity_shop_cases(cases: &mut Vec<Value>) {
+    for (name, rarities, joker_rarity, prepare, verify) in [
+        ("positive_weight", vec![("superrare", 0.05)], "superrare", "",
+            "assert(SMODS.poll_rarity('Joker','shop')=='mod_superrare','custom rarity must be eligible for shop polling');local pool=get_current_pool('Joker',nil,false,'shop');assert(#pool==1 and pool[1]=='j_mod_runtime_test')"),
+        ("already_prefixed_joker", vec![("superrare", 0.05)], "mod_superrare", "",
+            "assert(SMODS.Centers.j_mod_runtime_test.rarity=='mod_superrare');local pool=get_current_pool('Joker',nil,false,'shop');assert(pool[1]=='j_mod_runtime_test')"),
+        ("zero_weight", vec![("superrare", 0.0)], "superrare", "",
+            "for i=0,99 do rarity_roll=i/100;assert(SMODS.poll_rarity('Joker','shop')~='mod_superrare') end;local pool=get_current_pool('Joker','mod_superrare',false,'forced');assert(pool[1]=='j_mod_runtime_test')"),
+        ("vanilla_rates", vec![("superrare", 0.05)], "superrare", "",
+            "rarity_roll=0;assert(SMODS.poll_rarity('Joker','shop')==1);rarity_roll=0.7;assert(SMODS.poll_rarity('Joker','shop')==2);rarity_roll=0.92;assert(SMODS.poll_rarity('Joker','shop')==3);local rates=SMODS.ObjectTypes.Joker.rarities;assert(rates[1].weight==0.7 and rates[2].weight==0.25 and rates[3].weight==0.05)"),
+        ("run_weight_modifier", vec![("superrare", 0.05)], "superrare", "G.GAME.mod_superrare_mod=0",
+            "assert(SMODS.poll_rarity('Joker','shop')==3);G.GAME.mod_superrare_mod=20;rarity_roll=0.6;assert(SMODS.poll_rarity('Joker','shop')=='mod_superrare')"),
+        ("native_get_weight", vec![("superrare", 0.05)], "superrare", "SMODS.Rarities.mod_superrare.get_weight=function(self,weight,pool) assert(weight==0.05 and pool.key=='Joker');return 0 end",
+            "assert(SMODS.poll_rarity('Joker','shop')==3);SMODS.Rarities.mod_superrare.get_weight=function() return 1 end;rarity_roll=0.6;assert(SMODS.poll_rarity('Joker','shop')=='mod_superrare')"),
+        ("multiple_custom_rarities", vec![("superrare", 0.05), ("mythic", 0.15)], "superrare", "",
+            "local total=0;for _,rarity in ipairs(SMODS.ObjectTypes.Joker.rarities) do total=total+rarity.weight end;assert(math.abs(total-1.2)<0.000001);local previous=0;local seen={};for _,rarity in ipairs(SMODS.ObjectTypes.Joker.rarities) do rarity_roll=(previous+rarity.weight/2)/total;local selected=SMODS.poll_rarity('Joker','shop');seen[selected]=true;previous=previous+rarity.weight end;assert(seen.mod_superrare and seen.mod_mythic);local pool=get_current_pool('Joker','mod_mythic',false,'shop');assert(pool[1]=='j_mod_mythic_test')"),
+    ] {
+        let mut code = String::new();
+        for (key, weight) in &rarities {
+            let input: export::RarityDataInput = serde_json::from_value(json!({
+                "key":key,"name":key,"badge_colour":"AABBCC","default_weight":weight
+            })).unwrap();
+            code.push_str(&Emitter::new().emit_chunk(&compile_rarity(&export::rarity_data_to_def(&input), "mod")));
+            code.push('\n');
+        }
+        for (key, rarity) in [("runtime_test", joker_rarity), ("mythic_test", "mythic")] {
+            if key == "mythic_test" && rarities.len() == 1 { continue; }
+            let input: export::JokerDataInput = serde_json::from_value(json!({
+                "objectKey":key,"name":key,"description":"Test","cost":4,"rarity":rarity,
+                "unlocked":true,"discovered":true,"rules":[]
+            })).unwrap();
+            let definition = export::joker_data_to_def(&input, "mod", export::AtlasPosInput { x: 0, y: 0 }, None);
+            code.push_str(&Emitter::new().emit_chunk(&compile_joker(&definition, "mod")));
+            code.push('\n');
+        }
+        cases.push(json!({"kind":"rarity_shop","name":format!("rarity_shop_{name}"),"code":code,
+            "invoke":format!("inject_rarity_shop();{prepare}"),"verify":verify}));
+    }
 }
 
 fn scoring_case(
@@ -2494,6 +2534,7 @@ fn main() {
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
+    append_rarity_shop_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);
