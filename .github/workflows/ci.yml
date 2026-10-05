@@ -36,6 +36,9 @@ jobs:
           npm run test:storage
           npm run test:templates
 
+      - name: Test Linux AppImage inspection
+        run: python3 scripts/test-linux-appimage.py
+
       - name: Build frontend
         run: npm run build
 

@@ -70,6 +70,16 @@ npm run build-nightly
 
 Both commands automatically prepare the correct channel identity and version before invoking `tauri build`. The nightly build uses a `-nightly.local` version suffix. In CI, the nightly version is injected via the `RELEASE_VERSION` environment variable.
 
+For Linux packages, run `npm ci`, prepare the desired channel, then build with `npx tauri build --bundles appimage,deb`. Linux releases use Tauri CLI 2.12.1, which fixes AppImage display-library conflicts with newer Mesa drivers. Use Ubuntu 22.04 as the build baseline; building on a newer distribution can raise the minimum required glibc version. See the [upstream packaging fix](https://github.com/tauri-apps/tauri/pull/16062) and [Tauri's AppImage guidance](https://v2.tauri.app/distribute/appimage/).
+
+Before distributing an AppImage, inspect it with:
+
+```bash
+python3 scripts/check-linux-appimage.py src-tauri/target/release/bundle/appimage/*.AppImage
+```
+
+The check extracts the package without FUSE and rejects bundled `libwayland-client` copies that can conflict with the host graphics drivers. Nightly Linux builds also check that the app opens a window and stays running for 15 seconds under Xvfb, saving the startup log. This catches early exits; it does not replace testing rendering and interaction on Fedora/Bazzite and a real Wayland desktop. Run `python3 scripts/test-linux-appimage.py` for the inspection regression checks.
+
 ## Terminal Code Generation Command
 
 You can compile one item payload to Lua directly from terminal:
