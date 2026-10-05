@@ -3440,10 +3440,28 @@
   {
     "id": "probability_succeeded",
     "label": "Probability Succeeded",
-    "description": "Check if the probability succeeded or failed",
+    "description": "Check whether a roll succeeded or failed, or use the chance group to check if a specific roll succeeded or failed.",
     "objectUsers": ["joker"],
     "applicableTriggers": ["probability_result"],
     "params": [
+      {
+        "id": "source",
+        "type": "select",
+        "label": "Probability Source",
+        "options": [
+          { "value": "any", "label": "Any probability" },
+          { "value": "chance_group", "label": "A chance group in this Joker" }
+        ],
+        "default": "any"
+      },
+      {
+        "id": "group_id",
+        "type": "select",
+        "label": "Chance Group",
+        "options": [],
+        "default": "",
+        "showWhen": { "parameter": "source", "values": ["chance_group"] }
+      },
       {
         "id": "status",
         "type": "select",

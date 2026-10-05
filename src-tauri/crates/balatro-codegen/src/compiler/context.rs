@@ -35,6 +35,9 @@ pub struct CompileContext {
     user_vars: Vec<UserVariableDef>,
     referenced_user_vars: HashSet<String>,
 
+    /// Chance groups selected by this object's probability-result rules.
+    probability_result_groups: HashSet<String>,
+
     description_variables: Option<Vec<DescriptionVariableBinding>>,
     description_probabilities: HashMap<String, DescriptionProbability>,
     effect_config_names: HashMap<String, Vec<String>>,
@@ -73,6 +76,7 @@ impl CompileContext {
             config_vars: Vec::new(),
             user_vars: Vec::new(),
             referenced_user_vars: HashSet::new(),
+            probability_result_groups: HashSet::new(),
             description_variables: None,
             description_probabilities: HashMap::new(),
             effect_config_names: HashMap::new(),
@@ -147,6 +151,14 @@ impl CompileContext {
 
     pub(crate) fn user_var_is_referenced(&self, name: &str) -> bool {
         self.referenced_user_vars.contains(name)
+    }
+
+    pub(crate) fn set_probability_result_groups(&mut self, groups: HashSet<String>) {
+        self.probability_result_groups = groups;
+    }
+
+    pub(crate) fn probability_group_is_referenced(&self, group_id: &str) -> bool {
+        self.probability_result_groups.contains(group_id)
     }
 
     /// Whether the given user variable is marked global.

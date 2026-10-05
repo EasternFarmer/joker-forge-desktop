@@ -336,6 +336,7 @@ function messageInspector(effect, groupType = "effects") {
     },
     "./rule-catalog": { getEffectTypeById: (id) => effects.find((entry) => entry.id === id) },
     "./parameter-visibility": { isParameterVisible },
+    "./probability-sources": loadTypeScript("src/components/rule-builder/probability-sources.ts"),
     "@/components/ui/input": { Input: "Input" },
     "@/components/ui/button": {},
     "@/components/ui/select": {
@@ -1020,4 +1021,228 @@ test("duplicating multiple rules selects all copies before deferred history eval
   assert.deepEqual(plainSnapshot(harness.render().rules), savedRules);
   callbacks.handleRedo();
   assert.deepEqual(plainSnapshot(harness.render().rules), plainSnapshot(edited));
+});
+
+function probabilityRules() {
+  const group = (id, numerator, denominator) => ({
+    id, chance_numerator: { value: numerator }, chance_denominator: { value: denominator },
+    respect_probability_effects: false, custom_key: "", effects: [],
+  });
+  const rule = (id, trigger, randomGroups) => ({
+    id, trigger, position: { x: 0, y: 0 }, blueprintCompatible: true,
+    conditionGroups: [], effects: [], loops: [], randomGroups,
+  });
+  return [
+    rule("initial-rule", "hand_drawn", [
+      group("rgid-original", 1, 5), group("rgid-secondary", 2, 7),
+    ]),
+    rule("result-rule", "probability_result", [group("rgid-chain", 1, 3)]),
+    rule("empty-rule", "hand_played", []),
+  ];
+}
+
+function probabilityInspector(condition, rules, catalog) {
+  const updates = [];
+  const react = {
+    memo: (component) => component, useEffect() {}, useMemo: (factory) => factory(),
+    useState: (initial) => [initial, () => {}],
+  };
+  const element = (type, props) => ({ type, props });
+  const { default: Inspector } = loadTypeScript("src/components/rule-builder/inspector.tsx", {
+    react: { default: react, ...react },
+    "react/jsx-runtime": { jsx: element, jsxs: element },
+    "@/lib/balatro/balatro-utils": {},
+    "@/lib/rules/user-variable-utils": { getNumberVariables: () => [] },
+    "@/lib/services/storage": { useProjectData: () => ({ data: { sounds: [] } }) },
+    "@/lib/app/global-user-variables": {
+      collectGlobalVariables: () => [], mergeItemVariablesWithGlobals: (item) => item,
+    },
+    "./rule-catalog": catalog,
+    "./parameter-visibility": { isParameterVisible },
+    "./probability-sources": loadTypeScript("src/components/rule-builder/probability-sources.ts"),
+    "@/components/ui/input": { Input: "Input" },
+    "@/components/ui/button": { Button: "Button" },
+    "@/components/ui/select": {
+      Select: "Select", SelectContent: "SelectContent", SelectItem: "SelectItem",
+      SelectTrigger: "SelectTrigger", SelectValue: "SelectValue",
+    },
+    "@phosphor-icons/react": {},
+    "@/lib/core/validation-utils": loadTypeScript("src/lib/core/validation-utils.ts"),
+    "@/lib/content/game-vars": {},
+    "@/components/ui/checkbox": {}, "./item-type-badge": {},
+    "@/components/ui/icon-button": {}, "@/components/ui/tooltip": {},
+    "@/components/ui/toggle": {}, "./panel": {},
+    "@/components/ui/help-tooltip-icon": {},
+  });
+  const selectedRule = { ...probabilityRules()[1], conditionGroups: [{
+    id: "conditions", operator: "and", conditions: [condition],
+  }] };
+  const elements = allElements(Inspector({
+    position: { x: 0, y: 0 }, joker: { id: "joker", userVariables: [] },
+    rules, selectedRule, selectedCondition: condition, itemType: "joker",
+    onUpdateCondition: (ruleId, conditionId, update) => updates.push({ ruleId, conditionId, update }),
+  }));
+  const fields = new Map(elements
+    .filter((node) => typeof node.type === "function" && node.props?.param)
+    .map((node) => [node.props.param.id, allElements(node.type(node.props))]));
+  return {
+    fields,
+    fieldSelect: (id) => fields.get(id)?.find((node) => node.type === "Select"),
+    fieldOptions: (id) => fields.get(id)?.filter((node) => node.type === "SelectItem") ?? [],
+    groupSelect: elements.find((node) => node.type === "Select"),
+    groupOptions: elements.filter((node) => node.type === "SelectItem"),
+    groupPlaceholder: elements.find((node) => node.type === "SelectValue"),
+    updates,
+  };
+}
+
+const probabilityCondition = (params = {}) => ({
+  id: "probability-condition", type: "probability_succeeded", negate: false, params,
+});
+
+test("probability result source preserves legacy status and reveals a group only when selected", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = catalog.getConditionTypeById("probability_succeeded");
+  const visible = (params) => condition.params
+    .filter((param) => isParameterVisible(param, condition.params, params))
+    .map((param) => param.id);
+  assert.deepEqual(Array.from(visible({ status: { value: "failed" } })), ["source", "status"]);
+  assert.deepEqual(Array.from(visible({ source: { value: "any" } })), ["source", "status"]);
+  assert.deepEqual(Array.from(visible({ source: { value: "chance_group" } })), [
+    "source", "group_id", "status",
+  ]);
+  const source = condition.params.find((param) => param.id === "source");
+  assert.equal(source.default, "any");
+  assert.deepEqual(Array.from(source.options, (option) => option.value), ["any", "chance_group"]);
+  assert.equal(condition.params.find((param) => param.id === "group_id").type, "select");
+  assert.deepEqual(Array.from(condition.params.find((param) => param.id === "status").options,
+    (option) => option.value), ["succeeded", "failed"]);
+});
+
+test("chance group labels use rule positions while stable IDs survive reordering", () => {
+  const { getChanceGroupOptions } = loadTypeScript("src/components/rule-builder/probability-sources.ts");
+  const rules = probabilityRules();
+  const saved = plainSnapshot(rules);
+  const options = getChanceGroupOptions(rules);
+  assert.deepEqual(plainSnapshot(options), [
+    { value: "rgid-original", label: "Rule 1 · Chance 1 (1 in 5)" },
+    { value: "rgid-secondary", label: "Rule 1 · Chance 2 (2 in 7)" },
+    { value: "rgid-chain", label: "Rule 2 · Chance 1 (1 in 3)" },
+  ]);
+  const reordered = [rules[1], { ...rules[0], randomGroups: [...rules[0].randomGroups].reverse() }];
+  const selected = getChanceGroupOptions(reordered, "rgid-original")
+    .find((option) => option.value === "rgid-original");
+  assert.equal(selected.label, "Rule 2 · Chance 2 (1 in 5)");
+  assert.equal(selected.disabled, undefined);
+  assert.ok(options.every((option) => !option.label.includes("rgid-")), "Raw identifiers stay hidden");
+  assert.deepEqual(plainSnapshot(rules), saved, "Building source choices leaves saved rules intact");
+});
+
+test("deleted chance sources stay identifiable as unavailable without leaking identifiers", () => {
+  const { getChanceGroupOptions } = loadTypeScript("src/components/rule-builder/probability-sources.ts");
+  const options = getChanceGroupOptions(probabilityRules(), "rgid-deleted");
+  const selected = options.find((option) => option.value === "rgid-deleted");
+  assert.deepEqual(plainSnapshot(selected), {
+    value: "rgid-deleted", label: "Unavailable chance group", disabled: true,
+  });
+  assert.equal(options.filter((option) => option.value === "rgid-deleted").length, 1);
+  assert.ok(options.every((option) => !option.label.includes("rgid-")));
+  assert.deepEqual(plainSnapshot(getChanceGroupOptions([], "rgid-deleted")), [plainSnapshot(selected)]);
+  assert.deepEqual(plainSnapshot(getChanceGroupOptions([])), []);
+});
+
+test("legacy probability conditions display Any source without changing saved values", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = probabilityCondition({ status: { value: "failed" } });
+  const inspector = probabilityInspector(condition, probabilityRules(), catalog);
+  assert.equal(inspector.fieldSelect("status").props.value, "failed");
+  assert.equal(inspector.fieldSelect("source").props.value, "any");
+  assert.equal(inspector.groupSelect, undefined);
+  assert.deepEqual(inspector.updates, [], "Displaying a legacy rule creates no hidden edits");
+  assert.deepEqual(condition.params, { status: { value: "failed" } });
+});
+
+test("probability source and group edits preserve status and unrelated saved parameters", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = probabilityCondition({
+    status: { value: "failed" }, source: { value: "chance_group" },
+    group_id: { value: "rgid-original" }, unrelated: { value: "saved" },
+  });
+  const inspector = probabilityInspector(condition, probabilityRules(), catalog);
+  assert.equal(inspector.groupSelect.props.value, "rgid-original");
+  assert.deepEqual(inspector.groupOptions.map((option) => [option.props.value, option.props.children]), [
+    ["rgid-original", "Rule 1 · Chance 1 (1 in 5)"],
+    ["rgid-secondary", "Rule 1 · Chance 2 (2 in 7)"],
+    ["rgid-chain", "Rule 2 · Chance 1 (1 in 3)"],
+  ]);
+  inspector.groupSelect.props.onValueChange("rgid-chain");
+  const groupUpdate = inspector.updates.at(-1);
+  assert.equal(groupUpdate.ruleId, "result-rule");
+  assert.equal(groupUpdate.conditionId, condition.id);
+  assert.equal(groupUpdate.update.params.group_id.value, "rgid-chain");
+  assert.equal(groupUpdate.update.params.source.value, "chance_group");
+  assert.equal(groupUpdate.update.params.status.value, "failed");
+  assert.equal(groupUpdate.update.params.unrelated.value, "saved");
+  inspector.fieldSelect("source").props.onValueChange("any");
+  const sourceUpdate = inspector.updates.at(-1).update;
+  assert.equal(sourceUpdate.params.source.value, "any");
+  assert.equal(sourceUpdate.params.status.value, "failed");
+  assert.equal(sourceUpdate.params.unrelated.value, "saved");
+  const anyInspector = probabilityInspector({ ...condition, ...sourceUpdate }, probabilityRules(), catalog);
+  assert.equal(anyInspector.groupSelect, undefined);
+});
+
+test("a missing chance selection requires an explicit choice instead of choosing the first source", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = probabilityCondition({
+    status: { value: "failed" }, source: { value: "chance_group" },
+  });
+  const inspector = probabilityInspector(condition, probabilityRules(), catalog);
+  assert.equal(inspector.groupSelect.props.value, undefined);
+  assert.match(inspector.groupPlaceholder.props.placeholder, /select|choose/i);
+  assert.deepEqual(inspector.updates, []);
+  assert.equal(condition.params.group_id, undefined);
+  const empty = probabilityInspector(condition, [], catalog);
+  assert.equal(empty.groupSelect.props.value, undefined);
+  assert.equal(empty.groupOptions.length, 1);
+  assert.equal(empty.groupOptions[0].props.disabled, true);
+  assert.equal(empty.groupOptions[0].props.children, "No chance groups available");
+  assert.deepEqual(empty.updates, []);
+});
+
+test("an unavailable saved chance source stays selected and never silently switches", async () => {
+  const catalog = await paletteCatalogPromise;
+  const condition = probabilityCondition({
+    status: { value: "failed" }, source: { value: "chance_group" },
+    group_id: { value: "rgid-deleted" },
+  });
+  const inspector = probabilityInspector(condition, probabilityRules(), catalog);
+  assert.equal(inspector.groupSelect.props.value, "rgid-deleted");
+  const selected = inspector.groupOptions.find((option) => option.props.value === "rgid-deleted");
+  assert.equal(selected.props.children, "Unavailable chance group");
+  assert.equal(selected.props.disabled, true);
+  assert.deepEqual(inspector.updates, []);
+  assert.ok(inspector.groupOptions.every((option) => !option.props.children.includes("rgid-")));
+  assert.equal(condition.params.group_id.value, "rgid-deleted");
+});
+
+test("chance source selections and group identities survive the generated mod request", () => {
+  const { createCliItemRequest, serializeCliItemRequest } = loadTypeScript(
+    "src/lib/export/cli-item-generation.ts",
+  );
+  const rules = probabilityRules();
+  rules[1].conditionGroups = [{ operator: "and", conditions: [probabilityCondition({
+    source: { value: "chance_group", valueType: "text", label: "A chance group in this Joker" },
+    group_id: { value: "rgid-original", valueType: "text" },
+    status: { value: "failed", valueType: "text" },
+  })] }];
+  const exportedRules = JSON.parse(serializeCliItemRequest(createCliItemRequest({ rules }))).itemData.rules;
+  const condition = exportedRules[1].conditionGroups[0].conditions[0];
+  assert.deepEqual(condition.params, {
+    source: { value: "chance_group", valueType: "text" },
+    group_id: { value: "rgid-original", valueType: "text" },
+    status: { value: "failed", valueType: "text" },
+  });
+  assert.equal(exportedRules[0].randomGroups[0].id, condition.params.group_id.value);
+  assert.equal(exportedRules[1].randomGroups[0].id, "rgid-chain");
 });

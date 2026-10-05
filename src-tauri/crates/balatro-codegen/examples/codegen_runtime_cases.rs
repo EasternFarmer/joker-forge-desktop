@@ -795,6 +795,210 @@ fn append_probability_result_cases(cases: &mut Vec<Value>) {
         "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)");
 }
 
+fn probability_group_condition(group_id: &str, status: &str) -> Value {
+    json!({"condition_type":"probability_succeeded","params":{
+        "source":"chance_group","group_id":group_id,"status":status
+    }})
+}
+
+fn probability_failure_chain() -> JokerDef {
+    probability_definition(json!([
+        {"id":"initial","trigger":"hand_drawn","random_groups":[{
+            "id":"first","chance_numerator":1,"chance_denominator":4,
+            "effects":[probability_counter("chance_count"),{"effect_type":"set_dollars","params":{"value":5}}]
+        }]},
+        {"id":"retry","trigger":"probability_result","condition_groups":[{
+            "conditions":[probability_group_condition("first","failed")]
+        }],"random_groups":[{
+            "id":"second","chance_numerator":1,"chance_denominator":5,
+            "effects":[probability_counter("loop_count"),{"effect_type":"set_dollars","params":{"value":10}}]
+        }]},
+        {"id":"fallback","trigger":"probability_result","condition_groups":[{
+            "conditions":[probability_group_condition("second","failed")]
+        }],"effects":[probability_counter("seen"),{"effect_type":"set_dollars","params":{"value":1000}}]}
+    ]))
+}
+
+fn append_probability_chain_cases(cases: &mut Vec<Value>) {
+    for first_success in [true,false] {
+        for second_success in [true,false] {
+            let result_count=if first_success {1}else{2};
+            let fallback_count=usize::from(!first_success && !second_success);
+            let second_count=usize::from(!first_success && second_success);
+            let dollars=if first_success {5}else if second_success {10}else{1000};
+            probability_result_case(cases,&format!("chain_first_{first_success}_second_{second_success}"),
+                &[probability_failure_chain()],
+                &format!("set_probability_rolls({{{},{}}})",if first_success {0.0}else{0.9},if second_success {0.0}else{0.9}),
+                "SMODS.calculate_context({hand_drawn=true})",
+                &format!("assert(G.GAME.dollars=={dollars});assert(actor.ability.extra.seen=={fallback_count} and actor.ability.extra.chance_count=={} and actor.ability.extra.loop_count=={second_count});assert(probability_contexts[1].jf_probability_group_id=='first' and probability_contexts[1].jf_probability_owner==actor);if {result_count}==2 then assert(probability_contexts[2].jf_probability_group_id=='second' and probability_contexts[2].jf_probability_owner==actor and probability_contexts[2].denominator==5) end;assert_probability_dispatch_complete({result_count},{result_count})",usize::from(first_success)));
+        }
+    }
+
+    probability_result_case(cases,"chain_success_branch",&[probability_definition(json!([
+        {"id":"initial","trigger":"hand_drawn","random_groups":[{
+            "id":"first","chance_numerator":1,"chance_denominator":2,"effects":[]
+        }]},
+        {"id":"retry","trigger":"probability_result","condition_groups":[{
+            "conditions":[probability_group_condition("first","succeeded")]
+        }],"random_groups":[{
+            "id":"second","chance_numerator":1,"chance_denominator":5,"effects":[]
+        }]},
+        {"id":"reward","trigger":"probability_result","condition_groups":[{
+            "conditions":[probability_group_condition("second","succeeded")]
+        }],"effects":[probability_counter("seen"),{"effect_type":"set_dollars","params":{"value":1000}}]}
+    ]))],"set_probability_rolls({0,0})","SMODS.calculate_context({hand_drawn=true})",
+        "assert(G.GAME.dollars==1000 and actor.ability.extra.seen==1);assert_probability_dispatch_complete(2,2)");
+
+    probability_result_case(cases,"chain_independent_original_events",&[probability_failure_chain()],
+        "set_probability_rolls({0.9,0.9,0.9,0.9})",
+        "SMODS.calculate_context({hand_drawn=true});SMODS.calculate_context({hand_drawn=true})",
+        "assert(G.GAME.dollars==2000 and actor.ability.extra.seen==2);assert(probability_contexts[1].jf_probability_chain~=probability_contexts[3].jf_probability_chain);assert_probability_dispatch_complete(4,4)");
+
+    probability_result_case(cases,"chain_cycle_stops_before_repeated_roll",&[probability_definition(json!([
+        {"id":"initial","trigger":"hand_drawn","random_groups":[{
+            "id":"initial_chance","chance_numerator":1,"chance_denominator":2,"effects":[]
+        }]},
+        {"id":"stage_a","trigger":"probability_result","condition_groups":[
+            {"logic_operator":"or","conditions":[probability_group_condition("initial_chance","succeeded")]},
+            {"conditions":[probability_group_condition("stage_b_chance","succeeded")]}
+        ],"effects":[probability_counter("seen")],"random_groups":[{
+            "id":"stage_a_chance","chance_numerator":1,"chance_denominator":2,"effects":[]
+        }]},
+        {"id":"stage_b","trigger":"probability_result","condition_groups":[{
+            "conditions":[probability_group_condition("stage_a_chance","succeeded")]
+        }],"random_groups":[{
+            "id":"stage_b_chance","chance_numerator":1,"chance_denominator":2,"effects":[]
+        }]}
+    ]))],"set_probability_rolls({0,0,0})","SMODS.calculate_context({hand_drawn=true})",
+        "assert(actor.ability.extra.seen==2);assert(probability_contexts[1].jf_probability_group_id=='initial_chance' and probability_contexts[2].jf_probability_group_id=='stage_a_chance' and probability_contexts[3].jf_probability_group_id=='stage_b_chance');assert_probability_dispatch_complete(3,3)");
+
+    for source_status in ["succeeded","failed"] {
+        probability_result_case(cases,&format!("chain_empty_source_{source_status}"),&[probability_definition(json!([
+            {"id":"initial","trigger":"hand_drawn","random_groups":[{
+                "id":"empty","chance_numerator":1,"chance_denominator":4,"effects":[]
+            }]},
+            {"id":"result","trigger":"probability_result","condition_groups":[{
+                "conditions":[probability_group_condition("empty",source_status)]
+            }],"effects":[probability_counter("seen")]}
+        ]))],&format!("set_probability_rolls({{{}}})",if source_status=="succeeded" {0.0}else{0.9}),
+            "SMODS.calculate_context({hand_drawn=true})",
+            "assert(actor.ability.extra.seen==1);assert(probability_contexts[1].jf_probability_group_id=='empty');assert_probability_dispatch_complete(1,1)");
+    }
+
+    for source in ["joker_modifier","normal_multiplier"] {
+        let mut rules=json!([
+            {"id":"initial","trigger":"hand_drawn","random_groups":[{
+                "id":"modified","chance_numerator":1,"chance_denominator":4,"effects":[]
+            }]},
+            {"id":"result","trigger":"probability_result","condition_groups":[{"conditions":[
+                probability_group_condition("modified","succeeded"),
+                {"condition_type":"probability_part_compare","params":{"part":"numerator","operator":"equals","value":2}},
+                {"condition_type":"probability_part_compare","params":{"part":"denominator","operator":"equals","value":4}}
+            ]}],"effects":[probability_counter("seen")]}
+        ]);
+        if source=="joker_modifier" {
+            rules.as_array_mut().unwrap().push(json!({"id":"modify","trigger":"change_probability",
+                "effects":[{"effect_type":"mod_probability","params":{"part":"numerator","operation":"multiply","value":2}}]
+            }));
+        }
+        probability_result_case(cases,&format!("chain_modified_odds_{source}"),&[probability_definition(rules)],
+            if source=="normal_multiplier" {"G.GAME.probabilities.normal=2;set_probability_rolls({0.4})"}else{"set_probability_rolls({0.4})"},
+            "SMODS.calculate_context({hand_drawn=true})",
+            "assert(actor.ability.extra.seen==1);assert(probability_contexts[1].numerator==2 and probability_contexts[1].denominator==4);assert(probability_counts.modifier==1 and probability_counts.fixed==1);assert_probability_dispatch_complete(1,1)");
+    }
+
+    for source in ["user_variable","game_variable"] {
+        let denominator=if source=="user_variable" {json!({"value":"Draws","valueType":"userVariable"})}
+            else {json!({"value":"GAMEVAR:joker_count|1|0","valueType":"gameVariable"})};
+        let mut definition=probability_definition(json!([
+            {"id":"initial","trigger":"hand_drawn","random_groups":[{
+                "id":"dynamic","chance_numerator":1,"chance_denominator":denominator,"effects":[]
+            }]},
+            {"id":"result","trigger":"probability_result","condition_groups":[{
+                "conditions":[probability_group_condition("dynamic","failed")]
+            }],"effects":[probability_counter("seen")]}
+        ]));
+        if source=="user_variable" {
+            definition.user_variables.push(serde_json::from_value(json!({"name":"Draws","var_type":"number","initial_value":4})).unwrap());
+        }
+        let invoke=if source=="user_variable" {
+            "actor.ability.extra.Draws=4;SMODS.calculate_context({hand_drawn=true});actor.ability.extra.Draws=8;SMODS.calculate_context({hand_drawn=true})"
+        }else{
+            "SMODS.calculate_context({hand_drawn=true});G.jokers.cards={actor,probability_blueprint(actor)};test_definition.blueprint_compat=false;SMODS.calculate_context({hand_drawn=true})"
+        };
+        let verify=if source=="user_variable" {
+            "assert(actor.ability.extra.seen==2);assert(probability_contexts[1].denominator==4 and probability_contexts[2].denominator==8);assert_probability_dispatch_complete(2,2)"
+        }else{
+            "assert(actor.ability.extra.seen==1);assert(probability_contexts[1].denominator==1 and probability_contexts[2].denominator==2);assert_probability_dispatch_complete(2,2)"
+        };
+        probability_result_case(cases,&format!("chain_dynamic_denominator_{source}"),&[definition],
+            "set_probability_rolls({0.9,0.9})",invoke,verify);
+    }
+
+    probability_result_case(cases,"chain_copies_and_native_blueprint_are_isolated",&[probability_failure_chain()],
+        "second_card=probability_card(test_definition);blueprint_card=probability_blueprint(actor);G.jokers.cards={actor,second_card,blueprint_card};set_probability_rolls({0.9,0.9,0.9,0.9,0.9,0.9})",
+        "SMODS.calculate_context({hand_drawn=true})",
+        "assert(G.GAME.dollars==3000 and actor.ability.extra.seen==2 and second_card.ability.extra.seen==1);local owners={};for _,context in ipairs(probability_contexts) do local owner=context.jf_probability_owner;owners[owner]=(owners[owner] or 0)+1 end;assert(owners[actor]==2 and owners[second_card]==2 and owners[blueprint_card]==2);assert_probability_dispatch_complete(6,6)");
+
+    let mut other=probability_failure_chain();other.key="another_definition".into();
+    probability_result_case(cases,"chain_other_definition_same_group_id_is_isolated",&[probability_failure_chain(),other],
+        "second_card=probability_card(probability_definitions[2]);G.jokers.cards={actor,second_card};set_probability_rolls({0.9,0.9,0.9,0.9})",
+        "SMODS.calculate_context({hand_drawn=true})",
+        "assert(G.GAME.dollars==2000 and actor.ability.extra.seen==1 and second_card.ability.extra.seen==1);assert_probability_dispatch_complete(4,4)");
+
+    probability_result_case(cases,"chain_source_rejects_external_and_missing_results",&[probability_failure_chain()],
+        "set_probability_rolls({0.9})",
+        "assert(not external_probability());SMODS.calculate_context({pseudorandom_result=true,jf_probability_group_id='first',jf_probability_owner=actor})",
+        "assert(G.GAME.dollars==0 and actor.ability.extra.seen==0 and actor.ability.extra.chance_count==0 and actor.ability.extra.loop_count==0);assert_probability_dispatch_complete(2,1)");
+
+    let observer=probability_definition(json!([{"id":"observer","trigger":"probability_result",
+        "condition_groups":[{"conditions":[{"condition_type":"probability_succeeded","params":{"source":"any","status":"failed"}}]}],
+        "effects":[probability_counter("seen")]
+    }]));
+    probability_result_case(cases,"chain_any_source_observes_named_results",&[probability_failure_chain(),observer],
+        "observer_card=probability_card(probability_definitions[2]);G.jokers.cards={actor,observer_card};set_probability_rolls({0.9,0.9})",
+        "SMODS.calculate_context({hand_drawn=true})",
+        "assert(G.GAME.dollars==1000 and actor.ability.extra.seen==1 and observer_card.ability.extra.seen==2);assert_probability_dispatch_complete(2,2)");
+
+    let mut depth_rules=vec![json!({"id":"initial","trigger":"hand_drawn","random_groups":[{
+        "id":"depth_0","chance_numerator":1,"chance_denominator":2,"effects":[]
+    }]})];
+    for index in 1..=18 {
+        depth_rules.push(json!({"id":format!("depth_rule_{index}"),"trigger":"probability_result",
+            "condition_groups":[{"conditions":[probability_group_condition(&format!("depth_{}",index-1),"succeeded")]}],
+            "random_groups":[{"id":format!("depth_{index}"),"chance_numerator":1,"chance_denominator":2,"effects":[]}]
+        }));
+    }
+    depth_rules.push(json!({"id":"unreachable","trigger":"probability_result",
+        "condition_groups":[{"conditions":[probability_group_condition("depth_18","succeeded")]}],
+        "effects":[probability_counter("seen")]
+    }));
+    probability_result_case(cases,"chain_depth_is_bounded",&[probability_definition(json!(depth_rules))],
+        "set_probability_rolls({})","SMODS.calculate_context({hand_drawn=true})",
+        "assert(actor.ability.extra.seen==0);assert(probability_roll_count>=16 and probability_roll_count<=17);for _,context in ipairs(probability_contexts) do assert(context.jf_probability_depth<=16) end;assert_probability_dispatch_complete(probability_roll_count,probability_roll_count)");
+
+    let mut fanout_rules=vec![json!({"id":"initial","trigger":"hand_drawn","random_groups":[{
+        "id":"branch_0_a","chance_numerator":1,"chance_denominator":2,"effects":[]
+    }]})];
+    for level in 1..=8 {
+        fanout_rules.push(json!({"id":format!("branch_rule_{level}"),"trigger":"probability_result",
+            "condition_groups":[
+                {"logic_operator":"or","conditions":[probability_group_condition(&format!("branch_{}_a",level-1),"succeeded")]},
+                {"conditions":[probability_group_condition(&format!("branch_{}_b",level-1),"succeeded")]}
+            ],"random_groups":[
+                {"id":format!("branch_{level}_a"),"chance_numerator":1,"chance_denominator":2,"effects":[]},
+                {"id":format!("branch_{level}_b"),"chance_numerator":1,"chance_denominator":2,"effects":[]}
+            ]}));
+    }
+    fanout_rules.push(json!({"id":"last_branches","trigger":"probability_result","condition_groups":[
+        {"logic_operator":"or","conditions":[probability_group_condition("branch_8_a","succeeded")]},
+        {"conditions":[probability_group_condition("branch_8_b","succeeded")]}
+    ],"effects":[probability_counter("seen")]}));
+    probability_result_case(cases,"chain_fanout_budget_is_bounded",&[probability_definition(json!(fanout_rules))],
+        "set_probability_rolls({})","SMODS.calculate_context({hand_drawn=true})",
+        "assert(probability_roll_count>=128 and probability_roll_count<=129);for _,context in ipairs(probability_contexts) do assert(context.jf_probability_chain==probability_contexts[1].jf_probability_chain and context.jf_probability_chain.remaining>=0) end;assert_probability_dispatch_complete(probability_roll_count,probability_roll_count)");
+}
+
 fn append_game_variable_description_and_loop_cases(cases: &mut Vec<Value>) {
     for value_type in ["raw", "gameVariable", "game_var"] {
         let reference = "GAMEVAR:joker_count|2|1";
@@ -2931,6 +3135,7 @@ fn main() {
     append_consumable_creation_message_cases(&mut cases);
     append_size_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
+    append_probability_chain_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);
     append_card_retrigger_cases(&mut cases);

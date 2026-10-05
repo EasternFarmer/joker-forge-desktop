@@ -306,10 +306,23 @@ pub fn lucky_card_triggered(_condition: &ConditionDef) -> Option<Expr> {
 /// Probability Succeeded: check whether probability succeeded or failed.
 pub fn probability_succeeded(condition: &ConditionDef) -> Option<Expr> {
     let status = str_param(condition, &["status"]).unwrap_or("succeeded");
-
-    match status {
-        "failed" => Some(lua_eq(lua_path(&["context", "result"]), lua_bool(false))),
-        _ => Some(lua_eq(lua_path(&["context", "result"]), lua_bool(true))),
+    let outcome = lua_eq(lua_path(&["context", "result"]), lua_bool(status != "failed"));
+    match str_param(condition, &["source"]).unwrap_or("any") {
+        "any" => Some(outcome),
+        "chance_group" => {
+            let Some(group_id) = str_param(condition, &["group_id"]) else {
+                return Some(super::utils::invalid_condition("probability_succeeded", "no chance group selected"));
+            };
+            Some(lua_and_chain(vec![
+                lua_eq(lua_path(&["context", "jf_probability_group_id"]), lua_str(group_id)),
+                lua_eq(
+                    lua_path(&["context", "jf_probability_owner"]),
+                    lua_or(lua_path(&["context", "blueprint_card"]), lua_ident("card")),
+                ),
+                outcome,
+            ]))
+        }
+        _ => Some(super::utils::invalid_condition("probability_succeeded", "unknown probability source")),
     }
 }
 

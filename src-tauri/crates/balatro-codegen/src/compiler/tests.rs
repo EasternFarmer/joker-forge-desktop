@@ -25,6 +25,91 @@ fn preview_test_planet(params: serde_json::Value) -> ConsumableDef {
 }
 
 #[test]
+fn probability_source_selection_requires_the_current_activation_owner() {
+    let condition: ConditionDef = serde_json::from_value(serde_json::json!({
+        "condition_type":"probability_succeeded", "params":{
+            "status":"failed", "source":"chance_group", "group_id":"first chance"
+        }
+    })).unwrap();
+    let expression = conditions::game_state::probability_succeeded(&condition).unwrap().to_string();
+    assert!(expression.contains("context.jf_probability_group_id == 'first chance'"), "{expression}");
+    assert!(expression.contains("context.jf_probability_owner == (context.blueprint_card or card)"), "{expression}");
+    assert!(expression.contains("context.result == false"), "{expression}");
+    let missing: ConditionDef = serde_json::from_value(serde_json::json!({
+        "condition_type":"probability_succeeded", "params":{"source":"chance_group"}
+    })).unwrap();
+    let invalid = conditions::game_state::probability_succeeded(&missing).unwrap().to_string();
+    assert!(invalid.contains("no chance group selected"));
+    assert!(invalid.ends_with("false"));
+}
+
+#[test]
+fn selected_empty_chance_groups_publish_native_shaped_bounded_results() {
+    let joker = preview_test_joker(serde_json::json!([
+        {"id":"initial", "trigger":"hand_drawn", "random_groups":[{
+            "id":"first", "chance_numerator":1, "chance_denominator":5, "effects":[]
+        }]},
+        {"id":"followup", "trigger":"probability_result", "condition_groups":[{"conditions":[{
+            "condition_type":"probability_succeeded", "params":{
+                "source":"chance_group", "group_id":"first", "status":"failed"
+            }
+        }]}], "effects":[{"effect_type":"set_dollars", "params":{"value":5}}]}
+    ]));
+    let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+    assert!(code.contains("jf_probability_group_id = 'first'"), "{code}");
+    assert!(code.contains("identifier = 'j_mod_preview_test'"), "{code}");
+    assert!(code.contains("trigger_obj = card"));
+    assert!(code.contains("context.blueprint_card or card"));
+    assert!(code.contains("jf_depth < 16 and jf_chain.remaining > 0"));
+    assert!(code.contains("remaining = 128"));
+    assert!(code.contains("jf_next_owner_path['j_mod_preview_test:initial:first'] = true"));
+    assert!(code.contains("for key, visited in pairs(jf_owner_path)"));
+    assert!(code.contains("SMODS.post_prob[#SMODS.post_prob + 1]"));
+    assert!(!code.contains("SMODS.pseudorandom_probability"));
+}
+
+#[test]
+fn only_selected_chance_groups_opt_into_result_notifications() {
+    let joker = preview_test_joker(serde_json::json!([
+        {"id":"chances", "trigger":"probability_result", "random_groups":[
+            {"id":"selected", "chance_numerator":1, "chance_denominator":2, "effects":[]},
+            {"id":"quiet", "chance_numerator":1, "chance_denominator":2, "effects":[
+                {"effect_type":"set_dollars", "params":{"value":2}}
+            ]}
+        ]},
+        {"id":"result", "trigger":"probability_result", "condition_groups":[{"conditions":[{
+            "condition_type":"probability_succeeded", "params":{
+                "source":"chance_group", "group_id":"selected", "status":"failed"
+            }
+        }]}], "effects":[{"effect_type":"set_dollars", "params":{"value":5}}]}
+    ]));
+    let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+    assert!(code.contains("jf_probability_group_id = 'selected'"));
+    assert!(!code.contains("jf_probability_group_id = 'quiet'"));
+    assert!(code.contains("local rolled_numerator_1, rolled_denominator_1 = SMODS.get_probability_vars"));
+    assert!(!code.contains("SMODS.pseudorandom_probability"));
+}
+
+#[test]
+fn selected_chance_odds_read_live_user_and_game_variables() {
+    let mut joker = preview_test_joker(serde_json::json!([
+        {"id":"initial", "trigger":"hand_drawn", "random_groups":[{
+            "id":"first", "chance_numerator":{"value":"GAMEVAR:joker_count|1|0", "valueType":"gameVariable"},
+            "chance_denominator":{"value":"Draws", "valueType":"userVariable"}, "effects":[]
+        }]},
+        {"id":"result", "trigger":"probability_result", "condition_groups":[{"conditions":[{
+            "condition_type":"probability_succeeded", "params":{"source":"chance_group", "group_id":"first"}
+        }]}], "effects":[{"effect_type":"set_dollars", "params":{"value":5}}]}
+    ]));
+    joker.user_variables = serde_json::from_value(serde_json::json!([
+        {"name":"Draws", "var_type":"number", "initial_value":4}
+    ])).unwrap();
+    let code = Emitter::new().emit_chunk(&compile_joker(&joker, "mod"));
+    assert!(code.contains("tonumber(card.ability.extra.Draws) or 1"), "{code}");
+    assert!(code.contains("tonumber(#(G and G.jokers and G.jokers.cards or {})) or 0"), "{code}");
+}
+
+#[test]
 fn voucher_discounts_use_current_fields_for_redeem_and_passive_rules() {
     for trigger in ["card_used", "passive"] {
         let voucher: VoucherDef = serde_json::from_value(serde_json::json!({

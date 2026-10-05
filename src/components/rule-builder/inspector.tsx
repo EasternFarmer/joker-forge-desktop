@@ -32,6 +32,7 @@ import {
   getEffectTypeById,
 } from "./rule-catalog";
 import { isParameterVisible } from "./parameter-visibility";
+import { getChanceGroupOptions } from "./probability-sources";
 
 import { Input as InputField } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -77,6 +78,7 @@ import HelpTooltipIcon from "@/components/ui/help-tooltip-icon";
 interface InspectorProps {
   position: { x: number; y: number };
   joker: JokerData;
+  rules?: Rule[];
   selectedRule: Rule | null;
   selectedCondition: Condition | null;
   selectedEffect: Effect | null;
@@ -1306,6 +1308,7 @@ const ParameterField: React.FC<ParameterFieldProps> = ({
 const Inspector: React.FC<InspectorProps> = ({
   position,
   joker,
+  rules = [],
   selectedRule,
   selectedCondition,
   selectedEffect,
@@ -1533,6 +1536,10 @@ const Inspector: React.FC<InspectorProps> = ({
     const paramsToRender = conditionType.params.filter((param) =>
       isParameterVisible(param, conditionType.params, selectedCondition.params),
     );
+    const chanceGroupId = typeof selectedCondition.params.group_id?.value === "string"
+      ? selectedCondition.params.group_id.value : undefined;
+    const chanceGroupOptions = selectedCondition.type === "probability_succeeded"
+      ? getChanceGroupOptions(rules, chanceGroupId) : [];
 
     return (
       <div className="space-y-3">
@@ -1596,9 +1603,41 @@ const Inspector: React.FC<InspectorProps> = ({
             <div className="divide-y divide-border/70">
               {paramsToRender.map((param) => (
                 <div key={param.id} className="py-2.5 first:pt-1 last:pb-1">
-                  <ParameterField
+                  {selectedCondition.type === "probability_succeeded" && param.id === "group_id" ? (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-zinc-100">Chance Group</label>
+                      <Select
+                        value={chanceGroupId || undefined}
+                        onValueChange={(value) => {
+                          onUpdateCondition(selectedRule.id, selectedCondition.id, {
+                            params: {
+                              ...selectedCondition.params,
+                              group_id: { value, valueType: "text" },
+                            },
+                          });
+                        }}
+                      >
+                        <SelectTrigger aria-label="Chance Group">
+                          <SelectValue placeholder="Choose a chance group" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {chanceGroupOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                          {!chanceGroupOptions.some((option) => !option.disabled) && (
+                            <SelectItem value="no_chance_groups" disabled>No chance groups available</SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : <ParameterField
                     param={param}
-                    item={selectedCondition.params[param.id]}
+                    item={selectedCondition.params[param.id] ?? (
+                      selectedCondition.type === "probability_succeeded"
+                        ? { value: param.default, valueType: "text" } : undefined
+                    )}
                     selectedRule={selectedRule}
                     selectedCondition={selectedCondition}
                     selectedEffect={selectedEffect ?? undefined}
@@ -1623,7 +1662,7 @@ const Inspector: React.FC<InspectorProps> = ({
                     isEffect={false}
                     joker={scopedJoker}
                     itemType={itemType}
-                  />
+                  />}
                 </div>
               ))}
             </div>

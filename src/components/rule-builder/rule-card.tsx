@@ -307,12 +307,13 @@ const Effect: React.FC<{
 
 const RandomGroupContainer: React.FC<{
   group: RandomGroup;
+  chanceIndex: number;
   ruleId: string;
   children: React.ReactNode;
   isSelected: boolean;
   onSelect: () => void;
   onDelete: () => void;
-}> = ({ group, ruleId, children, isSelected, onSelect, onDelete }) => {
+}> = ({ group, chanceIndex, ruleId, children, isSelected, onSelect, onDelete }) => {
   return (
     <div
       className={`border-2 border-dashed rounded-xl p-4 bg-jungle-green-500/8 relative transition-all min-h-30 w-full max-w-full ${
@@ -328,7 +329,7 @@ const RandomGroupContainer: React.FC<{
     >
       <div className="flex items-center justify-between mb-4">
         <div className="text-jungle-green-400 text-xs tracking-wider font-medium">
-          {group.chance_numerator.value} in {group.chance_denominator.value}{" "}
+          Chance {chanceIndex + 1}: {group.chance_numerator.value} in {group.chance_denominator.value}{" "}
           chance {isSelected && "(SELECTED)"}
         </div>
         <div onClick={(e) => e.stopPropagation()}>
@@ -773,7 +774,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
     );
   };
 
-  const renderRandomGroup = (group: RandomGroup) => {
+  const renderRandomGroup = (group: RandomGroup, chanceIndex: number) => {
     return (
       <motion.div
         key={`rg-motion-${group.id}`}
@@ -785,6 +786,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
       >
         <RandomGroupContainer
           group={group}
+          chanceIndex={chanceIndex}
           ruleId={rule.id}
           isSelected={isRandomGroupSelected(group.id)}
           onSelect={() =>
@@ -1341,7 +1343,7 @@ const RuleCard: React.FC<RuleCardProps> = ({
               animate="animate"
               transition={{ duration: 0.1, delay: 0.24 }}
             >
-              {rule.randomGroups.map((group) => renderRandomGroup(group))}
+              {rule.randomGroups.map((group, index) => renderRandomGroup(group, index))}
             </motion.div>
             <motion.div
               className="space-y-3"

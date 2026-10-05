@@ -271,6 +271,18 @@ pub(crate) enum PassiveHookSpec {
 
 pub(crate) fn compile_rules(rules: &[RuleDef], ctx: &mut CompileContext) -> Vec<RuleOutput> {
     ctx.set_referenced_user_vars(collect_referenced_user_vars(rules));
+    ctx.set_probability_result_groups(rules.iter()
+        .filter(|rule| rule.trigger == "probability_result")
+        .flat_map(|rule| &rule.condition_groups)
+        .flat_map(|group| &group.conditions)
+        .filter(|condition| condition.condition_type == "probability_succeeded"
+            && condition.params.get("source").and_then(ParamValue::as_str)
+                .is_some_and(|source| source.trim() == "chance_group"))
+        .filter_map(|condition| condition.params.get("group_id").and_then(ParamValue::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect());
     rules
         .iter()
         .enumerate()
@@ -440,6 +452,8 @@ fn compile_random_group(
     trigger: &str,
     repetition_phase: Option<bool>,
 ) -> Vec<effects::EffectOutput> {
+    let publishes_result = ctx.object_type == ObjectType::Joker
+        && ctx.probability_group_is_referenced(&rg.id);
     if repetition_phase.is_some() && !rg.effects.is_empty()
         && !rg.effects.iter().any(|effect| effect_matches_phase(effect, repetition_phase))
     {
@@ -465,7 +479,7 @@ fn compile_random_group(
         }
     }
 
-    if inner_outputs.is_empty() {
+    if inner_outputs.is_empty() && !publishes_result {
         return vec![];
     }
 
@@ -478,7 +492,10 @@ fn compile_random_group(
     let odds_var = format!("odds_{}", probability_index);
     let numerator_var = format!("numerator_{}", probability_index);
     let mut probability_stmts = Vec::new();
-    let prob_check = if trigger == "probability_result" {
+    let prob_check = if publishes_result {
+        compile_targeted_probability_roll(rule_id, rg, ctx, &numerator_var, &odds_var,
+            probability_index, random_group_index, &mut probability_stmts)
+    } else if trigger == "probability_result" {
         let numerator: String = format!("rolled_numerator_{}", probability_index);
         let denominator = format!("rolled_denominator_{}", probability_index);
         let probability_vars = lua_call(
@@ -540,6 +557,69 @@ fn compile_random_group(
     };
 
     vec![wrapped]
+}
+
+fn targeted_probability_value(value: &ParamValue, config_name: &str, ctx: &CompileContext) -> Expr {
+    if values::is_explicit_game_var(value) {
+        values::resolve_value(value, ctx.object_type, None)
+    } else if let Some(name) = param_value_user_var_name(value).filter(|name| ctx.has_user_var(name)) {
+        ctx.user_var_expr(&name)
+    } else if matches!(value, ParamValue::Typed(typed) if values::is_range_type(&typed.value_type))
+        || value.as_str().is_some_and(|value| value.starts_with("RANGE:"))
+    {
+        values::resolve_value(value, ctx.object_type, None)
+    } else {
+        ctx.ability_var(config_name)
+    }
+}
+
+fn compile_targeted_probability_roll(
+    rule_id: &str,
+    group: &RandomGroupDef,
+    ctx: &CompileContext,
+    numerator_var: &str,
+    denominator_var: &str,
+    probability_index: usize,
+    random_group_index: usize,
+    statements: &mut Vec<Stmt>,
+) -> Expr {
+    let result_var = format!("jf_probability_result_{}", probability_index);
+    let numerator = targeted_probability_value(&group.chance_numerator, numerator_var, ctx);
+    let denominator = targeted_probability_value(&group.chance_denominator, denominator_var, ctx);
+    let identifier = lua_str(ctx.smods_key());
+    let group_id = lua_str(&group.id);
+    let lineage_key = lua_str(format!("{}:{}:{}", ctx.smods_key(), rule_id, group.id));
+    let seed = lua_str(format!("group{}", random_group_index));
+
+    statements.push(lua_raw_stmt(format!(r#"local {result_var} = false
+do
+    local jf_owner = context.blueprint_card or card
+    local jf_path = context.jf_probability_path or {{}}
+    local jf_owner_path = jf_path[jf_owner] or {{}}
+    local jf_depth = context.jf_probability_depth or 0
+    local jf_chain = context.jf_probability_chain or {{remaining = 128}}
+    if not jf_owner_path[{lineage_key}] and jf_depth < 16 and jf_chain.remaining > 0 then
+        jf_chain.remaining = jf_chain.remaining - 1
+        local jf_next_path = {{}}
+        for owner, visited in pairs(jf_path) do jf_next_path[owner] = visited end
+        local jf_next_owner_path = {{}}
+        for key, visited in pairs(jf_owner_path) do jf_next_owner_path[key] = visited end
+        jf_next_owner_path[{lineage_key}] = true
+        jf_next_path[jf_owner] = jf_next_owner_path
+        local jf_numerator, jf_denominator = SMODS.get_probability_vars(card,
+            tonumber({numerator}) or 0, tonumber({denominator}) or 1, {identifier}, true, false)
+        {result_var} = pseudorandom({seed}) < jf_numerator / jf_denominator
+        SMODS.post_prob = SMODS.post_prob or {{}}
+        SMODS.post_prob[#SMODS.post_prob + 1] = {{
+            pseudorandom_result = true, result = {result_var}, trigger_obj = card,
+            numerator = jf_numerator, denominator = jf_denominator, identifier = {identifier},
+            jf_probability_group_id = {group_id}, jf_probability_owner = jf_owner,
+            jf_probability_path = jf_next_path, jf_probability_chain = jf_chain,
+            jf_probability_depth = jf_depth + 1
+        }}
+    end
+end"#)));
+    lua_ident(result_var)
 }
 
 fn compile_loop_group(

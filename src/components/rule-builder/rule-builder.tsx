@@ -100,6 +100,7 @@ import { UserConfigContext } from "@/components/Contexts";
 import { detectValueType } from "@/lib/rules/value-type-utils";
 import { usePanelState } from "./panel-state";
 import { useRuleHistory } from "./use-rule-history";
+import { getChanceGroupOptions } from "./probability-sources";
 import {
   getSelectedCondition,
   getSelectedEffect,
@@ -1891,7 +1892,14 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
     let title = "";
 
-    if (typeDefinition.id === "edit_all_starting_cards") {
+    if (typeDefinition.id === "probability_succeeded") {
+      const source = params.source === "chance_group"
+        ? getChanceGroupOptions(rules, String(params.group_id || ""))
+            .find((option) => option.value === params.group_id)?.label ?? "Choose a chance group"
+        : "Any probability";
+      title = `If ${source} ${params.status === "failed" ? "Failed" : "Succeeded"}`;
+      for (const key of ["source", "group_id", "status"]) processedParams.add(key);
+    } else if (typeDefinition.id === "edit_all_starting_cards") {
       const method = params.selection_method || "all";
       const filters: string[] = [];
       if (method === "matching" || method === "random") {
@@ -5114,6 +5122,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                     <Inspector
                       position={panels.inspector.position}
                       joker={item as any}
+                      rules={rules}
                       selectedRule={selectedRule}
                       selectedCondition={selectedCondition}
                       selectedEffect={selectedEffect}
