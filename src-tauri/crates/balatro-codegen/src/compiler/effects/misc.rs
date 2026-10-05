@@ -728,7 +728,39 @@ pub fn win_game(effect: &EffectDef, _ctx: &mut CompileContext) -> EffectOutput {
         lua_raw_stmt("win_game(); G.GAME.won = true")
     } else {
         lua_raw_stmt(
-            "if G.STATE == G.STATES.SELECTING_HAND then G.GAME.chips = G.GAME.blind.chips; G.STATE = G.STATES.HAND_PLAYED; G.STATE_COMPLETE = true; end_round() end",
+            r#"do
+    local win_run = G and G.GAME
+    local win_blind = win_run and win_run.blind
+    if win_blind and win_blind.chips and win_run.facing_blind and win_blind.in_blind ~= false
+        and G.STAGES and G.STATES and G.E_MANAGER and G.STAGE == G.STAGES.RUN
+        and G.STATE ~= G.STATES.NEW_ROUND and G.STATE ~= G.STATES.ROUND_EVAL
+        and G.STATE ~= G.STATES.GAME_OVER and G.STATE ~= G.STATES.SHOP then
+        local win_round = win_run.round
+        local win_blind_config = win_blind.config and win_blind.config.blind
+        G.E_MANAGER:add_event(Event({
+            trigger = 'immediate', blocking = false, blockable = false,
+            func = function()
+                if G.STAGE ~= G.STAGES.RUN or G.GAME ~= win_run or win_run.blind ~= win_blind
+                    or win_run.round ~= win_round
+                    or (win_blind.config and win_blind.config.blind) ~= win_blind_config
+                    or not win_run.facing_blind or win_blind.in_blind == false
+                    or G.STATE == G.STATES.ROUND_EVAL or G.STATE == G.STATES.GAME_OVER
+                    or G.STATE == G.STATES.SHOP then
+                    return true
+                end
+                if G.STATE == G.STATES.SELECTING_HAND or G.STATE == G.STATES.NEW_ROUND then
+                    if (win_run.chips or 0) < win_blind.chips then win_run.chips = win_blind.chips end
+                    if G.STATE == G.STATES.SELECTING_HAND then
+                        G.STATE = G.STATES.NEW_ROUND
+                        G.STATE_COMPLETE = false
+                    end
+                    return true
+                end
+                return false
+            end
+        }))
+    end
+end"#,
         )
     };
 

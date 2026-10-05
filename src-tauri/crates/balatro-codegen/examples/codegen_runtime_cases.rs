@@ -34,6 +34,85 @@ fn deck(rules: Value) -> DeckDef {
     .unwrap()
 }
 
+fn append_blind_win_cases(cases: &mut Vec<Value>) {
+    let emit = |trigger: &str, scope: &str, consumable: bool| {
+        let rules = json!([{"id":"win_rule","trigger":trigger,"effects":[{
+            "id":"win_effect","effect_type":"win_game","params":{"win_type":scope}
+        }]}]);
+        let chunk = if consumable {
+            let definition: ConsumableDef = serde_json::from_value(json!({
+                "key":"runtime_test","name":"Runtime Test","description":["Test"],
+                "set":"Tarot","atlas":"CustomConsumables","pos":{"x":0,"y":0},"rules":rules
+            })).unwrap();
+            compile_consumable(&definition,"mod")
+        } else {
+            compile_joker(&joker(rules),"mod")
+        };
+        Emitter::new().emit_chunk(&chunk)
+    };
+    let score_code = emit("hand_played", "blind", false);
+    let invoke = "test_definition:calculate(actor,{joker_main=true})";
+    for (name, prepare, after) in [
+        ("selecting_hand", "", ""),
+        ("duplicate_requests", "", "for index=1,4 do test_definition:calculate(actor,{joker_main=true}) end"),
+        ("preserve_higher_score", "G.GAME.chips=700", ""),
+        ("scoring_release_with_hands", "G.STATE=G.STATES.HAND_PLAYED;G.STATE_COMPLETE=true;G.GAME.current_round.hands_played=1",
+            "G.E_MANAGER:add_event(Event{trigger='after',delay=0.15,func=function() G.GAME.chips=20;G.STATE_COMPLETE=false;return true end});tick_blind_events(1);assert(round_end_count==0 and G.GAME.chips==0,'win must wait for scoring completion')"),
+        ("scoring_release_last_hand", "G.STATE=G.STATES.HAND_PLAYED;G.STATE_COMPLETE=true;G.GAME.current_round.hands_played=1;G.GAME.current_round.hands_left=0",
+            "G.E_MANAGER:add_event(Event{trigger='after',delay=0.15,func=function() G.GAME.chips=20;G.STATE_COMPLETE=false;return true end});tick_blind_events(1);assert(round_end_count==0 and G.GAME.chips==0,'win must wait for the last hand to finish')"),
+        ("scoring_already_released", "G.STATE=G.STATES.HAND_PLAYED;G.STATE_COMPLETE=false;G.GAME.current_round.hands_played=1", ""),
+        ("naturally_winning_hand", "G.STATE=G.STATES.HAND_PLAYED;G.STATE_COMPLETE=false;G.GAME.current_round.hands_played=1;G.GAME.chips=700", ""),
+    ] {
+        let extra_check = if name == "preserve_higher_score" || name == "naturally_winning_hand" {
+            "assert(G.GAME.chips==700,'winning must preserve an already higher score')"
+        } else { "" };
+        cases.push(json!({"kind":"blind_win","name":format!("blind_win_{name}"),"code":score_code,
+            "prepare":prepare,"invoke":format!("{invoke};{after}"),
+            "verify":format!("assert_blind_won();{extra_check}")}));
+    }
+    for (name, trigger, prepare, invocation) in [
+        ("blind_selected", "blind_selected", "G.STATE=G.STATES.BLIND_SELECT;G.STATE_COMPLETE=true",
+            "test_definition:calculate(actor,{setting_blind=true,main_eval=true});G.E_MANAGER:add_event(Event{trigger='after',delay=0.1,func=function() G.STATE=G.STATES.DRAW_TO_HAND;G.STATE_COMPLETE=false;return true end})"),
+        ("first_hand_drawn", "first_hand_drawn", "G.STATE=G.STATES.DRAW_TO_HAND;G.STATE_COMPLETE=false;G.jokers.cards={actor};function actor:calculate_joker(context) return test_definition:calculate(self,context) end;function actor:calculate_rental() end;function actor:calculate_perishable() end",
+            "tick_blind_events(3);assert(drawn_hand_count==1,'native initial draw did not finish')"),
+        ("discard_restore", "hand_discarded", "G.GAME.current_round.discards_used=1",
+            "test_definition:calculate(actor,{pre_discard=true});G.STATE=G.STATES.DRAW_TO_HAND;G.STATE_COMPLETE=true;G.E_MANAGER:add_event(Event{trigger='after',delay=0.1,func=function() G.STATE_COMPLETE=false;return true end})"),
+        ("after_hand_score_overwrite", "after_hand_played", "G.STATE=G.STATES.HAND_PLAYED;G.STATE_COMPLETE=true;G.GAME.current_round.hands_played=1",
+            "test_definition:calculate(actor,{after=true});G.E_MANAGER:add_event(Event{trigger='after',delay=0.1,func=function() G.GAME.chips=10;G.STATE_COMPLETE=false;return true end})"),
+    ] {
+        cases.push(json!({"kind":"blind_win","name":format!("blind_win_{name}"),"code":emit(trigger,"blind",false),
+            "prepare":prepare,"invoke":invocation,"verify":"assert_blind_won()"}));
+    }
+    cases.push(json!({"kind":"blind_win","name":"blind_win_consumable_restore","code":emit("card_used","blind",true),
+        "prepare":"G.STATE=G.STATES.PLAY_TAROT;G.STATE_COMPLETE=true",
+        "invoke":"test_definition:use(actor,nil,nil);G.E_MANAGER:add_event(Event{trigger='after',delay=0.1,func=function() G.STATE=G.STATES.SELECTING_HAND;G.STATE_COMPLETE=true;return true end});tick_blind_events(1);assert(round_end_count==0 and G.GAME.chips==0,'win must wait for consumable cleanup')",
+        "verify":"assert_blind_won()"}));
+    for (name, prepare) in [
+        ("shop", "G.STATE=G.STATES.SHOP"),
+        ("outside_run", "G.STAGE=2"),
+        ("missing_game", "G.GAME=nil"),
+        ("finished_blind", "G.GAME.blind.in_blind=false"),
+    ] {
+        cases.push(json!({"kind":"blind_win","name":format!("blind_win_ignored_{name}"),"code":score_code,
+            "prepare":prepare,"invoke":invoke,
+            "verify":"tick_blind_events(10);assert(round_end_count==0 and run_win_count==0);for _,queue in pairs(G.E_MANAGER.queues) do assert(#queue==0,'invalid win request must not leave an event') end;assert(not G.GAME or G.GAME.chips==0)"}));
+    }
+    for (name, mutation) in [
+        ("new_run", "G.GAME=copy_table(G.GAME)"),
+        ("reused_blind_new_round", "G.GAME.round=2"),
+        ("new_blind_config", "G.GAME.blind.config.blind={}"),
+        ("naturally_finished", "G.STATE=G.STATES.ROUND_EVAL;G.GAME.blind.in_blind=false"),
+    ] {
+        cases.push(json!({"kind":"blind_win","name":format!("blind_win_cancelled_{name}"),"code":score_code,
+            "prepare":"G.STATE=G.STATES.PLAY_TAROT;G.STATE_COMPLETE=true",
+            "invoke":format!("{invoke};{mutation};if G.STATE~=G.STATES.ROUND_EVAL then G.STATE=G.STATES.SELECTING_HAND end"),
+            "verify":"tick_blind_events(10);assert(round_end_count==0 and G.GAME.chips==0,'stale request must not win a different round');for _,queue in pairs(G.E_MANAGER.queues) do assert(#queue==0,'cancelled request must not leave an event') end"}));
+    }
+    cases.push(json!({"kind":"blind_win","name":"blind_win_current_run_unchanged","code":emit("hand_played","run",false),
+        "prepare":"G.STATE=G.STATES.SHOP","invoke":invoke,
+        "verify":"tick_blind_events(10);assert(run_win_count==1 and G.GAME.won==true and round_end_count==0 and G.GAME.chips==0)"}));
+}
+
 fn append_rarity_shop_cases(cases: &mut Vec<Value>) {
     for (name, rarities, joker_rarity, prepare, verify) in [
         ("positive_weight", vec![("superrare", 0.05)], "superrare", "",
@@ -2701,6 +2780,7 @@ fn main() {
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
+    append_blind_win_cases(&mut cases);
     append_rarity_shop_cases(&mut cases);
     append_description_blank_line_cases(&mut cases);
     append_description_format_cases(&mut cases);

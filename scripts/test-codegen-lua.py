@@ -779,6 +779,142 @@ G.playing_cards=nil;G.deck=nil
 """
 
 
+def blind_win_runtime(lua_library):
+    """Run blind completion through the installed game's events and round cleanup."""
+    executable = Path(lua_library).parent / "Balatro.exe"
+    if executable.is_file():
+        with zipfile.ZipFile(executable) as archive:
+            objects = archive.read("engine/object.lua").decode("utf-8")
+            events = archive.read("engine/event.lua").decode("utf-8")
+            game = archive.read("game.lua").decode("utf-8")
+            states = archive.read("functions/state_events.lua").decode("utf-8")
+        methods = "\n".join("function Game:" + name + game.split(
+            "function Game:" + name, 1
+        )[1].split("\nfunction Game:", 1)[0] for name in (
+            "update_hand_played", "update_draw_to_hand", "update_new_round"
+        ))
+        finish_round = "function end_round()" + states.split(
+            "function end_round()", 1
+        )[1].split("\nfunction new_round()", 1)[0]
+        fixes = tomllib.loads((ROOT / "public/other/smods-main/lovely/fixes.toml").read_text(encoding="utf-8"))
+        for patch in fixes["patches"]:
+            pattern = patch.get("pattern", {})
+            if pattern.get("pattern") == "local game_over = true":
+                finish_round = finish_round.replace("local game_over = true", pattern["payload"] + "\nlocal game_over = true", 1)
+        native = objects + events + "\nGame={}\n" + methods + finish_round
+    else:
+        # Portable Lua-library runs keep the same queue and round state contracts.
+        native = """
+function Event(event) return event end
+function EventManager()
+ local manager={queues={base={}}}
+ function manager:add_event(event) self.queues.base[#self.queues.base+1]=event end
+ function manager:update(dt)
+  local blocked=false;local index=1
+  while index<=#self.queues.base do
+   local event=self.queues.base[index];local done=false
+   if not blocked or event.blockable==false then
+    event.start=event.start or G.TIMERS.TOTAL
+    if event.trigger~='after' or G.TIMERS.TOTAL>=event.start+(event.delay or 0) then done=event.func() end
+    if event.blocking~=false then blocked=true end
+   end
+   if done then table.remove(self.queues.base,index) else index=index+1 end
+  end
+ end
+ return manager
+end
+Game={}
+function Game:update_hand_played()
+ if not G.STATE_COMPLETE then
+  G.STATE_COMPLETE=true
+  G.E_MANAGER:add_event(Event{func=function()
+   G.STATE=(G.GAME.chips>=G.GAME.blind.chips or G.GAME.current_round.hands_left<1) and G.STATES.NEW_ROUND or G.STATES.DRAW_TO_HAND
+   G.STATE_COMPLETE=false;return true
+  end})
+ end
+end
+function Game:update_draw_to_hand()
+ if not G.STATE_COMPLETE then
+  G.STATE_COMPLETE=true
+  G.E_MANAGER:add_event(Event{func=function()
+   G.FUNCS.draw_from_deck_to_hand()
+   if G.GAME.current_round.hands_played==0 and G.GAME.current_round.discards_used==0 and G.GAME.facing_blind then
+    for _,joker in ipairs(G.jokers.cards) do joker:calculate_joker{first_hand_drawn=true} end
+   end
+   G.E_MANAGER:add_event(Event{func=function() G.STATE=G.STATES.SELECTING_HAND;G.STATE_COMPLETE=false;G.GAME.blind:drawn_to_hand();return true end})
+   return true
+  end})
+ end
+end
+function Game:update_new_round()
+ if not G.STATE_COMPLETE then G.STATE_COMPLETE=true;end_round() end
+end
+function end_round()
+ G.E_MANAGER:add_event(Event{trigger='after',delay=0.2,func=function()
+  G.GAME.blind.in_blind=false
+  assert(G.GAME.chips>=G.GAME.blind.chips,'blind was not beaten')
+  G.GAME.unused_discards=G.GAME.unused_discards+G.GAME.current_round.discards_left
+  G.FUNCS.draw_from_hand_to_discard();G.FUNCS.draw_from_discard_to_deck()
+  G.E_MANAGER:add_event(Event{trigger='after',delay=0.3,func=function()
+   G.STATE=G.STATES.ROUND_EVAL;G.STATE_COMPLETE=false;G.GAME.round_resets.blind_states.Small='Defeated';return true
+  end});return true
+ end})
+end
+"""
+    return """
+G={STATES={SELECTING_HAND=1,HAND_PLAYED=2,DRAW_TO_HAND=3,NEW_ROUND=4,ROUND_EVAL=5,PLAY_TAROT=6,
+ SHOP=7,BLIND_SELECT=8,TAROT_PACK=9,SPECTRAL_PACK=10,GAME_OVER=11},STAGES={RUN=1},STAGE=1,
+ SETTINGS={paused=false,profile=1},TIMERS={REAL=0,TOTAL=0},ARGS={},FUNCS={},P_BLINDS={bl_small={}},
+ C={ORANGE=1},hand={cards={}},deck={cards={}},play={cards={}},jokers={cards={}},playing_cards={},
+ PROFILES={{career_stats={}}}}
+G.GAME={chips=0,round=1,facing_blind=true,current_round={hands_left=4,hands_played=0,discards_left=3,discards_used=0},
+ round_resets={blind=G.P_BLINDS.bl_small,ante=1,blind_states={Small='Current',Big='Upcoming',Boss='Upcoming'}},
+ win_ante=8,unused_discards=0,modifiers={},tags={},hands={}}
+G.GAME.blind={chips=300,name='Small Blind',in_blind=true,config={blind=G.P_BLINDS.bl_small},get_type=function() return 'Small' end,
+ drawn_to_hand=function() drawn_hand_count=drawn_hand_count+1 end}
+G.STATE=G.STATES.SELECTING_HAND;G.STATE_COMPLETE=false
+drawn_hand_count=0;round_end_count=0;run_win_count=0;cleanup_count=0
+function G:save_settings() end
+function win_game() run_win_count=run_win_count+1 end
+function ease_background_colour_blind() end
+function G.FUNCS.draw_from_deck_to_hand() end
+function G.FUNCS.draw_from_hand_to_discard() cleanup_count=cleanup_count+1 end
+function G.FUNCS.draw_from_discard_to_deck() cleanup_count=cleanup_count+1 end
+function discover_card() end
+function check_for_unlock() end
+function set_joker_usage() end
+function inc_career_stat() end
+function reset_idol_card() end
+function reset_mail_rank() end
+function reset_ancient_card() end
+function reset_castle_card() end
+function delay(amount) G.E_MANAGER:add_event(Event{trigger='after',delay=amount,func=function() return true end}) end
+""" + native + """
+G.E_MANAGER=EventManager()
+local native_end_round=end_round
+function end_round() round_end_count=round_end_count+1;return native_end_round() end
+function tick_blind_events(count)
+ for index=1,count or 1 do
+  G.TIMERS.TOTAL=G.TIMERS.TOTAL+0.05;G.TIMERS.REAL=G.TIMERS.REAL+0.05
+  G.E_MANAGER:update(0.05,true)
+  if G.STATE==G.STATES.HAND_PLAYED then Game.update_hand_played(G,0.05)
+  elseif G.STATE==G.STATES.DRAW_TO_HAND then Game.update_draw_to_hand(G,0.05)
+  elseif G.STATE==G.STATES.NEW_ROUND then Game.update_new_round(G,0.05) end
+ end
+end
+function assert_blind_won()
+ tick_blind_events(60)
+ assert(G.STATE==G.STATES.ROUND_EVAL,'win effect did not reach round evaluation')
+ assert(G.GAME.round_resets.blind_states.Small=='Defeated','blind was not marked defeated')
+ assert(G.GAME.chips>=G.GAME.blind.chips,'win effect did not meet blind score')
+ assert(round_end_count==1 and cleanup_count==2,'round cleanup must run exactly once')
+ assert(G.GAME.unused_discards==3,'normal blind rewards/bookkeeping were skipped or duplicated')
+ assert(run_win_count==0 and not G.GAME.won,'winning a blind must not win the entire run')
+ for _,queue in pairs(G.E_MANAGER.queues) do assert(#queue==0,'win effect left a stuck event') end
+end
+"""
+
+
 def card_area_selection_runtime(lua_library):
     """Exercise installed CardArea selection when Balatro is beside its Lua DLL."""
     executable = Path(lua_library).parent / "Balatro.exe"
@@ -1081,6 +1217,17 @@ def run_checks(lua, cases, lua_library):
                     except AssertionError as error:
                         raise AssertionError(f"{case['kind']} {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
                     checks += len(case["ids"])
+            continue
+        if case["kind"] == "blind_win":
+            source = HELPERS + EFFECT_RESOLVER + blind_win_runtime(lua_library) + "\n" + case["code"]
+            source += "\nactor={ability=copy_table(test_definition.config or {extra={}})};"
+            source += "actor.ability.extra=actor.ability.extra or {};"
+            source += case.get("prepare", "") + "\n" + case["invoke"] + "\n" + case["verify"] + "\nreturn 1"
+            try:
+                evaluate(lua, source)
+            except AssertionError as error:
+                raise AssertionError(f"blind_win {case['name']}: {error}") from error
+            checks += 1
             continue
         if case["kind"] in ("rule_options", "joker_creation", "scoring", "deck_settings", "deck_cards"):
             state = {"joker_creation": JOKER_CREATION_STATE, "deck_settings": DECK_RUN_STATE}.get(case["kind"], RULE_OPTIONS_STATE)
