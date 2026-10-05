@@ -180,6 +180,192 @@ fn append_scoring_group_cases(cases: &mut Vec<Value>) {
         "assert(played_sounds==4);assert(hand_chips==12 and mult==1 and G.GAME.dollars==4)");
 }
 
+fn probability_counter(name: &str) -> Value {
+    json!({"effect_type":"modify_internal_variable","params":{
+        "variable_name":name,"operation":"increment","value":1
+    }})
+}
+
+fn probability_definition(rules: Value) -> JokerDef {
+    let mut definition=joker(rules);
+    definition.user_variables=serde_json::from_value(json!([
+        {"name":"seen","var_type":"number","initial_value":0},
+        {"name":"chance_count","var_type":"number","initial_value":0},
+        {"name":"loop_count","var_type":"number","initial_value":0}
+    ])).unwrap();
+    definition
+}
+
+fn probability_result_case(
+    cases: &mut Vec<Value>,name: &str,definitions: &[JokerDef],prepare: &str,invoke: &str,verify: &str,
+) {
+    let mut code=String::from("probability_definitions={}\n");
+    for definition in definitions {
+        code.push_str(&Emitter::new().emit_chunk(&compile_joker(definition,"mod")));
+        code.push_str("\nprobability_definitions[#probability_definitions+1]=test_definition\n");
+    }
+    code.push_str("test_definition=probability_definitions[1]\n");
+    cases.push(json!({"kind":"rule_options","name":format!("probability_result_{name}"),
+        "probability_result_runtime":true,"code":code,
+        "prepare":format!("actor=probability_card(test_definition);G.jokers.cards={{actor}};{prepare}"),
+        "invoke":invoke,"verify":verify}));
+}
+
+fn append_probability_result_cases(cases: &mut Vec<Value>) {
+    let chance=json!({"id":"chance","chance_numerator":1,"chance_denominator":2,
+        "effects":[probability_counter("chance_count"),{"effect_type":"set_dollars","params":{"value":3}}]
+    });
+    let simple=probability_definition(json!([{"id":"result","trigger":"probability_result",
+        "effects":[probability_counter("seen")],"random_groups":[chance.clone()]
+    }]));
+    probability_result_case(cases,"chance_recursion",std::slice::from_ref(&simple),
+        "set_probability_rolls({0,0})","assert(external_probability())",
+        "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)");
+
+    for external_success in [true,false] {
+        for chance_success in [true,false] {
+            let definition=probability_definition(json!([{"id":"result","trigger":"probability_result",
+                "effects":[probability_counter("seen")],"random_groups":[chance.clone()],
+                "loop_groups":[{"id":"loop","count":2,"effects":[
+                    probability_counter("loop_count"),{"effect_type":"set_dollars","params":{"value":1}}
+                ]}]
+            }]));
+            probability_result_case(cases,&format!("outer_{external_success}_chance_{chance_success}"),&[definition],
+                &format!("set_probability_rolls({{{},{}}})",if external_success {0.0}else{0.9},if chance_success {0.0}else{0.9}),
+                &format!("assert(external_probability()=={external_success})"),
+                &format!("assert(G.GAME.dollars=={});assert(actor.ability.extra.seen==1);assert(actor.ability.extra.chance_count=={} and actor.ability.extra.loop_count==2);assert(probability_counts.modifier==2 and probability_counts.fixed==2);assert_probability_dispatch_complete(1,2)",if chance_success {5}else{2},if chance_success {1}else{0}));
+        }
+    }
+
+    let observer=probability_definition(json!([{"id":"observer","trigger":"probability_result",
+        "effects":[probability_counter("seen"),{"effect_type":"set_dollars","params":{"value":2}}]
+    }]));
+    probability_result_case(cases,"ordinary_listener_preserved",&[simple.clone(),observer],
+        "observer_card=probability_card(probability_definitions[2]);G.jokers.cards={actor,observer_card};set_probability_rolls({0,0})",
+        "assert(external_probability())",
+        "assert(G.GAME.dollars==5);assert(actor.ability.extra.seen==1 and observer_card.ability.extra.seen==1);assert_probability_dispatch_complete(1,2)");
+
+    let mut second_listener=simple.clone();second_listener.key="second_listener".into();
+    probability_result_case(cases,"multiple_listener_definitions",&[simple.clone(),second_listener],
+        "second_card=probability_card(probability_definitions[2]);G.jokers.cards={actor,second_card};set_probability_rolls({0,0,0})",
+        "assert(external_probability())",
+        "assert(G.GAME.dollars==6);assert(actor.ability.extra.seen==1 and second_card.ability.extra.seen==1);assert(actor.ability.extra.chance_count==1 and second_card.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,3)");
+
+    probability_result_case(cases,"multiple_copies_and_native_blueprint",std::slice::from_ref(&simple),
+        "second_card=probability_card(test_definition);blueprint_card=probability_blueprint(actor);G.jokers.cards={actor,second_card,blueprint_card};set_probability_rolls({0,0,0,0})",
+        "assert(external_probability())",
+        "assert(G.GAME.dollars==9);assert(actor.ability.extra.seen==2 and second_card.ability.extra.seen==1);assert(actor.ability.extra.chance_count==2 and second_card.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,4)");
+
+    let mut incompatible=simple.clone();incompatible.blueprint_compat=false;
+    probability_result_case(cases,"blueprint_disabled",&[incompatible],
+        "G.jokers.cards={actor,probability_blueprint(actor)};set_probability_rolls({0,0})",
+        "assert(external_probability())",
+        "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)");
+
+    for first_success in [true,false] {
+        let definition=probability_definition(json!([{"id":"result","trigger":"probability_result",
+            "effects":[probability_counter("seen")],"random_groups":[chance.clone(),{
+                "id":"second_chance","chance_numerator":1,"chance_denominator":2,
+                "effects":[probability_counter("chance_count"),{"effect_type":"set_dollars","params":{"value":5}}]
+            }]
+        }]));
+        probability_result_case(cases,&format!("multiple_groups_first_{first_success}"),&[definition],
+            &format!("set_probability_rolls({{0,{},0}})",if first_success {0.0}else{0.9}),
+            "assert(external_probability())",
+            &format!("assert(G.GAME.dollars=={});assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count=={});assert_probability_dispatch_complete(1,3)",if first_success {8}else{5},if first_success {2}else{1}));
+    }
+
+    for normal_success in [true,false] {
+        let definition=probability_definition(json!([
+            {"id":"normal","trigger":"hand_played","random_groups":[{
+                "id":"normal_chance","chance_numerator":1,"chance_denominator":2,
+                "effects":[{"effect_type":"set_dollars","params":{"value":7}}]
+            }]},
+            {"id":"result","trigger":"probability_result","effects":[probability_counter("seen")],"random_groups":[chance.clone()]}
+        ]));
+        probability_result_case(cases,&format!("normal_trigger_still_notifies_{normal_success}"),&[definition],
+            &format!("set_probability_rolls({{{},0}})",if normal_success {0.0}else{0.9}),
+            "SMODS.calculate_context({joker_main=true})",
+            &format!("assert(G.GAME.dollars=={});assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)",if normal_success {10}else{3}));
+    }
+
+    probability_result_case(cases,"queued_original_results_preserved",std::slice::from_ref(&simple),
+        "set_probability_rolls({0,0.9,0,0})",
+        "assert(SMODS.pseudorandom_probability(actor,'first',1,2,'first',true));assert(not SMODS.pseudorandom_probability(actor,'second',1,2,'second',true));assert(#SMODS.post_prob==2);SMODS.trigger_effects({},actor)",
+        "assert(G.GAME.dollars==6);assert(actor.ability.extra.seen==2 and actor.ability.extra.chance_count==2);assert(probability_contexts[1].identifier=='first' and probability_contexts[2].identifier=='second');assert(probability_contexts[1].result==true and probability_contexts[2].result==false);assert_probability_dispatch_complete(2,4)");
+
+    for source in ["joker_modifier","normal_multiplier"] {
+        let mut rules=json!([{"id":"result","trigger":"probability_result","effects":[probability_counter("seen")],
+            "random_groups":[{"id":"modified_chance","chance_numerator":1,"chance_denominator":4,
+                "effects":[probability_counter("chance_count"),{"effect_type":"set_dollars","params":{"value":3}}]
+            }]
+        }]);
+        if source=="joker_modifier" {
+            rules.as_array_mut().unwrap().push(json!({"id":"modify","trigger":"change_probability",
+                "effects":[{"effect_type":"mod_probability","params":{"part":"numerator","operation":"multiply","value":2}}]
+            }));
+        }
+        probability_result_case(cases,&format!("respects_{source}"),&[probability_definition(rules)],
+            if source=="normal_multiplier" {"G.GAME.probabilities.normal=2;set_probability_rolls({0.75,0.4})"}else{"set_probability_rolls({0.75,0.4})"},
+            "assert(external_probability())",
+            "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert(probability_contexts[1].numerator==2);assert(probability_counts.modifier==2 and probability_counts.fixed==2);assert_probability_dispatch_complete(1,2)");
+    }
+
+    probability_result_case(cases,"respects_other_joker_modifier",&[
+        probability_definition(json!([{"id":"result","trigger":"probability_result",
+            "random_groups":[{"id":"modified_chance","chance_numerator":1,"chance_denominator":4,
+                "effects":[probability_counter("chance_count"),{"effect_type":"set_dollars","params":{"value":3}}]
+            }]
+        }])),
+        probability_definition(json!([{"id":"modifier","trigger":"change_probability","effects":[{
+            "effect_type":"mod_probability","params":{"part":"numerator","operation":"multiply","value":2}
+        }]}]))
+    ],"modifier_card=probability_card(probability_definitions[2]);G.jokers.cards={actor,modifier_card};set_probability_rolls({0.75,0.4})",
+        "assert(external_probability())",
+        "assert(G.GAME.dollars==3 and actor.ability.extra.chance_count==1);assert(probability_contexts[1].numerator==2);assert(probability_counts.modifier==2 and probability_counts.fixed==2);assert_probability_dispatch_complete(1,2)");
+
+    for status in ["succeeded","failed"] {
+        for outer_success in [true,false] {
+            let matches=(status=="succeeded")==outer_success;
+            let definition=probability_definition(json!([{"id":"conditioned","trigger":"probability_result",
+                "condition_groups":[{"conditions":[{"condition_type":"probability_succeeded","params":{"status":status}}]}],
+                "effects":[probability_counter("seen")],"random_groups":[chance.clone()]
+            }]));
+            probability_result_case(cases,&format!("condition_{status}_{outer_success}"),&[definition],
+                &format!("set_probability_rolls({{{},0}})",if outer_success {0.0}else{0.9}),
+                &format!("assert(external_probability()=={outer_success})"),
+                &format!("assert(G.GAME.dollars=={});assert(actor.ability.extra.seen=={} and actor.ability.extra.chance_count=={});assert_probability_dispatch_complete(1,{})",if matches {3}else{0},if matches {1}else{0},if matches {1}else{0},if matches {2}else{1}));
+        }
+        let definition=probability_definition(json!([{"id":"conditioned","trigger":"probability_result",
+            "condition_groups":[{"conditions":[{"condition_type":"probability_succeeded","params":{"status":status}}]}],
+            "effects":[probability_counter("seen")]
+        }]));
+        probability_result_case(cases,&format!("missing_result_is_neither_{status}"),&[definition],
+            "set_probability_rolls({})","SMODS.calculate_context({pseudorandom_result=true})",
+            "assert(actor.ability.extra.seen==0);assert_probability_dispatch_complete(1,0)");
+    }
+
+    probability_result_case(cases,"flat_condition_fields",&[probability_definition(json!([{
+        "id":"conditioned","trigger":"probability_result","condition_groups":[{"conditions":[
+            {"condition_type":"probability_succeeded","params":{"status":"succeeded"}},
+            {"condition_type":"probability_identifier","params":{"mode":"custom","card_key":"external"}},
+            {"condition_type":"probability_part_compare","params":{"part":"numerator","operator":"equals","value":1}},
+            {"condition_type":"probability_part_compare","params":{"part":"denominator","operator":"equals","value":4}}
+        ]}],"effects":[probability_counter("seen")],"random_groups":[chance.clone()]
+    }]))],"set_probability_rolls({0,0})","assert(external_probability(1,4))",
+        "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)");
+
+    probability_result_case(cases,"modifier_flat_compare",&[probability_definition(json!([
+        {"id":"modify","trigger":"change_probability","condition_groups":[{"conditions":[{
+            "condition_type":"probability_part_compare","params":{"part":"numerator","operator":"equals","value":1}
+        }]}],"effects":[{"effect_type":"mod_probability","params":{"part":"numerator","operation":"multiply","value":2}}]},
+        {"id":"result","trigger":"probability_result","condition_groups":[{"conditions":[{
+            "condition_type":"probability_part_compare","params":{"part":"numerator","operator":"equals","value":2}
+        }]}],"effects":[probability_counter("seen")],"random_groups":[chance]}
+    ]))],"set_probability_rolls({0.75,0.75})","assert(external_probability())",
+        "assert(G.GAME.dollars==3);assert(actor.ability.extra.seen==1 and actor.ability.extra.chance_count==1);assert_probability_dispatch_complete(1,2)");
+}
+
 fn append_game_variable_description_and_loop_cases(cases: &mut Vec<Value>) {
     for value_type in ["raw", "gameVariable", "game_var"] {
         let reference = "GAMEVAR:joker_count|2|1";
@@ -2308,6 +2494,7 @@ fn main() {
     }
     let output = std::env::args().nth(1).expect("Pass the output JSON path");
     append_scoring_group_cases(&mut cases);
+    append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);
     append_retrigger_scoring_cases(&mut cases);
     append_card_retrigger_cases(&mut cases);

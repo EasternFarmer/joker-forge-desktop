@@ -308,9 +308,8 @@ pub fn probability_succeeded(condition: &ConditionDef) -> Option<Expr> {
     let status = str_param(condition, &["status"]).unwrap_or("succeeded");
 
     match status {
-        "succeeded" => Some(lua_path(&["context", "probability_result"])),
-        "failed" => Some(lua_not(lua_path(&["context", "probability_result"]))),
-        _ => Some(lua_path(&["context", "probability_result"])),
+        "failed" => Some(lua_eq(lua_path(&["context", "result"]), lua_bool(false))),
+        _ => Some(lua_eq(lua_path(&["context", "result"]), lua_bool(true))),
     }
 }
 
@@ -344,9 +343,8 @@ pub fn probability_part_compare(
     let value_expr = resolve_condition_value(&condition.params, "value", ctx, "probability_part")?;
 
     let lhs = match part {
-        "numerator" => lua_path(&["context", "probability", "numerator"]),
-        "denominator" => lua_path(&["context", "probability", "denominator"]),
-        _ => lua_path(&["context", "probability", "numerator"]),
+        "denominator" => lua_path(&["context", "denominator"]),
+        _ => lua_path(&["context", "numerator"]),
     };
 
     Some(comparison_op(operator, lhs, value_expr))

@@ -238,6 +238,76 @@ end
 POST_TRIGGER_RUNTIME = steamodded_post_trigger_runtime()
 
 
+def steamodded_probability_result_runtime():
+    """Resolve real result notifications synchronously, with a bounded recursion guard."""
+    source = (ROOT / "public/other/smods-main/src/utils.lua").read_text(encoding="utf-8")
+    sections = [
+        ("SMODS.trigger_effects = function", "\nSMODS.calculate_effect = function"),
+        ("function SMODS.calculate_card_areas", "\n\n-- Updates a [context]"),
+        ("function SMODS.is_getter_context", "\nfunction SMODS.get_previous_context"),
+        ("function SMODS.calculate_context", "\nfunction SMODS.in_scoring"),
+        ("function SMODS.blueprint_effect", "\nfunction SMODS.get_mods_scoring_targets"),
+        ("function SMODS.get_probability_vars", "\nfunction SMODS.is_poker_hand_visible"),
+    ]
+    native = "\n".join(start + source.split(start, 1)[1].split(end, 1)[0]
+                       for start, end in sections)
+    return native + """
+G.STAGE=1;G.STAGES={RUN=1};G.GAME.probabilities={normal=1};G.GAME.dollars=0
+G.jokers.cards={};SMODS.Sticker={obj_buffer={}};SMODS.post_prob={}
+SMODS.update_context_flags=function() end
+SMODS.get_card_areas=function(kind) return kind=='jokers' and {G.jokers} or {} end
+probability_contexts={};probability_counts={result=0,modifier=0,fixed=0}
+local native_push=SMODS.push_to_context_stack
+function SMODS.push_to_context_stack(context,...)
+ assert(#SMODS.context_stack<24,'probability result notification recursion exceeded 24 contexts')
+ if context.pseudorandom_result then
+  probability_counts.result=probability_counts.result+1
+  probability_contexts[#probability_contexts+1]=context
+ elseif context.mod_probability then probability_counts.modifier=probability_counts.modifier+1
+ elseif context.fix_probability then probability_counts.fixed=probability_counts.fixed+1 end
+ return native_push(context,...)
+end
+function sendWarnMessage(message) error(message) end
+function probability_card(definition)
+ local card={definition=definition,ability=copy_table(definition.config or {extra={}}),
+  config={center=definition},facing='front'}
+ card.ability.extra=card.ability.extra or {}
+ function card:calculate_joker(context) return self.definition:calculate(self,context) end
+ function card:juice_up() end
+ return card
+end
+function probability_blueprint(copied_card)
+ local card={copied_card=copied_card,ability={},config={center={key='j_blueprint',set='Joker'}}}
+ function card:calculate_joker(context) return SMODS.blueprint_effect(self,self.copied_card,context) end
+ return card
+end
+function eval_card(card,context)
+ local effect=card:calculate_joker(context)
+ return effect and {jokers=effect} or {},{}
+end
+function set_probability_rolls(values)
+ probability_rolls=values;probability_roll_count=0
+end
+function pseudorandom(seed)
+ probability_roll_count=probability_roll_count+1
+ return probability_rolls[probability_roll_count] or 0
+end
+function external_probability(numerator,denominator,identifier)
+ local result=SMODS.pseudorandom_probability(actor,'external',numerator or 1,denominator or 2,identifier or 'external')
+ SMODS.trigger_effects({},actor)
+ return result
+end
+function assert_probability_dispatch_complete(results,rolls)
+ assert(probability_counts.result==results,'unexpected probability result notifications: '..probability_counts.result)
+ assert(probability_roll_count==rolls,'unexpected probability rolls: '..probability_roll_count)
+ assert(#SMODS.post_prob==0 and #SMODS.context_stack==0,'probability dispatch must finish')
+end
+"""
+
+
+PROBABILITY_RESULT_RUNTIME = steamodded_probability_result_runtime()
+
+
 def steamodded_playing_card_transform_runtime():
     """Apply editions with Steamodded's real Card implementation, not a setter stub."""
     source = (ROOT / "public/other/smods-main/src/overrides.lua").read_text(encoding="utf-8")
@@ -695,6 +765,8 @@ def run_checks(lua, cases, lua_library):
                 source += "\n" + card_area_selection_runtime(lua_library)
             if case.get("post_trigger_runtime"):
                 source += "\n" + POST_TRIGGER_RUNTIME
+            if case.get("probability_result_runtime"):
+                source += "\n" + PROBABILITY_RESULT_RUNTIME
             if case["kind"] == "scoring":
                 source += "\n" + SCORING_PARAMETERS
             if case.get("card_destruction_runtime"):

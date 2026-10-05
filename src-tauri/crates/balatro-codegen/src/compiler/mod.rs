@@ -472,23 +472,51 @@ fn compile_random_group(
     // Build the inner return block
     let inner_stmts = effects::build_return_block(&inner_outputs);
 
-    // Wrap in probability check:
-    // if SMODS.pseudorandom_probability(...) then <inner> end
+    // Each chance group has its own seed and configurable odds.
     let probability_index = ctx.next_probability_var_index();
     let random_group_index = ctx.next_random_group_index();
     let odds_var = format!("odds_{}", probability_index);
     let numerator_var = format!("numerator_{}", probability_index);
-    let prob_check = lua_call(
-        "SMODS.pseudorandom_probability",
-        vec![
-            lua_ident("card"),
-            lua_str(format!("group{}", random_group_index)),
-            lua_field(lua_raw_expr(ctx.ability_path()), &numerator_var),
-            lua_field(lua_raw_expr(ctx.ability_path()), &odds_var),
-            lua_str(ctx.smods_key()),
-            lua_bool(false),
-        ],
-    );
+    let mut probability_stmts = Vec::new();
+    let prob_check = if trigger == "probability_result" {
+        let numerator: String = format!("rolled_numerator_{}", probability_index);
+        let denominator = format!("rolled_denominator_{}", probability_index);
+        let probability_vars = lua_call(
+            "SMODS.get_probability_vars",
+            vec![
+                lua_ident("card"),
+                lua_field(lua_raw_expr(ctx.ability_path()), &numerator_var),
+                lua_field(lua_raw_expr(ctx.ability_path()), &odds_var),
+                lua_str(ctx.smods_key()),
+                lua_bool(true),
+                lua_bool(false),
+            ],
+        );
+        probability_stmts.push(lua_raw_stmt(format!(
+            "local {}, {} = {}",
+            numerator, denominator, probability_vars
+        )));
+        lua_lt(
+            lua_call(
+                "pseudorandom",
+                vec![lua_str(format!("group{}", random_group_index))],
+            ),
+            lua_div(lua_ident(numerator), lua_ident(denominator)),
+        )
+    } else {
+        lua_call(
+            "SMODS.pseudorandom_probability",
+            vec![
+                lua_ident("card"),
+                lua_str(format!("group{}", random_group_index)),
+                lua_field(lua_raw_expr(ctx.ability_path()), &numerator_var),
+                lua_field(lua_raw_expr(ctx.ability_path()), &odds_var),
+                lua_str(ctx.smods_key()),
+                lua_bool(false),
+            ],
+        )
+    };
+    probability_stmts.push(lua_if(prob_check, inner_stmts));
 
     // Register probability config variables
     ctx.add_config_int(&numerator_var, numerator);
@@ -503,7 +531,7 @@ fn compile_random_group(
 
     let wrapped = effects::EffectOutput {
         return_fields: vec![],
-        pre_return: vec![lua_if(prob_check, inner_stmts)],
+        pre_return: probability_stmts,
         config_vars: vec![],
         message: None,
         colour: None,

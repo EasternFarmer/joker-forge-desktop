@@ -364,14 +364,24 @@ const CONTEXT_PROPS: Completion[] = [
     detail: "Using consumable?",
   },
   {
-    label: "context.probability",
+    label: "context.pseudorandom_result",
     type: "property",
-    detail: "Probability context",
+    detail: "Probability-result event?",
   },
   {
-    label: "context.probability_result",
+    label: "context.result",
     type: "property",
-    detail: "Probability result",
+    detail: "Whether the probability roll succeeded",
+  },
+  {
+    label: "context.numerator",
+    type: "property",
+    detail: "Probability numerator",
+  },
+  {
+    label: "context.denominator",
+    type: "property",
+    detail: "Probability denominator",
   },
 ];
 

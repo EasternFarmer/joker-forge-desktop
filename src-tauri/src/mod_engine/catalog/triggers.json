@@ -545,7 +545,7 @@
       "joker": "Probability Result"
     },
     "description": {
-      "joker": "Check if probability succeeds or fails (look at the probability category in conditions)"
+      "joker": "Triggers after a probability roll. Use Probability Succeeded to check the outcome. Chance groups in this trigger roll without firing Probability Result again."
     },
     "category": "Special",
     "objectUsers": [
