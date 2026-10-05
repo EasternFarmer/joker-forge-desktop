@@ -122,6 +122,87 @@ fn append_description_blank_line_cases(cases: &mut Vec<Value>) {
     }
 }
 
+fn append_description_format_cases(cases: &mut Vec<Value>) {
+    for (name, description, expected, parts) in [
+        ("colour_markers", "{C:red}First #1#[s]Second #2#{}",
+            vec!["{C:red}First #1#", "{C:red}Second #2#{}"],
+            json!([[{"text":"First #1#","control":{"C":"red"}}], [{"text":"Second #2#","control":{"C":"red"}}]])),
+        ("combined_effect_scale", "{C:blue,E:1,s:1.5}First #1#\nSecond #2#{}",
+            vec!["{C:blue,E:1,s:1.5}First #1#", "{C:blue,E:1,s:1.5}Second #2#{}"],
+            json!([[{"text":"First #1#","control":{"C":"blue","E":"1","s":"1.5"}}], [{"text":"Second #2#","control":{"C":"blue","E":"1","s":"1.5"}}]])),
+        ("bump_effect", "{E:2}First #1#[s]Second #2#{}",
+            vec!["{E:2}First #1#", "{E:2}Second #2#{}"],
+            json!([[{"text":"First #1#","control":{"E":"2"}}], [{"text":"Second #2#","control":{"E":"2"}}]])),
+        ("background", "{X:mult,C:white}First#1#[s]Second#2#{}",
+            vec!["{X:mult,C:white}First#1#", "{X:mult,C:white}Second#2#{}"],
+            json!([[{"text":"First#1#","control":{"X":"mult","C":"white"}}], [{"text":"Second#2#","control":{"X":"mult","C":"white"}}]])),
+        ("dynamic_colours", "{V:1,B:2,s:0.75}First #1#[s]Second #2#{}",
+            vec!["{V:1,B:2,s:0.75}First #1#", "{V:1,B:2,s:0.75}Second #2#{}"],
+            json!([[{"text":"First #1#","control":{"V":"1","B":"2","s":"0.75"}}], [{"text":"Second #2#","control":{"V":"1","B":"2","s":"0.75"}}]])),
+        ("reset_before_break", "{C:red}First #1#{}[s]Plain #2#",
+            vec!["{C:red}First #1#{}", "Plain #2#"],
+            json!([[{"text":"First #1#","control":{"C":"red"}}], [{"text":"Plain #2#","control":{}}]])),
+        ("reset_midline", "{C:red}First #1#[s]Second{} Plain #2#[s]Last",
+            vec!["{C:red}First #1#", "{C:red}Second{} Plain #2#", "Last"],
+            json!([[{"text":"First #1#","control":{"C":"red"}}], [{"text":"Second","control":{"C":"red"}},{"text":" Plain #2#","control":{}}], [{"text":"Last","control":{}}]])),
+        ("explicit_replacement", "{C:red,E:1}First #1#[s]{C:blue}Second #2#[s]Last{}",
+            vec!["{C:red,E:1}First #1#", "{C:blue}Second #2#", "{C:blue}Last{}"],
+            json!([[{"text":"First #1#","control":{"C":"red","E":"1"}}], [{"text":"Second #2#","control":{"C":"blue"}}], [{"text":"Last","control":{"C":"blue"}}]])),
+        ("adjacent_tags", "{C:red}{E:1}First #1#[s]Second #2#{}",
+            vec!["{C:red}{E:1}First #1#", "{E:1}Second #2#{}"],
+            json!([[{"text":"First #1#","control":{"E":"1"}}], [{"text":"Second #2#","control":{"E":"1"}}]])),
+        ("tag_only_rows", "{C:red}[s]First #1#[s]{}[s]Plain #2#",
+            vec![" ", "{C:red}First #1#", " ", "Plain #2#"],
+            json!([[{"text":" ","control":{}}], [{"text":"First #1#","control":{"C":"red"}}], [{"text":" ","control":{}}], [{"text":"Plain #2#","control":{}}]])),
+        ("background_blank_gap", "{X:mult,C:white}First#1#[s][s]Second#2#{}",
+            vec!["{X:mult,C:white}First#1#", " ", "{X:mult,C:white}Second#2#{}"],
+            json!([[{"text":"First#1#","control":{"X":"mult","C":"white"}}], [{"text":" ","control":{}}], [{"text":"Second#2#","control":{"X":"mult","C":"white"}}]])),
+        ("alternate_breaks", "{C:red}First #1#\r\nSecond #2#<BR />Last{}",
+            vec!["{C:red}First #1#", "{C:red}Second #2#", "{C:red}Last{}"],
+            json!([[{"text":"First #1#","control":{"C":"red"}}], [{"text":"Second #2#","control":{"C":"red"}}], [{"text":"Last","control":{"C":"red"}}]])),
+    ] {
+        let translated = description.replace("First", "Premier");
+        let translated_expected: Vec<String> = expected.iter().map(|line| line.replace("First", "Premier")).collect();
+        let mut translated_parts = parts.clone();
+        for line in translated_parts.as_array_mut().unwrap() {
+            for part in line.as_array_mut().unwrap() {
+                part["text"] = json!(part["text"].as_str().unwrap().replace("First", "Premier"));
+            }
+        }
+        let entry: export::BatchJokerEntry = serde_json::from_value(json!({
+            "jokerData":{
+                "objectKey":"runtime_test","name":"Runtime Test","description":description,
+                "cost":4,"rarity":"common",
+                "localizations":[{"language":"fr","name":"Essai","description":translated}],
+                "descriptionVariables":[
+                    {"kind":"game","id":"current_money","multiplier":2,"startsFrom":3},
+                    {"kind":"config","name":"mult0","effect_id":"money_mult","fallback":{
+                        "value":"GAMEVAR:current_money|2|3","valueType":"gameVariable"
+                    }}
+                ],
+                "rules":[{"id":"score","trigger":"hand_played","effects":[{
+                    "id":"money_mult","type":"add_mult","params":{"value":{
+                        "value":"GAMEVAR:current_money|2|3","valueType":"gameVariable"
+                    }}
+                }]}]
+            },
+            "pos":{"x":0,"y":0},"fileName":"runtime_test.lua"
+        })).unwrap();
+        let definition = export::joker_data_to_def(&entry.joker_data, "mod", entry.pos.clone(), None);
+        let inline = Emitter::new().emit_chunk(&compile_joker(&definition, "mod"));
+        let external = Emitter::new().emit_chunk(&balatro_codegen::compile_joker_with_options(&definition, "mod", false));
+        let localizations = export::build_localization_lua_files(
+            "mod", "en-us", &[entry], &[], &[], &[], &[], &[], &[], &[],
+        );
+        cases.push(json!({"kind":"description_format","name":format!("description_format_{name}_inline"),
+            "code":inline,"expected":expected,"parts":parts}));
+        cases.push(json!({"kind":"description_format","name":format!("description_format_{name}_en-us"),
+            "code":external,"localization":localizations["en-us"],"expected":expected,"parts":parts}));
+        cases.push(json!({"kind":"description_format","name":format!("description_format_{name}_fr"),
+            "code":external,"localization":localizations["fr"],"expected":translated_expected,"parts":translated_parts}));
+    }
+}
+
 fn append_consumable_creation_message_cases(cases: &mut Vec<Value>) {
     for (name, object, source_set, create_set, key, count, loops, expected_key, expected_set) in [
         ("self_tarot", "consumable", "Tarot", "Tarot", "c_mod_runtime_test", 1, 1, "c_mod_runtime_test", "Tarot"),
@@ -2622,6 +2703,7 @@ fn main() {
     append_scoring_group_cases(&mut cases);
     append_rarity_shop_cases(&mut cases);
     append_description_blank_line_cases(&mut cases);
+    append_description_format_cases(&mut cases);
     append_consumable_creation_message_cases(&mut cases);
     append_probability_result_cases(&mut cases);
     append_game_variable_description_and_loop_cases(&mut cases);

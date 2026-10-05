@@ -51,6 +51,17 @@ def evaluate(lua, source):
         lua.lua_close(state)
 
 
+def lua_data(value):
+    if isinstance(value, dict):
+        return "{" + ",".join("[" + lua_data(key) + "]=" + lua_data(entry)
+                              for key, entry in value.items()) + "}"
+    if isinstance(value, list):
+        return "{" + ",".join(lua_data(entry) for entry in value) + "}"
+    if value is None:
+        return "nil"
+    return json.dumps(value, ensure_ascii=False)
+
+
 HELPERS = """
 function to_big(value) return value end
 function lenient_bignum(value) return value end
@@ -411,7 +422,9 @@ def description_localization_runtime(lua_library):
 native_description_localization=true
 UIBox={}
 SMODS.Fonts={}
-function loc_colour() return {} end
+SMODS.DynaTextEffects={}
+function loc_colour(colour) return 'colour:'..(colour or 'default') end
+function DynaText(config) return config end
 function format_ui_value(value) return value end
 G.LANG={font={DESCSCALE=1,FONTSCALE=1,TEXT_HEIGHT_SCALE=1,squish=1,
  FONT={getWidth=function(self,text) return #text end,getHeight=function() return 1 end}}}
@@ -446,6 +459,67 @@ function assert_description_layout(center,vars,expected)
   local smods_text=''
   for _,node in ipairs(smods_nodes) do smods_text=smods_text..node.config.text end
   assert(smods_text==expected[i],'Steamodded localized line changed')
+ end
+end
+function assert_description_format(center,vars,expected)
+ G.localization={misc={v_dictionary={},v_text={},tutorial={},quips={}},descriptions={Joker={test=center}}}
+ init_localization()
+ assert(#center.text_parsed==#expected,'formatted line count changed during native parsing')
+ -- Every new tag replaces the complete control table; every line starts empty.
+ local adjacent=loc_parse_string('{C:red}{E:1}text')[1].control
+ assert(adjacent.E=='1' and adjacent.C==nil,'native controls must replace, not merge')
+ assert(next(loc_parse_string('text')[1].control)==nil,'native lines must start without formatting')
+ assert(next(loc_parse_string('{C:red}{}text')[1].control)==nil,'empty tags must reset all controls')
+ local native_nodes={}
+ localize{type='descriptions',set='Joker',key='test',vars=vars,nodes=native_nodes}
+ assert(#native_nodes==#expected,'native formatted rows were lost')
+ local layout=desc_from_rows(native_nodes)
+ assert(#layout.nodes[1].nodes==#expected,'formatted rows were lost in the description layout')
+ local function collect(nodes,result,background)
+  for _,node in ipairs(nodes) do
+   if node.n==G.UIT.C then
+    collect(node.nodes,result,node.config.colour or background)
+   elseif node.n==G.UIT.O then
+    local object=node.config.object
+    result[#result+1]={text=object.string[1],colour=object.colours[1],scale=object.scale,
+     float=object.float,bump=object.bump,spacing=object.spacing,background=background}
+   else
+    result[#result+1]={text=node.config.text,colour=node.config.colour,scale=node.config.scale,background=background}
+   end
+  end
+ end
+ local function check_nodes(nodes,line,smods)
+  local rendered={};collect(nodes,rendered)
+  assert(#rendered==#line,'formatting changed the number of text segments')
+  for i,part in ipairs(line) do
+   local control=part.control
+   local text=part.text:gsub('#(%d+)#',function(index) return tostring(vars[tonumber(index)]) end)
+   local actual=rendered[i]
+   local colour=control.V and vars.colours[tonumber(control.V)] or loc_colour(control.C)
+   local background=smods and control.B and vars.colours[tonumber(control.B)]
+     or control.X and (smods or not control.E) and loc_colour(control.X) or nil
+   assert(actual.text==text,'formatted text changed: '..tostring(actual.text)..' / '..text)
+   assert(actual.colour==colour,'text colour did not reach the native render node')
+   assert(math.abs(actual.scale-0.32*(tonumber(control.s) or 1))<0.000001,'text scale did not reach the native render node')
+   assert(actual.background==background,'background colour did not reach the native render node')
+   assert(actual.float==(control.E=='1' and true or nil),'floating effect did not reach the native render node')
+   assert(actual.bump==(control.E=='2' and true or nil),'bump effect did not reach the native render node')
+   assert(actual.spacing==(control.E=='2' and 1 or nil),'bump spacing did not reach the native render node')
+  end
+ end
+ for index,line in ipairs(expected) do
+  local parsed=center.text_parsed[index]
+  assert(#parsed==#line,'native parser changed the number of text segments')
+  for i,part in ipairs(line) do
+   for key,value in pairs(part.control) do
+    assert(parsed[i].control[key]==value,'formatting was lost on line '..index..': '..key)
+   end
+   for key,value in pairs(parsed[i].control) do
+    assert(part.control[key]==value,'unexpected formatting leaked on line '..index..': '..key)
+   end
+  end
+  check_nodes(native_nodes[index],line,false)
+  check_nodes(SMODS.localize_box(parsed,{vars=vars}),line,true)
  end
 end
 """
@@ -945,7 +1019,7 @@ KNOWN_VALUES = {
 def run_checks(lua, cases, lua_library):
     checks = 0
     for case in cases:
-        if case["kind"] == "description_layout":
+        if case["kind"] in ("description_layout", "description_format"):
             for scenario in ("collection_game", "populated_game"):
                 for tooltip_card in ("nil", "{}", "{ability={extra={}}}"):
                     source = HELPERS + GAME_STATES[scenario] + "\ncontext=nil;" + case["code"]
@@ -964,11 +1038,16 @@ def run_checks(lua, cases, lua_library):
                     source += "assert(#center.text==#expected,'exported description line count changed');"
                     for index, line in enumerate(case["expected"], 1):
                         source += f"assert(center.text[{index}]=={json.dumps(line, ensure_ascii=False)},'exported description line changed');"
-                    source += "if native_description_localization then assert_description_layout(center,vars,expected) end;return 1"
+                    if case["kind"] == "description_format":
+                        source += "vars.colours={'dynamic_text','dynamic_background'};"
+                        source += "local expected_parts=" + lua_data(case["parts"]) + ";"
+                        source += "if native_description_localization then assert_description_format(center,vars,expected_parts) end;return 1"
+                    else:
+                        source += "if native_description_localization then assert_description_layout(center,vars,expected) end;return 1"
                     try:
                         evaluate(lua, source)
                     except AssertionError as error:
-                        raise AssertionError(f"description_layout {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
+                        raise AssertionError(f"{case['kind']} {case['name']} / {scenario} / card={tooltip_card}: {error}") from error
                     checks += 1
             continue
         if case["kind"] == "rarity_shop":

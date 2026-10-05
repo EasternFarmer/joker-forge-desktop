@@ -109,7 +109,7 @@ export const parseBalatroText = (
     });
   }
 
-  text = text.replace(/\[s\]/g, "\n");
+  text = text.replace(/\[s\]|\r\n?|<br\s*\/?>/gi, "\n");
 
   const parts = text.split(/(\{[^}]*\})/);
   let currentStyle: StyleState = {};
@@ -175,35 +175,10 @@ export const parseBalatroText = (
       let processedText = part;
 
       if (currentStyle.stripWhitespace) {
-        processedText = processedText.replace(/\s/g, "");
+        processedText = processedText.replace(/[^\S\n\r]/g, "");
       }
 
       if (processedText) {
-        const hasLineBreak = processedText.includes("\n");
-        const hasColourFormatting = Boolean(
-          currentStyle.textColor || currentStyle.backgroundColor,
-        );
-
-        if (hasLineBreak && hasColourFormatting) {
-          const firstBreakIndex = processedText.indexOf("\n");
-          const firstLine = processedText.slice(0, firstBreakIndex);
-          const remainingText = processedText.slice(firstBreakIndex);
-
-          if (firstLine) {
-            segments.push({
-              text: firstLine,
-              ...currentStyle,
-            });
-          }
-
-          if (remainingText) {
-            segments.push({
-              text: remainingText,
-            });
-          }
-          continue;
-        }
-
         segments.push({
           text: processedText,
           ...currentStyle,
@@ -265,9 +240,11 @@ export const BalatroText: React.FC<BalatroTextProps> = ({
               {displayText.split("\n").map((line, lineIndex) => (
                 <React.Fragment key={lineIndex}>
                   {lineIndex > 0 && <br />}
-                  <span className={classes.trim()} style={inlineStyle}>
-                    {line}
-                  </span>
+                  {line.trim() ? (
+                    <span className={classes.trim()} style={inlineStyle}>
+                      {line}
+                    </span>
+                  ) : line}
                 </React.Fragment>
               ))}
             </span>

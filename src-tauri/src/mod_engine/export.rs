@@ -1114,6 +1114,8 @@ fn is_vanilla_rarity_key(value: &str) -> bool {
 /// Replaces `<br>` variants and `[s]` with newlines and trims each line.
 /// Keep blank rows as a space because Balatro's localization parser drops
 /// empty strings. Entirely blank descriptions use `["No description"]`.
+/// Carry the latest formatting tag until a replacement or reset so a formatted
+/// selection keeps its style after Balatro starts parsing a new line.
 fn split_description(desc: &str) -> Vec<String> {
     // Handle common <br> variants case-insensitively without pulling in a regex dep
     let normalized = desc
@@ -1133,9 +1135,29 @@ fn split_description(desc: &str) -> Vec<String> {
     if lines.iter().all(|line| line.is_empty()) {
         vec!["No description".to_string()]
     } else {
+        let mut active_tag = String::new();
         lines
             .into_iter()
-            .map(|line| if line.is_empty() { " ".to_string() } else { line })
+            .map(|line| {
+                let formatted = if active_tag.is_empty() || line.starts_with('{') {
+                    line.clone()
+                } else {
+                    format!("{active_tag}{line}")
+                };
+                let mut remaining = line.as_str();
+                let mut visible = String::new();
+                while let Some(start) = remaining.find('{') {
+                    let Some(end) = remaining[start..].find('}') else { break };
+                    visible.push_str(&remaining[..start]);
+                    let tag = &remaining[start..=start + end];
+                    active_tag = if tag == "{}" { String::new() } else { tag.to_string() };
+                    remaining = &remaining[start + end + 1..];
+                }
+                visible.push_str(remaining);
+                // Styled spaces can disappear under a background tag. Preserve
+                // spacer rows without styling, retaining the style for later text.
+                if visible.trim().is_empty() { " ".to_string() } else { formatted }
+            })
             .collect()
     }
 }
@@ -2228,6 +2250,30 @@ mod tests {
         for description in ["", " \t", "\n\n", "[s][s]", "<br><br />"] {
             assert_eq!(split_description(description), vec!["No description"]);
         }
+    }
+
+    #[test]
+    fn description_formatting_continues_until_replaced_or_reset() {
+        for description in [
+            "{C:red}First[s]Second[s]Third{}[s]Plain",
+            "{C:red}First\nSecond\nThird{}\nPlain",
+            "{C:red}First\r\nSecond\r\nThird{}\r\nPlain",
+            "{C:red}First<br/>Second<br>Third{}<br />Plain",
+        ] {
+            assert_eq!(split_description(description), vec![
+                "{C:red}First", "{C:red}Second", "{C:red}Third{}", "Plain"
+            ], "description {description:?}");
+        }
+        assert_eq!(split_description("{C:red,E:1,s:1.1}First[s]Second{}"),
+            vec!["{C:red,E:1,s:1.1}First", "{C:red,E:1,s:1.1}Second{}"]);
+        assert_eq!(split_description("{C:red}First[s]{E:2}Second[s]Third[s]{}Plain"),
+            vec!["{C:red}First", "{E:2}Second", "{E:2}Third", "{}Plain"]);
+        assert_eq!(split_description("{C:red}{s:1.2}First[s]Second"),
+            vec!["{C:red}{s:1.2}First", "{s:1.2}Second"]);
+        assert_eq!(split_description("{X:red,C:white}First[s][s]Last{}"),
+            vec!["{X:red,C:white}First", " ", "{X:red,C:white}Last{}"]);
+        assert_eq!(split_description("{C:red}[s]First[s]{E:1}[s]Second[s]{}[s]Plain"),
+            vec![" ", "{C:red}First", " ", "{E:1}Second", " ", "Plain"]);
     }
 
     #[test]

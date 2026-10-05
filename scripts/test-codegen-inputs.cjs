@@ -6,7 +6,7 @@ const vm = require("node:vm");
 const { test } = require("node:test");
 const ts = require("typescript");
 
-function loadTypeScript(relativePath, imports = {}) {
+function loadTypeScript(relativePath, imports = {}, globals = {}) {
   const filePath = path.join(__dirname, "..", relativePath);
   const compiled = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
     compilerOptions: {
@@ -17,6 +17,7 @@ function loadTypeScript(relativePath, imports = {}) {
   });
   const module = { exports: {} };
   vm.runInNewContext(compiled.outputText, {
+    ...globals,
     module,
     exports: module.exports,
     require(name) {
@@ -357,6 +358,7 @@ function renderDescriptionEditor(item, search = "") {
     "react/jsx-runtime": { jsx: element, jsxs: element },
     "@/lib/core/utils": { cn: () => "" },
     "@/lib/balatro/balatro-text-formatter": {},
+    "@/lib/description/description-formatting": loadTypeScript("src/lib/description/description-formatting.ts"),
     "@/lib/rules/description-variable-registry": descriptionRegistry,
     "@/lib/rules/auto-description": { generateDescriptionFromRules: () => "" },
     "@/lib/core/search": loadTypeScript("src/lib/core/search.ts"),
@@ -424,4 +426,236 @@ test("description game bindings validate finite starting values and multipliers"
       assert.match(issues[0].message, /starting value or multiplier is invalid/);
     }
   }
+});
+
+const descriptionFormatting = loadTypeScript("src/lib/description/description-formatting.ts");
+const descriptionPreview = loadTypeScript("src/lib/balatro/balatro-text-formatter.tsx", {
+  react: { default: { Fragment: "Fragment" } },
+  "react/jsx-runtime": {
+    jsx: (type, props) => ({ type, props }),
+    jsxs: (type, props) => ({ type, props }),
+  },
+});
+
+function allElements(node) {
+  if (Array.isArray(node)) return node.flatMap(allElements);
+  if (!node || typeof node !== "object") return [];
+  return [node, ...allElements(node.props?.children)];
+}
+
+function descriptionToolbar(value, start = 0, end = value.length) {
+  const changes = [];
+  const cursorChanges = [];
+  let autoFormatCalls = 0;
+  const textarea = {
+    value, selectionStart: start, selectionEnd: end,
+    focus() {},
+    setSelectionRange(nextStart, nextEnd) { cursorChanges.push([nextStart, nextEnd]); },
+  };
+  const element = (type, props) => ({ type, props });
+  const imports = {
+    react: {
+      memo: (component) => component, useCallback: (callback) => callback,
+      useEffect() {}, useMemo: (factory) => factory(),
+      useRef: (current) => ({ current: current === null ? textarea : current }),
+      useState: (initial) => [initial, () => {}],
+    },
+    "react/jsx-runtime": { jsx: element, jsxs: element },
+    "@/lib/core/utils": { cn: () => "" },
+    "@/lib/balatro/balatro-text-formatter": {
+      applyAutoFormatting(...args) {
+        autoFormatCalls++;
+        return descriptionPreview.applyAutoFormatting(...args);
+      },
+    },
+    "@/lib/description/description-formatting": descriptionFormatting,
+    "@/lib/rules/description-variable-registry": { buildDescriptionVariableTokens: () => [] },
+    "@/lib/rules/auto-description": { generateDescriptionFromRules: () => "" },
+    "@/lib/core/search": {},
+    "@phosphor-icons/react": {},
+  };
+  for (const [module, components] of Object.entries({
+    button: ["Button"], input: ["Input"], "scroll-area": ["ScrollArea"],
+    textarea: ["Textarea"], separator: ["Separator"],
+    tooltip: ["Tooltip", "TooltipContent", "TooltipTrigger"],
+  })) {
+    imports[`@/components/ui/${module}`] = Object.fromEntries(components.map((name) => [name, name]));
+  }
+  const { DescriptionEditor } = loadTypeScript("src/components/pages/description-editor.tsx", imports, {
+    requestAnimationFrame: (callback) => callback(),
+  });
+  const tree = DescriptionEditor({ value, onChange(nextValue) { changes.push(nextValue); } });
+  return {
+    tree, changes, cursorChanges,
+    get autoFormatCalls() { return autoFormatCalls; },
+    click(label) {
+      const elements = allElements(tree);
+      const effect = elements.find((node) => node.type === "Button" && elementText(node) === label);
+      const tooltip = elements.find((node) => node.type === "Tooltip" && elementText(node) === label);
+      const button = effect || allElements(tooltip).find((node) => node.type === "button" || node.type === "Button");
+      assert.ok(button, `Missing description toolbar action: ${label}`);
+      button.props.onClick();
+    },
+  };
+}
+
+test("description colour toolbar formats every selected line and retains blank rows", () => {
+  for (const separator of ["[s]", "\n", "\r\n", "\r", "<br>", "<BR />"]) {
+    const selected = `Alpha${separator}Beta${separator}${separator}Gamma`;
+    const toolbar = descriptionToolbar(`Before ${selected} After`, 7, 7 + selected.length);
+    toolbar.click("Red");
+    const expected = `Before {C:red}Alpha{}${separator}{C:red}Beta{}${separator}${separator}{C:red}Gamma{} After`;
+    assert.deepEqual(toolbar.changes, [expected], separator);
+    assert.deepEqual(toolbar.cursorChanges, [[expected.length - 6, expected.length - 6]], separator);
+    assert.equal(toolbar.autoFormatCalls, 0, "Explicit colour should not be overwritten by auto-format");
+  }
+});
+
+test("description effects retain selected colours and restore partial-line suffix styling", () => {
+  const value = "{C:blue}Before Alpha[s]{C:red}Beta{}[s]Gamma After";
+  const toolbar = descriptionToolbar(value, value.indexOf("Alpha"), value.indexOf(" After"));
+  toolbar.click("Float");
+  const segments = descriptionPreview.parseBalatroText(toolbar.changes[0]);
+  const segmentFor = (text) => segments.find((segment) => segment.text.includes(text));
+  assert.equal(segmentFor("Before").textColor, "text-balatro-blue");
+  assert.equal(segmentFor("Before").motion, undefined);
+  assert.equal(segmentFor("Alpha").textColor, "text-balatro-blue");
+  assert.equal(segmentFor("Beta").textColor, "text-balatro-red");
+  for (const text of ["Alpha", "Beta", "Gamma"]) assert.equal(segmentFor(text).motion, 1);
+  assert.equal(segmentFor("After").motion, undefined);
+  assert.equal(segmentFor("After").textColor, undefined);
+});
+
+test("description colour selection overrides inner colour tags and resets on all lines", () => {
+  const value = "{s:1.2}Before Alpha[s]{C:blue,E:1}Beta{}[s]Gamma After";
+  const toolbar = descriptionToolbar(value, value.indexOf("Alpha"), value.indexOf(" After"));
+  toolbar.click("Red");
+  const segments = descriptionPreview.parseBalatroText(toolbar.changes[0]);
+  for (const text of ["Alpha", "Beta", "Gamma"]) {
+    assert.equal(segments.find((segment) => segment.text.includes(text)).textColor, "text-balatro-red");
+  }
+  assert.equal(segments.find((segment) => segment.text.includes("Alpha")).scale, 1.2);
+  assert.equal(segments.find((segment) => segment.text.includes("Beta")).motion, 1);
+  assert.equal(segments.find((segment) => segment.text.includes("After")).textColor, undefined);
+});
+
+test("description background and scale actions preserve selected leading and trailing breaks", () => {
+  for (const [label, property, expected] of [
+    ["Red BG", "backgroundColor", "bg-balatro-red"], ["Scale", "scale", 1.1],
+  ]) {
+    const selected = "\nAlpha\n\nBeta\n";
+    const toolbar = descriptionToolbar(`Before${selected}After`, 6, 6 + selected.length);
+    toolbar.click(label);
+    const segments = descriptionPreview.parseBalatroText(toolbar.changes[0]);
+    assert.equal(segments.map((segment) => segment.text).join(""), "Before\nAlpha\n\nBeta\nAfter");
+    for (const text of ["Alpha", "Beta"]) {
+      assert.equal(segments.find((segment) => segment.text.includes(text))[property], expected);
+    }
+    assert.equal(segments.find((segment) => segment.text.includes("After"))[property], undefined);
+    const preview = descriptionPreview.BalatroText({ text: toolbar.changes[0] });
+    assert.equal(allElements(preview).filter((node) => node.type === "br").length, 4);
+  }
+});
+
+test("existing wrapped description styles render through every line until reset", () => {
+  for (const separator of ["[s]", "\n", "\r\n", "<br />"]) {
+    const value = `{C:red,X:blue,E:1,s:1.2}Alpha${separator}${separator}Beta{} After`;
+    const segments = descriptionPreview.parseBalatroText(value);
+    assert.equal(segments[0].text, "Alpha\n\nBeta");
+    assert.equal(segments[0].textColor, "text-balatro-red");
+    assert.equal(segments[0].backgroundColor, "bg-balatro-blue");
+    assert.equal(segments[0].motion, 1);
+    assert.equal(segments[0].scale, 1.2);
+    assert.equal(segments[1].text, " After");
+    assert.equal(segments[1].textColor, undefined);
+    const elements = allElements(descriptionPreview.BalatroText({ text: value }));
+    assert.equal(elements.filter((node) => node.type === "br").length, 2);
+    for (const text of ["Alpha", "Beta"]) {
+      const span = elements.find((node) => node.type === "span" && node.props.children === text);
+      assert.match(span.props.className, /text-balatro-red/);
+      assert.match(span.props.className, /bg-balatro-blue/);
+      assert.match(span.props.className, /animate-float/);
+      assert.equal(span.props.style.fontSize, "1.2em");
+    }
+  }
+});
+
+test("background formatting strips horizontal whitespace while retaining paragraph gaps", () => {
+  const segments = descriptionPreview.parseBalatroText("{X:mult,C:white} X2 \t[s][s] X3 \t{} Plain");
+  assert.equal(segments[0].text, "X2\n\nX3");
+  assert.equal(segments[1].text, " Plain");
+  assert.equal(allElements(descriptionPreview.BalatroText({ text: "{X:mult,C:white}X2[s][s]X3{}" }))
+    .filter((node) => node.type === "br").length, 2);
+});
+
+test("description preview retains native full-tag replacement and reset behavior", () => {
+  const segments = descriptionPreview.parseBalatroText("{C:red,E:1}Alpha[s]Beta{s:1.2}Large[s]Larger{}Plain");
+  assert.equal(segments[0].textColor, "text-balatro-red");
+  assert.equal(segments[0].motion, 1);
+  assert.equal(segments[1].text, "Large\nLarger");
+  assert.equal(segments[1].scale, 1.2);
+  assert.equal(segments[1].textColor, undefined);
+  assert.equal(segments[1].motion, undefined);
+  assert.equal(segments[2].textColor, undefined);
+  assert.equal(segments[2].scale, undefined);
+});
+
+test("manual toolbar formatting preserves keywords while ordinary typing still auto-formats", () => {
+  const value = "Alpha\n gold \nBeta";
+  const toolbar = descriptionToolbar(value);
+  toolbar.click("Red");
+  assert.ok(toolbar.changes[0].includes("{C:red} gold {}"));
+  assert.equal(toolbar.autoFormatCalls, 0);
+  const input = allElements(toolbar.tree).find((node) => node.type === "Textarea");
+  input.props.onChange({ target: { value: "gold" } });
+  assert.equal(toolbar.autoFormatCalls, 1);
+  assert.equal(toolbar.changes[1], "{C:attention}Gold{}");
+});
+
+test("description cursor insertion and newline controls keep their insertion behavior", () => {
+  const colour = descriptionToolbar("Before After", 7, 7);
+  colour.click("Red");
+  assert.deepEqual(colour.changes, ["Before {C:red}{}After"]);
+  assert.deepEqual(colour.cursorChanges, [[14, 14]]);
+  const newline = descriptionToolbar("Before After", 7, 7);
+  newline.click("New Line");
+  assert.deepEqual(newline.changes, ["Before [s]After"]);
+  assert.deepEqual(newline.cursorChanges, [[10, 10]]);
+  const restore = descriptionFormatting.insertDescriptionTag("{C:blue}Before After", 15, 15, "{E:1}");
+  assert.equal(restore.value, "{C:blue}Before {C:blue,E:1}{C:blue}After");
+  assert.equal(restore.cursor, 27);
+});
+
+test("selected static and variable colours override alternative colour sources", () => {
+  for (const [original, applied, removed, retained] of [
+    ["V:1,E:1", "C:red", "V", "E:1"],
+    ["C:blue,s:1.2", "V:1", "C", "s:1.2"],
+    ["B:1,V:1,E:1", "X:red,C:white", "B", "E:1"],
+    ["X:blue,T:tip", "B:1", "X", "T:tip"],
+  ]) {
+    const value = `{${original}}Before Alpha[s]Beta After`;
+    const start = value.indexOf("Alpha");
+    const end = value.indexOf(" After");
+    const result = descriptionFormatting.insertDescriptionTag(value, start, end, `{${applied}}`).value;
+    const selectedTags = result.slice(start, result.indexOf(" After")).match(/\{[^}]*\}/g);
+    const styled = selectedTags.filter((tag) => tag.includes(applied));
+    assert.equal(styled.length, 2);
+    for (const tag of styled) {
+      assert.ok(!tag.includes(`${removed}:`), tag);
+      assert.ok(tag.includes(retained), tag);
+    }
+    assert.ok(result.endsWith(`{${original}} After`), "Original suffix colour should return");
+  }
+});
+
+test("whitespace-only selected rows and preview gaps remain unstyled", () => {
+  const value = "Alpha[s] \t [s]Beta After";
+  const toolbar = descriptionToolbar(value, 0, value.indexOf(" After"));
+  toolbar.click("Red BG");
+  assert.equal(toolbar.changes[0], "{X:red,C:white}Alpha{}[s] \t [s]{X:red,C:white}Beta{} After");
+  const preview = descriptionPreview.BalatroText({ text: "{X:red,C:white}Alpha[s] \t [s]Beta{} After" });
+  const elements = allElements(preview);
+  assert.equal(elements.filter((node) => node.type === "br").length, 2);
+  assert.ok(!elements.some((node) => node.type === "span" && node.props.className?.includes("bg-balatro-red")
+    && typeof node.props.children === "string" && !node.props.children.trim()));
 });

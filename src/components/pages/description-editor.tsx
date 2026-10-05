@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/core/utils";
 import { applyAutoFormatting } from "@/lib/balatro/balatro-text-formatter";
+import { insertDescriptionTag } from "@/lib/description/description-formatting";
 import { buildDescriptionVariableTokens } from "@/lib/rules/description-variable-registry";
 import { generateDescriptionFromRules } from "@/lib/rules/auto-description";
 import { fuzzyMatchAny } from "@/lib/core/search";
@@ -272,38 +273,16 @@ export const DescriptionEditor = memo(
         const textarea = textareaRef.current;
         if (!textarea) return;
 
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const currentVal = textarea.value;
-        const selected = currentVal.substring(start, end);
-
-        let newVal = "";
-        let newCursor = 0;
-
-        if (selected) {
-          newVal =
-            currentVal.substring(0, start) +
-            tag +
-            selected +
-            (autoClose ? "{}" : "") +
-            currentVal.substring(end);
-          newCursor =
-            start + tag.length + selected.length + (autoClose ? 2 : 0);
-        } else {
-          newVal =
-            currentVal.substring(0, start) +
-            tag +
-            (autoClose ? "{}" : "") +
-            currentVal.substring(end);
-          newCursor = start + tag.length;
-        }
-
-        const formattedVal = autoFormat
-          ? applyAutoFormatting(newVal, value).formatted
-          : newVal;
-        applyValueWithCursor(formattedVal, newCursor);
+        const inserted = insertDescriptionTag(
+          textarea.value,
+          textarea.selectionStart,
+          textarea.selectionEnd,
+          tag,
+          autoClose,
+        );
+        applyValueWithCursor(inserted.value, inserted.cursor);
       },
-      [applyValueWithCursor, autoFormat, value],
+      [applyValueWithCursor],
     );
 
     const handleTextChange = useCallback(
