@@ -18,6 +18,7 @@ import {
   useSensor,
   useSensors,
   PointerSensor,
+  type PointerSensorOptions,
   KeyboardSensor,
   DragStartEvent,
   DragEndEvent,
@@ -46,6 +47,7 @@ import FloatingDock from "./floating-dock";
 import BlockPalette from "./block-palette";
 import Variables from "./variables";
 import Inspector from "./inspector";
+import { rememberInspectorDismissal, wasInspectorDismissed } from "./inspector-preference";
 import { isParameterVisible } from "./parameter-visibility";
 import LiveCodePanel from "./live-code-panel";
 import HistoryPanel from "./history-panel";
@@ -64,11 +66,23 @@ import type { CustomCodeState } from "@/lib/core/types";
 import {
   toRanges as toFieldRanges,
   updateBoundRanges,
-  readBoundFieldEdits,
+  assessBoundFieldEdits,
+  linkedFieldKey,
   rebaseLinkedCode,
   type BoundFieldRange,
   type CodeEdit,
 } from "@/lib/content/live-code-sync";
+import {
+  attachFieldIdentities,
+  buildLiveCodeFieldLinks,
+  isLinkedFieldValueAllowed,
+  readPathValue,
+  resolveLinkedRulePath,
+  type LiveCodeFieldLink,
+} from "@/lib/content/live-code-fields";
+import { mapCodeSegmentsThroughEdits } from "@/lib/content/live-code-navigation";
+import { buildLiveCodeExplanations } from "@/lib/content/live-code-explanations";
+import { formatLuaCode, isLuaIndentationEquivalent } from "@/lib/content/live-code-format";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -111,6 +125,9 @@ import {
   getSelectedLoopGroup,
   getSelectedRandomGroup,
   getSelectedRule,
+  getSelectionForCodeSegment,
+  resolveSelectedItem,
+  retainTrackedCodeSegments,
 } from "./selection-utils";
 import IconButton from "@/components/ui/icon-button";
 import HelpTooltipIcon from "@/components/ui/help-tooltip-icon";
@@ -199,66 +216,18 @@ const cloneRulesSnapshot = (source: Rule[]): Rule[] => {
 
 type LinkedFieldRange = BoundFieldRange & { sourceIds?: Record<number, string> };
 
-const attachFieldIdentities = (
-  ranges: BoundFieldRange[],
-  sourceRules: Rule[],
-): LinkedFieldRange[] => ranges.map((range) => {
-  const sourceIds: Record<number, string> = {};
-  let current: unknown = { rules: sourceRules };
-  range.sourcePath.forEach((part, index) => {
-    if (typeof part === "number" && Array.isArray(current)) {
-      current = current[part];
-      const id = (current as { id?: unknown } | undefined)?.id;
-      if (typeof id === "string" && id) sourceIds[index] = id;
-    } else if (current && typeof current === "object") {
-      current = (current as Record<string, unknown>)[String(part)];
-    } else {
-      current = undefined;
-    }
-  });
-  return { ...range, sourceIds };
-});
-
-const resolveLinkedRulePath = (
-  range: LinkedFieldRange,
-  sourceRules: Rule[],
-  currentRules: Rule[],
-): Array<string | number> | null => {
-  if (range.sourcePath[0] !== "rules") return null;
-  let source: unknown = { rules: sourceRules };
-  let current: unknown = { rules: currentRules };
-  const resolved: Array<string | number> = [];
-  for (let index = 0; index < range.sourcePath.length; index += 1) {
-    const part = range.sourcePath[index];
-    if (typeof part === "number") {
-      if (!Array.isArray(current)) return null;
-      const original = Array.isArray(source) ? source[part] : undefined;
-      const id = range.sourceIds?.[index] ?? (original as { id?: string } | undefined)?.id;
-      if (!id) return null;
-      const currentIndex = current.findIndex((entry) => entry?.id === id);
-      if (currentIndex < 0) return null;
-      resolved.push(currentIndex);
-      current = current[currentIndex];
-      source = original;
-    } else {
-      if (["__proto__", "prototype", "constructor"].includes(part)) return null;
-      if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
-        return null;
-      }
-      resolved.push(part);
-      current = (current as Record<string, unknown>)[part];
-      source = source && typeof source === "object"
-        ? (source as Record<string, unknown>)[part]
-        : undefined;
-    }
-  }
-  return resolved;
+const liveCodeCatalog = {
+  getCondition: getConditionTypeById,
+  getEffect: getEffectTypeById,
+  getTrigger: getTriggerById,
 };
-
-const readPathValue = (root: unknown, path: Array<string | number>): unknown =>
-  path.reduce<unknown>((value, part) => value && typeof value === "object"
-    ? (value as Record<string, unknown>)[String(part)]
-    : undefined, root);
+const unrestrictedDragModifiers: [] = [];
+const verticalDragModifiers = [restrictToVerticalAxis];
+const pointerSensorOptions: PointerSensorOptions = {
+  activationConstraint: { distance: 8 },
+  bypassActivationConstraint: ({ activeNode }) => activeNode.id === "panel-inspector",
+};
+const keyboardSensorOptions = { coordinateGetter: sortableKeyboardCoordinates };
 
 const replacePathValue = (
   root: unknown,
@@ -277,31 +246,6 @@ const replacePathValue = (
     return { ...current, [part]: replacePathValue(current[part], rest, value) };
   }
   return root;
-};
-
-const isLinkedFieldValueAllowed = (
-  path: Array<string | number>,
-  rules: Rule[],
-  value: string | number | boolean,
-): boolean => {
-  const paramsIndex = path.lastIndexOf("params");
-  if (paramsIndex < 0 || typeof path[paramsIndex + 1] !== "string") return true;
-  const owner = readPathValue({ rules }, path.slice(0, paramsIndex)) as Condition | Effect | undefined;
-  if (!owner?.type) return false;
-  const definition = getConditionTypeById(owner.type) ?? getEffectTypeById(owner.type);
-  const parameter = definition?.params.find((entry) => entry.id === path[paramsIndex + 1]);
-  if (!parameter) return false;
-  if (parameter.type === "number" || parameter.type === "range") {
-    return typeof value === "number" && Number.isFinite(value)
-      && (parameter.min === undefined || value >= parameter.min)
-      && (parameter.max === undefined || value <= parameter.max);
-  }
-  if (parameter.type === "text") return typeof value === "string";
-  if (parameter.type === "checkbox") return typeof value === "boolean";
-  if (parameter.type === "select" && Array.isArray(parameter.options)) {
-    return parameter.options.some((option) => Object.is(option.value, value));
-  }
-  return true;
 };
 
 const resolveParameterDefaultValue = (
@@ -635,6 +579,26 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const rulesRef = useRef<Rule[]>(rules);
   rulesRef.current = rules;
   const [selectedItem, setSelectedItem] = useState<SelectedItem>(null);
+  const [liveCodeRevealRequest, setLiveCodeRevealRequest] = useState<{
+    segmentId: string; revision: number;
+  } | null>(null);
+  const liveCodeRevealRevisionRef = useRef(0);
+  const selectBuilderItem = useCallback((selection: SelectedItem, segmentId?: string) => {
+    setSelectedItem(selection);
+    if (!selection) {
+      setLiveCodeRevealRequest(null);
+      return;
+    }
+    const id = segmentId ?? (selection.type === "trigger" ? `trigger:${selection.ruleId}`
+      : (selection.type === "condition" || selection.type === "effect") && selection.itemId
+        ? `${selection.type}:${selection.ruleId}:${selection.itemId}`
+        : `rule:${selection.ruleId}`);
+    liveCodeRevealRevisionRef.current += 1;
+    setLiveCodeRevealRequest({ segmentId: id, revision: liveCodeRevealRevisionRef.current });
+  }, []);
+  const [linkedFieldRequest, setLinkedFieldRequest] = useState<{
+    parameterId: string; selectionKey: string; nonce: number; focus: boolean;
+  } | null>(null);
   const [panState, setPanState] = useState({ x: 0, y: 0, scale: 1 });
   const [gridSnapping, setGridSnapping] = useState<boolean>(
     getRuleBuilderSettings().defaultGridSnap ?? userConfig.defaultGridSnap ?? false,
@@ -704,14 +668,19 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const lastSegmentsRef = useRef<CodeSegment[]>(
     item.customCode?.segments ?? [],
   );
+  const hasTrackedSegmentsRef = useRef(false);
   const lastGeneratedSegmentsRef = useRef<CodeSegment[]>(item.customCode?.segments ?? []);
   const linkedFieldRangesRef = useRef<LinkedFieldRange[]>(item.customCode?.fieldRanges ?? []);
   const fieldSourceRulesRef = useRef<Rule[]>(existingRules);
   const editorCodeRef = useRef<string>(item.customCode?.fullCode ?? "");
   const editorRevisionRef = useRef(0);
+  const generatedIndentUnitRef = useRef<string | null>(null);
+  const editorUiDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingFieldValuesRef = useRef(new Map<string, unknown>());
   const editedFieldKeysRef = useRef(new Set<string>());
   const [editorSyncRevision, setEditorSyncRevision] = useState(0);
+  const [generatedMetadataRevision, setGeneratedMetadataRevision] = useState(0);
+  const [codeResetRevision, setCodeResetRevision] = useState(0);
   const prevRulesSnapshotRef = useRef<string>("");
   const customCodeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -799,14 +768,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   );
 
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8,
-      },
-    }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
+    useSensor(PointerSensor, pointerSensorOptions),
+    useSensor(KeyboardSensor, keyboardSensorOptions),
   );
 
   const draggedPaletteBlockPreview = useMemo(() => {
@@ -882,22 +845,23 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     }
   }, []);
 
-  const synchronizeLinkedRules = useCallback((code: string): Rule[] => {
+  const applyLinkedCodeEdits = useCallback((code: string): Rule[] => {
     if (isReadOnly) return rulesRef.current;
     let nextRules = rulesRef.current;
-    for (const edit of readBoundFieldEdits(code, linkedFieldRangesRef.current)) {
-      const range = linkedFieldRangesRef.current.find((candidate) =>
-        JSON.stringify(candidate.sourcePath) === JSON.stringify(edit.sourcePath));
-      if (!range) continue;
-      const fieldKey = JSON.stringify([range.sourcePath, range.sourceIds]);
+    for (const edit of assessBoundFieldEdits(code, linkedFieldRangesRef.current)) {
+      const range = edit.range;
+      const fieldKey = edit.key;
       if (!editedFieldKeysRef.current.has(fieldKey)) continue;
+      if ((edit.status !== "ready" && edit.status !== "unchanged") || edit.value === undefined) continue;
       const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, nextRules);
-      if (!path || !isLinkedFieldValueAllowed(path, nextRules, edit.value)) continue;
+      if (!path || !isLinkedFieldValueAllowed(path, nextRules, edit.value, liveCodeCatalog)) continue;
       const currentValue = readPathValue({ rules: nextRules }, path);
-      if (Object.is(currentValue, edit.value)) continue;
-      if (pendingFieldValuesRef.current.has(fieldKey)
+      const alreadyMatches = Object.is(currentValue, edit.value);
+      if (!alreadyMatches && pendingFieldValuesRef.current.has(fieldKey)
         && !Object.is(currentValue, pendingFieldValuesRef.current.get(fieldKey))) continue;
-      nextRules = (replacePathValue({ rules: nextRules }, path, edit.value) as { rules: Rule[] }).rules;
+      if (!alreadyMatches) {
+        nextRules = (replacePathValue({ rules: nextRules }, path, edit.value) as { rules: Rule[] }).rules;
+      }
     }
     if (nextRules !== rulesRef.current) {
       rulesRef.current = nextRules;
@@ -909,7 +873,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   const persistEditorCode = useCallback((code: string) => {
     if (isReadOnly) return;
     const baselineCode = lastGeneratedCleanRef.current;
-    const hasChanges = code.trim() !== baselineCode.trim();
+    const hasChanges = !isLuaIndentationEquivalent(code.trim(), baselineCode.trim());
     const newCustomCode: CustomCodeState | undefined = hasChanges
       ? {
           fullCode: code,
@@ -925,32 +889,40 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   }, [isReadOnly]);
 
   const flushPendingCodeEdit = useCallback((): Rule[] => {
+    if (editorUiDebounceRef.current) {
+      clearTimeout(editorUiDebounceRef.current);
+      editorUiDebounceRef.current = null;
+    }
     if (customCodeDebounceRef.current) {
       clearTimeout(customCodeDebounceRef.current);
       customCodeDebounceRef.current = null;
     }
     const code = pendingEditorCodeRef.current;
     if (code === null || isReadOnly) return rulesRef.current;
-    const nextRules = synchronizeLinkedRules(code);
+    setLiveCodeSnippet(code);
+    const nextRules = applyLinkedCodeEdits(code);
     persistEditorCode(code);
     pendingEditorCodeRef.current = null;
     pendingFieldValuesRef.current.clear();
     editedFieldKeysRef.current.clear();
     setEditorSyncRevision((revision) => revision + 1);
     return nextRules;
-  }, [isReadOnly, persistEditorCode, synchronizeLinkedRules]);
+  }, [isReadOnly, persistEditorCode, applyLinkedCodeEdits]);
 
   // Keep code edits immediately visible, then apply complete values together.
   const handleCodeChange = useCallback(
-    (newCode: string, changes?: CodeEdit[]) => {
+    (newCode: string, changes?: CodeEdit[], options?: { formatting?: boolean; indentUnit?: string }) => {
       if (isReadOnly) return;
+      if (options?.formatting === false) generatedIndentUnitRef.current = null;
+      else if (options?.formatting) generatedIndentUnitRef.current = options.indentUnit ?? "  ";
+      else if (newCode === lastGeneratedCleanRef.current) generatedIndentUnitRef.current = null;
       if (pendingEditorCodeRef.current === null) {
         pendingFieldValuesRef.current.clear();
         editedFieldKeysRef.current.clear();
         for (const range of linkedFieldRangesRef.current) {
           const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, rulesRef.current);
           if (path) pendingFieldValuesRef.current.set(
-            JSON.stringify([range.sourcePath, range.sourceIds]),
+            linkedFieldKey(range),
             readPathValue({ rules: rulesRef.current }, path),
           );
         }
@@ -966,7 +938,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       const literalTextsByField = (code: string, ranges: LinkedFieldRange[]) => {
         const fields = new Map<string, string[]>();
         for (const range of ranges) {
-          const fieldKey = JSON.stringify([range.sourcePath, range.sourceIds]);
+          const fieldKey = linkedFieldKey(range);
           const texts = fields.get(fieldKey) ?? [];
           texts.push(code.slice(range.from, range.to));
           fields.set(fieldKey, texts);
@@ -979,21 +951,27 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         if (JSON.stringify(beforeFields.get(fieldKey)) !== JSON.stringify(afterFields.get(fieldKey))) {
           editedFieldKeysRef.current.add(fieldKey);
           const range = nextRanges.find((candidate) =>
-            JSON.stringify([candidate.sourcePath, candidate.sourceIds]) === fieldKey);
+            linkedFieldKey(candidate) === fieldKey);
           if (range) {
             const path = resolveLinkedRulePath(range, fieldSourceRulesRef.current, rulesRef.current);
-            if (path) pendingFieldValuesRef.current.set(fieldKey, readPathValue({ rules: rulesRef.current }, path));
+            if (path && !pendingFieldValuesRef.current.has(fieldKey)) {
+              pendingFieldValuesRef.current.set(fieldKey, readPathValue({ rules: rulesRef.current }, path));
+            }
           }
         }
       }
+      lastSegmentsRef.current = mapCodeSegmentsThroughEdits(oldCode, newCode, lastSegmentsRef.current, changes);
       linkedFieldRangesRef.current = nextRanges;
       editorCodeRef.current = newCode;
       editorRevisionRef.current += 1;
       pendingEditorCodeRef.current = newCode;
 
-      // Keep the displayed snippet in sync so the external-update effect
-      // in LiveCodePanel doesn't overwrite the user's edits on re-render.
-      setLiveCodeSnippet(newCode);
+      if (editorUiDebounceRef.current) clearTimeout(editorUiDebounceRef.current);
+      editorUiDebounceRef.current = setTimeout(() => {
+        editorUiDebounceRef.current = null;
+        const latestCode = editorCodeRef.current;
+        setLiveCodeSnippet(latestCode);
+      }, 100);
 
       if (customCodeDebounceRef.current) {
         clearTimeout(customCodeDebounceRef.current);
@@ -1006,6 +984,11 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
   // Reset all custom code back to generated
   const handleResetCustomCode = useCallback(() => {
+    setCodeResetRevision((revision) => revision + 1);
+    if (editorUiDebounceRef.current) {
+      clearTimeout(editorUiDebounceRef.current);
+      editorUiDebounceRef.current = null;
+    }
     if (customCodeDebounceRef.current) {
       clearTimeout(customCodeDebounceRef.current);
     }
@@ -1017,8 +1000,13 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     editorRevisionRef.current += 1;
     onUpdateItem({ customCode: undefined });
     if (lastGeneratedCleanRef.current) {
-      editorCodeRef.current = lastGeneratedCleanRef.current;
-      setLiveCodeSnippet(lastGeneratedCleanRef.current);
+      const baseline = lastGeneratedCleanRef.current;
+      const formatted = formatLuaCode(baseline, { indentUnit: generatedIndentUnitRef.current ?? "  " });
+      lastSegmentsRef.current = mapCodeSegmentsThroughEdits(
+        baseline, formatted.code, lastGeneratedSegmentsRef.current, formatted.edits,
+      );
+      editorCodeRef.current = formatted.code;
+      setLiveCodeSnippet(formatted.code);
     }
     linkedFieldRangesRef.current = [];
     setEditorSyncRevision((revision) => revision + 1);
@@ -1068,6 +1056,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     const freshClean = freshCompiled.code;
     const freshSegments = freshCompiled.segments;
     const freshFieldBindings = freshCompiled.fieldBindings ?? [];
+    const previousGenerated = lastGeneratedCleanRef.current;
 
     let displayCode = freshClean || "-- no snippet output";
     let displayFieldRanges: BoundFieldRange[] = toFieldRanges(freshClean, freshFieldBindings);
@@ -1129,23 +1118,41 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
     }
 
-    const displaySegments = remapSegmentsToCode(
+    let presentationSegments: CodeSegment[] | undefined;
+    const indentUnit = generatedIndentUnitRef.current ?? "  ";
+    if (hasTrackedSegmentsRef.current && freshClean === previousGenerated
+      && isLuaIndentationEquivalent(editorCodeRef.current.trim(), freshClean.trim())) {
+      displayCode = editorCodeRef.current;
+      displayFieldRanges = updateBoundRanges(freshClean, displayCode, toFieldRanges(freshClean, freshFieldBindings));
+    } else if (!editableCurrentCode || isLuaIndentationEquivalent(displayCode.trim(), freshClean.trim())) {
+      const formatted = formatLuaCode(freshClean, { indentUnit });
+      displayCode = formatted.code;
+      displayFieldRanges = updateBoundRanges(freshClean, displayCode, toFieldRanges(freshClean, freshFieldBindings), formatted.edits);
+      presentationSegments = mapCodeSegmentsThroughEdits(freshClean, displayCode, freshSegments, formatted.edits);
+    }
+
+    const remappedSegments = presentationSegments ?? remapSegmentsToCode(
       displayCode,
       freshClean,
       freshSegments,
     );
+    const displaySegments = hasTrackedSegmentsRef.current && displayCode === editorCodeRef.current
+      ? retainTrackedCodeSegments(remappedSegments, lastSegmentsRef.current, sourceRules)
+      : remappedSegments;
 
     lastGeneratedCleanRef.current = freshClean;
     lastGeneratedSegmentsRef.current = freshSegments;
     lastSegmentsRef.current = displaySegments;
+    hasTrackedSegmentsRef.current = true;
     linkedFieldRangesRef.current = attachFieldIdentities(
-      displayFieldRanges.filter((range) => isLinkedFieldValueAllowed(range.sourcePath, sourceRules, range.originalValue)),
+      displayFieldRanges.filter((range) => isLinkedFieldValueAllowed(range.sourcePath, sourceRules, range.originalValue, liveCodeCatalog)),
       sourceRules,
     );
     fieldSourceRulesRef.current = cloneRulesSnapshot(sourceRules);
     editorCodeRef.current = displayCode;
     if (editableCurrentCode) persistEditorCode(displayCode);
 
+    setGeneratedMetadataRevision((revision) => revision + 1);
     setLiveCodeSnippet(displayCode);
     setLiveCodeStatusMessage(
       isNotImplemented
@@ -1201,35 +1208,104 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     return () => {
       builderMountedRef.current = false;
       if (customCodeDebounceRef.current) clearTimeout(customCodeDebounceRef.current);
+      if (editorUiDebounceRef.current) {
+        clearTimeout(editorUiDebounceRef.current);
+        editorUiDebounceRef.current = null;
+      }
+      generatedIndentUnitRef.current = null;
       editorRevisionRef.current += 1;
     };
   }, []);
 
   const handleSelectItem = useCallback((item: NonNullable<SelectedItem>) => {
-    setSelectedItem(item);
+    setLinkedFieldRequest(null);
+    selectBuilderItem(item);
     setSelectedRuleIds([item.ruleId]);
-  }, []);
+  }, [selectBuilderItem]);
+
+  const handleCloseInspector = useCallback(() => {
+    rememberInspectorDismissal(true);
+    setInspectorIsOpen(false);
+    setIsFirstSelection(false);
+    if (panels.inspector.isVisible) togglePanel("inspector");
+  }, [panels.inspector.isVisible, togglePanel]);
+
+  const handleTogglePanel = useCallback((panelId: string) => {
+    if (panelId === "inspector") {
+      rememberInspectorDismissal(panels.inspector.isVisible);
+      if (panels.inspector.isVisible) setInspectorIsOpen(false);
+      setIsFirstSelection(false);
+    }
+    togglePanel(panelId);
+  }, [panels.inspector.isVisible, togglePanel]);
+
+  const navigateToBuilderItem = useCallback((target: NonNullable<SelectedItem>, parameterId?: string, focus = false) => {
+    const selection = resolveSelectedItem(rulesRef.current, target);
+    if (!selection) return;
+    setSelectedItem(selection);
+    setSelectedRuleIds([selection.ruleId]);
+    setIsFirstSelection(false);
+    if (focus) {
+      rememberInspectorDismissal(false);
+      if (!panels.inspector.isVisible) togglePanel("inspector");
+    }
+    setLinkedFieldRequest(parameterId ? {
+      parameterId, focus, nonce: Date.now(), selectionKey: JSON.stringify([
+        selection.type, selection.ruleId, selection.itemId, selection.randomGroupId, selection.loopGroupId,
+      ]),
+    } : null);
+    requestAnimationFrame(() => {
+      const viewport = builderViewportRef.current;
+      if (!viewport) return;
+      const contextType = selection.type === "randomgroup" ? "random-group"
+        : selection.type === "loopgroup" ? "loop-group" : selection.type;
+      const block = Array.from(viewport.querySelectorAll<HTMLElement>("[data-rb-context][data-rule-id]"))
+        .find((element) => element.dataset.rbContext === contextType
+          && element.dataset.ruleId === selection.ruleId
+          && (!selection.itemId || element.dataset.itemId === selection.itemId)
+          && (!selection.randomGroupId || element.dataset.randomGroupId === selection.randomGroupId)
+          && (!selection.loopGroupId || element.dataset.loopGroupId === selection.loopGroupId));
+      if (!block) return;
+      const blockBounds = block.getBoundingClientRect();
+      const viewportBounds = viewport.getBoundingClientRect();
+      if (blockBounds.left < viewportBounds.left || blockBounds.right > viewportBounds.right
+        || blockBounds.top < viewportBounds.top || blockBounds.bottom > viewportBounds.bottom) {
+        transformRef.current?.zoomToElement(block, panState.scale, 180);
+      }
+    });
+  }, [panels.inspector.isVisible, togglePanel, panState.scale]);
+
+  const handleNavigateToField = useCallback((link: LiveCodeFieldLink, focus = false) => {
+    navigateToBuilderItem(link.target, link.target.parameterId, focus);
+  }, [navigateToBuilderItem]);
+
+  const handleNavigateToSegment = useCallback((segmentId: string, revealBuilder = false) => {
+    if (!lastSegmentsRef.current.some((segment) => segment.id === segmentId)) return;
+    const selection = getSelectionForCodeSegment(rulesRef.current, segmentId);
+    if (selection) navigateToBuilderItem(selection, undefined, revealBuilder);
+  }, [navigateToBuilderItem]);
 
   const setSingleSelectedRule = useCallback((ruleId: string | null) => {
+    setLinkedFieldRequest(null);
     if (!ruleId) {
       setSelectedRuleIds([]);
-      setSelectedItem(null);
+      selectBuilderItem(null);
       return;
     }
 
     setSelectedRuleIds([ruleId]);
-    setSelectedItem({ type: "trigger", ruleId });
-  }, []);
+    selectBuilderItem({ type: "trigger", ruleId }, `rule:${ruleId}`);
+  }, [selectBuilderItem]);
 
   const clearRuleSelection = useCallback(() => {
     setSelectedRuleIds([]);
-    setSelectedItem(null);
+    selectBuilderItem(null);
   }, []);
 
   const selectAllRules = useCallback(() => {
     const allRuleIds = rules.map((rule) => rule.id);
     setSelectedRuleIds(allRuleIds);
-    setSelectedItem(
+    selectBuilderItem(
       allRuleIds.length === 1
         ? { type: "trigger", ruleId: allRuleIds[0] }
         : null,
@@ -1250,9 +1326,9 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
           : [...prev, ruleId];
 
         if (next.length === 1) {
-          setSelectedItem({ type: "trigger", ruleId: next[0] });
+          selectBuilderItem({ type: "trigger", ruleId: next[0] });
         } else {
-          setSelectedItem(null);
+          selectBuilderItem(null);
         }
 
         return next;
@@ -1421,14 +1497,22 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       );
       const initialSnapshot = cloneRulesSnapshot(normalizedRules);
       if (customCodeDebounceRef.current) clearTimeout(customCodeDebounceRef.current);
+      if (editorUiDebounceRef.current) {
+        clearTimeout(editorUiDebounceRef.current);
+        editorUiDebounceRef.current = null;
+      }
+      generatedIndentUnitRef.current = null;
       pendingEditorCodeRef.current = null;
       pendingFieldValuesRef.current.clear();
       editedFieldKeysRef.current.clear();
+      setCodeResetRevision((revision) => revision + 1);
+      setLinkedFieldRequest(null);
       customCodeRef.current = item.customCode;
       setCustomCode(item.customCode);
       lastGeneratedCleanRef.current = item.customCode?.lastGeneratedCode ?? "";
       lastGeneratedSegmentsRef.current = item.customCode?.segments ?? [];
       lastSegmentsRef.current = item.customCode?.segments ?? [];
+      hasTrackedSegmentsRef.current = false;
       linkedFieldRangesRef.current = item.customCode?.fieldRanges ?? [];
       fieldSourceRulesRef.current = initialSnapshot;
       editorCodeRef.current = item.customCode?.fullCode ?? "";
@@ -1436,7 +1520,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       prevRulesSnapshotRef.current = "";
       rulesRef.current = initialSnapshot;
       resetHistory(initialSnapshot);
-      setSelectedItem(null);
+      selectBuilderItem(null);
       setSelectedRuleIds([]);
       setSelectionRect(null);
       setIsDragSelecting(false);
@@ -1444,7 +1528,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       setLiveCodePreviewTarget(null);
       setLiveCodeWidthPercent(50);
       setIsInitialLoadComplete(true);
-      setIsFirstSelection(true);
+      setInspectorIsOpen(false);
+      setIsFirstSelection(!wasInspectorDismissed());
 
       // Reset the no rules message state
       setShowNoRulesMessage(false);
@@ -1782,7 +1867,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         if (
           shortcutMatches(event, ruleBuilderSettings.shortcuts.toggleInspector)
         ) {
-          togglePanel("inspector");
+          handleTogglePanel("inspector");
           return;
         }
         if (
@@ -1838,6 +1923,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     shortcutMatches,
     selectAllRules,
     selectedRuleIds,
+    handleTogglePanel,
     togglePanel,
   ]);
 
@@ -2192,7 +2278,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       })),
     };
     setRules((prevRules) => [...prevRules, newRule]);
-    setSelectedItem({ type: "trigger", ruleId: newRuleId });
+    selectBuilderItem({ type: "trigger", ruleId: newRuleId });
   };
 
   const handleSaveRuleAsTemplate = useCallback(
@@ -2221,7 +2307,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     const centerPos = getCenterPosition();
     const newRule = instantiateRuleFromTemplate(template, centerPos);
     setRules((prev) => [...prev, newRule]);
-    setSelectedItem({ type: "trigger", ruleId: newRule.id });
+    selectBuilderItem({ type: "trigger", ruleId: newRule.id });
     pushGlobalAlert({
       type: "success",
       title: "Rule Added",
@@ -2270,7 +2356,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
 
-    setSelectedItem({
+    selectBuilderItem({
       type: "condition",
       ruleId,
       groupId,
@@ -2370,7 +2456,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
 
-    setSelectedItem({
+    selectBuilderItem({
       type: "effect",
       ruleId,
       itemId: duplicatedEffectId,
@@ -2392,7 +2478,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       position: centerPos,
     };
     setRules((prev) => [...prev, newRule]);
-    setSelectedItem({ type: "trigger", ruleId: newRule.id });
+    selectBuilderItem({ type: "trigger", ruleId: newRule.id });
   };
 
   const addCondition = useCallback(
@@ -2439,7 +2525,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
           return rule;
         });
       });
-      setSelectedItem({
+      selectBuilderItem({
         type: "condition",
         ruleId: selectedItem.ruleId,
         itemId: newCondition.id,
@@ -2466,7 +2552,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return rule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "condition",
       ruleId: ruleId,
       groupId: newGroup.id,
@@ -2488,7 +2574,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
     if (selectedItem && selectedItem.groupId === groupId) {
-      setSelectedItem({ type: "trigger", ruleId });
+      selectBuilderItem({ type: "trigger", ruleId });
     }
   };
   const deleteConditionGroup = (ruleId: string, groupId: string) => {
@@ -2545,7 +2631,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return rule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "randomgroup",
       ruleId: ruleId,
       randomGroupId: newGroup.id,
@@ -2569,7 +2655,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return rule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "loopgroup",
       ruleId: ruleId,
       loopGroupId: newLoop.id,
@@ -2611,7 +2697,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
     if (selectedItem && selectedItem.randomGroupId === randomGroupId) {
-      setSelectedItem({ type: "trigger", ruleId });
+      selectBuilderItem({ type: "trigger", ruleId });
     }
   };
   const deleteRandomGroup = (ruleId: string, randomGroupId: string) => {
@@ -2643,7 +2729,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
     if (selectedItem && selectedItem.loopGroupId === loopGroupId) {
-      setSelectedItem({ type: "trigger", ruleId });
+      selectBuilderItem({ type: "trigger", ruleId });
     }
   };
   const deleteLoopGroup = (ruleId: string, loopGroupId: string) => {
@@ -2740,7 +2826,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return updatedRule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "randomgroup",
       ruleId: ruleId,
       randomGroupId: newGroup.id,
@@ -2786,7 +2872,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return updatedRule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "randomgroup",
       ruleId: ruleId,
       randomGroupId: newGroup.id,
@@ -2829,7 +2915,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         return rule;
       }),
     );
-    setSelectedItem({
+    selectBuilderItem({
       type: "effect",
       ruleId: selectedItem.ruleId,
       itemId: newEffect.id,
@@ -2904,7 +2990,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     setRules((prev) => prev.filter((rule) => rule.id !== ruleId));
     setSelectedRuleIds((prev) => prev.filter((id) => id !== ruleId));
     if (selectedItem && selectedItem.ruleId === ruleId) {
-      setSelectedItem(null);
+      selectBuilderItem(null);
     }
   };
   const deleteRule = (ruleId: string) => {
@@ -2940,7 +3026,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
     if (selectedItem && selectedItem.itemId === conditionId) {
-      setSelectedItem({ type: "trigger", ruleId });
+      selectBuilderItem({ type: "trigger", ruleId });
     }
   };
   const deleteCondition = (ruleId: string, conditionId: string) => {
@@ -2976,7 +3062,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }),
     );
     if (selectedItem && selectedItem.itemId === effectId) {
-      setSelectedItem({ type: "trigger", ruleId });
+      selectBuilderItem({ type: "trigger", ruleId });
     }
   };
   const deleteEffect = (ruleId: string, effectId: string) => {
@@ -3104,7 +3190,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
               rule.id === ruleId ? { ...rule, trigger: blockId } : rule,
             ),
           );
-          setSelectedItem({ type: "trigger", ruleId });
+          selectBuilderItem({ type: "trigger", ruleId });
         } else if (blockType === "condition") {
           const newCondition = createConditionFromType(blockId);
           let targetGroupId = "";
@@ -3170,7 +3256,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
             }),
           );
 
-          setSelectedItem({
+          selectBuilderItem({
             type: "condition",
             ruleId,
             itemId: newCondition.id,
@@ -3202,7 +3288,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
               };
             }),
           );
-          setSelectedItem({
+          selectBuilderItem({
             type: "effect",
             ruleId,
             itemId: newEffect.id,
@@ -3404,6 +3490,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
   );
 
   const handleRuleCardDoubleClick = useCallback(() => {
+    rememberInspectorDismissal(false);
     setInspectorIsOpen(true);
   }, []);
 
@@ -3414,13 +3501,21 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       itemId?: string;
       groupId?: string;
     }) => {
+      flushPendingCodeEdit();
       setLiveCodePreviewTarget(target);
       if (!liveCodeIsVisible) {
         togglePanel("liveCode");
       }
     },
-    [liveCodeIsVisible, togglePanel],
+    [liveCodeIsVisible, togglePanel, flushPendingCodeEdit],
   );
+
+  const handleBackToItemCode = useCallback(() => {
+    flushPendingCodeEdit();
+    setLiveCodeSnippet(editorCodeRef.current || lastGeneratedCleanRef.current || "-- no snippet output");
+    setCodeResetRevision((revision) => revision + 1);
+    setLiveCodePreviewTarget(null);
+  }, [flushPendingCodeEdit]);
 
   const moveSelectedRulesByDelta = useCallback(
     (deltaX: number, deltaY: number) => {
@@ -3506,7 +3601,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     if (newRuleIds.length > 0) {
       setRules((prevRules) => [...prevRules, ...duplicated]);
       setSelectedRuleIds(newRuleIds);
-      setSelectedItem(
+      selectBuilderItem(
         newRuleIds.length === 1
           ? { type: "trigger", ruleId: newRuleIds[0] }
           : null,
@@ -3576,7 +3671,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
     setRules((prevRules) => [...prevRules, ...pastedRules]);
     setSelectedRuleIds(newRuleIds);
-    setSelectedItem(
+    selectBuilderItem(
       newRuleIds.length === 1
         ? { type: "trigger", ruleId: newRuleIds[0] }
         : null,
@@ -3590,7 +3685,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     const selectedSet = new Set(selectedRuleIds);
     setRules((prev) => prev.filter((rule) => !selectedSet.has(rule.id)));
     setSelectedRuleIds([]);
-    setSelectedItem(null);
+    selectBuilderItem(null);
   }, [selectedRuleIds]);
 
   const deleteSelectedRules = useCallback(() => {
@@ -3675,7 +3770,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
         currentClientX: event.clientX,
         currentClientY: event.clientY,
       });
-      setSelectedItem(null);
+      selectBuilderItem(null);
       setSelectedRuleIds([]);
     },
     [
@@ -3776,12 +3871,12 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
         setSelectedRuleIds(intersectedRuleIds);
         if (intersectedRuleIds.length === 1) {
-          setSelectedItem({
+          selectBuilderItem({
             type: "trigger",
             ruleId: intersectedRuleIds[0],
           });
         } else {
-          setSelectedItem(null);
+          selectBuilderItem(null);
         }
 
         return null;
@@ -3894,13 +3989,13 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
 
       if (target.type === "rule" || target.type === "trigger") {
-        setSelectedItem({ type: "trigger", ruleId: target.ruleId });
+        selectBuilderItem({ type: "trigger", ruleId: target.ruleId });
         setSelectedRuleIds([target.ruleId]);
         return;
       }
 
       if (target.type === "condition" && target.itemId) {
-        setSelectedItem({
+        selectBuilderItem({
           type: "condition",
           ruleId: target.ruleId,
           itemId: target.itemId,
@@ -3911,7 +4006,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
 
       if (target.type === "effect" && target.itemId) {
-        setSelectedItem({
+        selectBuilderItem({
           type: "effect",
           ruleId: target.ruleId,
           itemId: target.itemId,
@@ -3923,7 +4018,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
 
       if (target.type === "condition-group" && target.groupId) {
-        setSelectedItem({
+        selectBuilderItem({
           type: "condition",
           ruleId: target.ruleId,
           groupId: target.groupId,
@@ -3933,7 +4028,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
 
       if (target.type === "random-group" && target.randomGroupId) {
-        setSelectedItem({
+        selectBuilderItem({
           type: "randomgroup",
           ruleId: target.ruleId,
           randomGroupId: target.randomGroupId,
@@ -3943,7 +4038,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
       }
 
       if (target.type === "loop-group" && target.loopGroupId) {
-        setSelectedItem({
+        selectBuilderItem({
           type: "loopgroup",
           ruleId: target.ruleId,
           loopGroupId: target.loopGroupId,
@@ -4069,6 +4164,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
   const handleContextPreview = useCallback(() => {
     if (!contextTarget.ruleId) return;
+    flushPendingCodeEdit();
 
     if (contextTarget.type === "trigger") {
       setLiveCodePreviewTarget({
@@ -4097,7 +4193,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     if (!liveCodeIsVisible) {
       togglePanel("liveCode");
     }
-  }, [contextTarget, liveCodeIsVisible, togglePanel]);
+  }, [contextTarget, liveCodeIsVisible, togglePanel, flushPendingCodeEdit]);
 
   const canDeleteContextTarget =
     (contextTarget.type === "rule" && !!contextTarget.ruleId) ||
@@ -4171,20 +4267,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
 
   const hoveredSegmentId =
     segmentIdFromContextTarget(hoveredContextTarget) ?? selectedSegmentId;
-
-  const conditionClauseIndexBySegmentId = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const rule of rules) {
-      let clauseIndex = 0;
-      for (const group of rule.conditionGroups || []) {
-        for (const condition of group.conditions || []) {
-          out[`condition:${rule.id}:${condition.id}`] = clauseIndex;
-          clauseIndex += 1;
-        }
-      }
-    }
-    return out;
-  }, [rules]);
 
   const contextTargetTitle =
     contextTarget.type === "canvas"
@@ -4423,7 +4505,9 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
             "not yet implemented",
           );
 
-          setLiveCodeSnippet(snippetCode || "-- no snippet output");
+          setLiveCodeSnippet(formatLuaCode(snippetCode || "-- no snippet output", {
+            indentUnit: generatedIndentUnitRef.current ?? "  ",
+          }).code);
           setLiveCodeStatusMessage(
             isNotImplemented
               ? "This selected block has not been coded in yet for live snippet preview."
@@ -4710,6 +4794,13 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
     handleContextDelete,
   ]);
 
+  const liveCodeExplanations = useMemo(() => liveCodeIsVisible && !liveCodePreviewTarget
+    ? buildLiveCodeExplanations(rules, liveCodeCatalog, itemType) : {},
+  [liveCodeIsVisible, liveCodePreviewTarget, rules, itemType, data]);
+  const liveCodeFieldLinks = useMemo(() => liveCodeIsVisible && !liveCodePreviewTarget
+    ? buildLiveCodeFieldLinks(linkedFieldRangesRef.current, fieldSourceRulesRef.current, rules, liveCodeCatalog, itemType) : [],
+  [liveCodeIsVisible, liveCodePreviewTarget, liveCodeSnippet, editorSyncRevision, generatedMetadataRevision, rules, itemType, data]);
+
   if (!isOpen) return null;
   return (
     <>
@@ -4947,8 +5038,8 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                     activeId &&
                     (activeId.startsWith("panel-") ||
                       activeId.startsWith("palette:"))
-                      ? []
-                      : [restrictToVerticalAxis]
+                      ? unrestrictedDragModifiers
+                      : verticalDragModifiers
                   }
                 >
                   <DragOverlay dropAnimation={null}>
@@ -5068,7 +5159,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                                     rule.id,
                                   )}
                                   selectedRuleCount={selectedRuleIds.length}
-                                  item={item as any}
+                                  item={itemWithoutCustomCode as any}
                                   itemType={itemType}
                                   generateConditionTitle={
                                     generateConditionTitleForCard
@@ -5148,7 +5239,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                       onUpdateJoker={
                         onUpdateItem as (updates: Partial<any>) => void
                       }
-                      onClose={() => togglePanel("inspector")}
+                      onClose={handleCloseInspector}
                       onPositionChange={(position) =>
                         updatePanelPosition("inspector", position)
                       }
@@ -5164,6 +5255,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                       selectedGameVariable={selectedGameVariable}
                       onGameVariableApplied={handleGameVariableApplied}
                       selectedItem={selectedItem}
+                      linkedFieldRequest={linkedFieldRequest}
                       itemType={itemType}
                     />
                   )}
@@ -5200,7 +5292,7 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                   )}
                   <FloatingDock
                     panels={panels}
-                    onTogglePanel={togglePanel}
+                    onTogglePanel={handleTogglePanel}
                   />
                 </DndContext>
               </div>
@@ -5215,17 +5307,23 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                   errorDetails={liveCodeErrorDetails}
                   widthPercent={liveCodeWidthPercent}
                   isBlockPreview={!!liveCodePreviewTarget}
-                  onBackToItem={() => setLiveCodePreviewTarget(null)}
+                  onBackToItem={handleBackToItemCode}
                   onStartResize={handleLiveCodeResizeStart}
                   onCodeChange={
-                    !isReadOnly && !liveCodePreviewTarget
+                    !isReadOnly && !liveCodePreviewTarget && !!editorCodeRef.current
                       ? handleCodeChange
                       : undefined
                   }
                   onResetCustomCode={handleResetCustomCode}
                   hasCustomCode={!!customCode}
-                  segments={lastSegmentsRef.current}
-                  fieldRanges={linkedFieldRangesRef.current}
+                  codeResetRevision={codeResetRevision}
+                  segments={liveCodePreviewTarget ? [] : lastSegmentsRef.current}
+                  explanations={liveCodeExplanations}
+                  fieldLinks={liveCodeFieldLinks}
+                  onNavigateToField={liveCodePreviewTarget ? undefined : handleNavigateToField}
+                  onNavigateToSegment={liveCodePreviewTarget ? undefined : handleNavigateToSegment}
+                  revealSegmentId={liveCodePreviewTarget ? undefined : liveCodeRevealRequest?.segmentId}
+                  revealSelection={liveCodePreviewTarget ? null : liveCodeRevealRequest}
                   selectedSegmentId={
                     ruleBuilderSettings.enableLiveCodeHighlighting
                       ? selectedSegmentId
@@ -5235,9 +5333,6 @@ const RuleBuilder: React.FC<RuleBuilderProps> = ({
                     ruleBuilderSettings.enableLiveCodeHighlighting
                       ? hoveredSegmentId
                       : undefined
-                  }
-                  conditionClauseIndexBySegmentId={
-                    conditionClauseIndexBySegmentId
                   }
                 />
               )}

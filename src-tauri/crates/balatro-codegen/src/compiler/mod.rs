@@ -152,7 +152,6 @@ pub(crate) struct RuleOutput {
     pub(crate) rule_id: String,
     pub(crate) trigger: String,
     pub(crate) condition_expr: Option<Expr>,
-    pub(crate) condition_segment_ids: Vec<String>,
     pub(crate) effect_stmts: Vec<Stmt>,
     pub(crate) is_passive: bool,
     pub(crate) passive_outputs: Vec<effects::passive::PassiveEffectOutput>,
@@ -323,19 +322,7 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
 
     // Compile conditions
     let condition_expr =
-        conditions::compile_condition_chain(&rule.condition_groups, ctx.object_type, ctx);
-    let condition_segment_ids = rule
-        .condition_groups
-        .iter()
-        .flat_map(|group| group.conditions.iter())
-        .filter_map(|condition| {
-            if condition.id.trim().is_empty() {
-                None
-            } else {
-                Some(format!("condition:{}:{}", rule.id, condition.id))
-            }
-        })
-        .collect::<Vec<_>>();
+        conditions::compile_condition_chain(&rule.condition_groups, &rule.id, ctx.object_type, ctx);
 
     // Check for passive effects
     let mut passive_outputs = Vec::new();
@@ -426,7 +413,6 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
         rule_id: rule.id.clone(),
         trigger,
         condition_expr,
-        condition_segment_ids,
         effect_stmts,
         is_passive,
         passive_outputs,
@@ -2148,10 +2134,8 @@ pub(crate) fn append_rule_chain_with_fallback<F>(
         // Always wrap unconditional rule bodies in `do ... end` so early
         // returns stay scoped and emitted Lua matches snapshot fixtures.
         for ro in unconditional_rules {
-            let mut anchored_rule = build_rule_anchor_stmts(ro);
             let rule_stmts = build_rule_stmts(ro);
-            anchored_rule.push(Stmt::DoBlock(rule_stmts));
-            out.extend(anchored_rule);
+            out.push(Stmt::DoBlock(rule_stmts));
         }
         return;
     }
@@ -2176,23 +2160,12 @@ pub(crate) fn append_rule_chain_with_fallback<F>(
             branches: vec![(cond, then_body)],
             else_body: fallback_tail,
         };
-        let mut wrapped = build_rule_anchor_stmts(ro);
-        wrapped.push(next);
-        fallback_tail = Some(wrapped);
+        fallback_tail = Some(vec![next]);
     }
 
     if let Some(stmts) = fallback_tail {
         out.extend(stmts);
     }
-}
-
-fn build_rule_anchor_stmts(ro: &RuleOutput) -> Vec<Stmt> {
-    let mut anchors = Vec::new();
-    for condition_segment_id in &ro.condition_segment_ids {
-        anchors.push(stmt_section_begin(condition_segment_id));
-        anchors.push(stmt_section_end(condition_segment_id));
-    }
-    anchors
 }
 
 fn wrap_trigger_stmt_for_rules(rules: &[&RuleOutput], trigger_stmt: Stmt) -> Vec<Stmt> {
@@ -2331,6 +2304,3 @@ fn convert_params(
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests;

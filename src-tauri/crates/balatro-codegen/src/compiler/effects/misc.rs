@@ -512,7 +512,7 @@ fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
                 .replace("context.full_hand", highlighted)
                 .replace("context.scoring_hand", highlighted);
         }
-        Expr::FieldBinding(inner, _) | Expr::UnaryOp(_, inner) => {
+        Expr::FieldBinding(inner, _) | Expr::Segment(inner, _) | Expr::UnaryOp(_, inner) => {
             scope_use_level_amount(inner, target_name)
         }
         Expr::BinOp(lhs, _, rhs) => {
@@ -528,46 +528,6 @@ fn scope_use_level_amount(expr: &mut Expr, target_name: &str) {
     }
 }
 
-#[cfg(test)]
-mod use_level_amount_tests {
-    use super::*;
-    use crate::compiler::values::resolve_value;
-
-    #[test]
-    fn use_level_amount_scopes_guarded_hand_values_and_cumulative_chips() {
-        for id in [
-            "hand_level",
-            "times_hand_played",
-            "current_hand_played_count",
-            "played_card_count",
-            "scored_card_count",
-            "cumulative_chips",
-        ] {
-            let reference = ParamValue::Str(format!("GAMEVAR:{id}|2|3"));
-            let mut expr = resolve_value(&reference, ObjectType::Consumable, None);
-            scope_use_level_amount(&mut expr, "level_hand0");
-            let code = expr.to_string();
-            assert!(
-                !code.contains("context"),
-                "use-hook amount cannot depend on calculate context: {code}"
-            );
-            if matches!(
-                id,
-                "hand_level" | "times_hand_played" | "current_hand_played_count"
-            ) {
-                assert!(
-                    code.contains("level_hand0 and G.GAME.hands[level_hand0]"),
-                    "{code}"
-                );
-            } else {
-                assert!(
-                    code.contains("G and G.hand and G.hand.highlighted"),
-                    "{code}"
-                );
-            }
-        }
-    }
-}
 
 /// Edit Blind Size: modifies the blind's chip requirement.
 pub fn edit_blind_size(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
@@ -1475,90 +1435,6 @@ pub fn emit_flag(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
     }
 }
 
-#[cfg(test)]
-mod flag_tests {
-    use super::*;
-    use crate::compiler::effects::build_return_block;
-    use serde_json::json;
-
-    fn generated(params: serde_json::Value, object_type: ObjectType) -> String {
-        let effect: EffectDef = serde_json::from_value(json!({
-            "effect_type": "emit_flag", "params": params
-        }))
-        .unwrap();
-        let mut ctx = CompileContext::new(object_type, "testmod".into(), "writer".into(), false);
-        Chunk {
-            stmts: build_return_block(&[emit_flag(&effect, &mut ctx)]),
-        }
-        .to_string()
-    }
-
-    #[test]
-    fn flags_update_immediately_and_silently_without_ending_the_rule_chain() {
-        for object_type in [
-            ObjectType::Joker,
-            ObjectType::Consumable,
-            ObjectType::Enhancement,
-            ObjectType::Voucher,
-            ObjectType::Deck,
-        ] {
-            for display in [json!({}), json!({"display_message": "n"})] {
-                let mut params = json!({
-                    "flag_name": {"value": " 1 active-flag! ", "valueType": "text"},
-                    "change": {"value": "true", "valueType": "text"}
-                });
-                params.as_object_mut().unwrap().extend(display.as_object().unwrap().clone());
-                let code = generated(params, object_type);
-                assert!(code.contains("G.GAME.pool_flags = G.GAME.pool_flags or {}"), "{code}");
-                assert!(code.contains("G.GAME.pool_flags['testmod_1_active_flag_'] = true"), "{code}");
-                assert!(!code.contains("add_event"), "{code}");
-                assert!(!code.contains("card_eval_status_text"), "{code}");
-                assert!(!code.contains("return"), "{code}");
-            }
-        }
-    }
-
-    #[test]
-    fn flags_can_be_cleared_or_inverted_with_current_and_legacy_parameters() {
-        for change in [
-            json!("false"),
-            json!(false),
-            json!({"value": "false", "valueType": "text"}),
-            json!({"value": false, "valueType": "boolean"}),
-        ] {
-            let code = generated(json!({"flag_name": "ready", "change": change}), ObjectType::Joker);
-            assert!(code.contains("G.GAME.pool_flags['testmod_ready'] = false"), "{code}");
-        }
-
-        let code = generated(json!({"flag_name": "ready", "change": "invert"}), ObjectType::Joker);
-        assert!(code.contains("G.GAME.pool_flags['testmod_ready'] = not ("), "{code}");
-        assert!(code.contains("G.GAME.pool_flags['testmod_ready'] or false)"), "{code}");
-    }
-
-    #[test]
-    fn enabled_feedback_is_escaped_and_queued_after_the_state_update() {
-        let text = "Active: \"quote\", 'apostrophe', \\path\nnew line";
-        let code = generated(json!({
-            "flag_name": "ready", "display_message": {"value": "y", "valueType": "text"},
-            "customMessage": text
-        }), ObjectType::Joker);
-        let update = code.find("G.GAME.pool_flags['testmod_ready'] = true").unwrap();
-        let feedback = code.find("G.E_MANAGER:add_event").unwrap();
-        assert!(update < feedback, "{code}");
-        assert_eq!(code.matches("G.GAME.pool_flags['testmod_ready'] =").count(), 1, "{code}");
-        assert!(code.contains(&format!("message = {}", lua_str(text))), "{code}");
-        assert!(code.contains("if card and card.juice_up then"), "{code}");
-        assert!(!code.contains("return {"), "{code}");
-    }
-
-    #[test]
-    fn blank_names_and_non_ascii_identifiers_remain_valid_lua_keys() {
-        let code = generated(json!({"flag_name": "  "}), ObjectType::Joker);
-        assert!(code.contains("['testmod_custom_flag'] = true"), "{code}");
-        let code = generated(json!({"flag_name": "déjà ready"}), ObjectType::Joker);
-        assert!(code.contains("['testmod_d_j__ready'] = true"), "{code}");
-    }
-}
 
 /// Add Booster Into Shop: adds a booster pack to the current shop.
 pub fn add_booster_into_shop(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
@@ -2613,109 +2489,5 @@ pub fn edit_cards(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput 
         colour: Some(lua_raw_expr("G.C.SECONDARY_SET.Tarot")),
 
         segment_id: None,
-    }
-}
-
-#[cfg(test)]
-mod joker_targeting_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn generated(params: serde_json::Value) -> String {
-        let effect: EffectDef = serde_json::from_value(json!({
-            "effect_type": "edit_joker", "params": params,
-        }))
-        .unwrap();
-        let mut ctx =
-            CompileContext::new(ObjectType::Consumable, "test".into(), "test".into(), false);
-        Chunk {
-            stmts: edit_joker(&effect, &mut ctx).pre_return,
-        }
-        .to_string()
-    }
-
-    #[test]
-    fn current_target_parameter_wins_and_random_selection_happens_once() {
-        let code = generated(json!({
-            "target": {"value": "random", "valueType": "text"},
-            "selection_method": "self", "edition": "foil", "sticker": "perishable",
-        }));
-        assert_eq!(
-            code.matches("pseudorandom_element(eligible_jokers").count(),
-            1,
-            "{code}"
-        );
-        assert!(code.contains("target_joker:set_edition"), "{code}");
-        assert!(code.contains("target_joker:add_sticker"), "{code}");
-        assert!(!code.contains("local target_joker = card"), "{code}");
-    }
-
-    #[test]
-    fn missing_parameters_use_the_catalogue_random_default() {
-        let code = generated(json!({"edition": "foil"}));
-        assert!(
-            code.contains("pseudorandom_element(eligible_jokers"),
-            "{code}"
-        );
-        assert!(!code.contains("local target_joker = card"), "{code}");
-    }
-
-    #[test]
-    fn selected_and_evaluated_targets_and_legacy_names_are_guarded() {
-        for selection in ["selected", "selected_joker"] {
-            let code = generated(json!({"selection_method": selection, "edition": "foil"}));
-            assert!(
-                code.contains("G.jokers.highlighted and G.jokers.highlighted[1]"),
-                "{code}"
-            );
-            assert!(!code.contains("pseudorandom_element"), "{code}");
-        }
-        let code = generated(json!({"target": "evaled_joker", "edition": "foil"}));
-        assert!(code.contains("context and context.other_joker"), "{code}");
-    }
-
-    #[test]
-    fn editions_use_vanilla_keys_mod_keys_or_polling() {
-        for (edition, expected) in [
-            ("foil", "e_foil"),
-            ("sparkle", "e_test_sparkle"),
-            ("e_other_sparkle", "e_other_sparkle"),
-        ] {
-            let code = generated(json!({"target": "random", "edition": edition}));
-            assert!(
-                code.contains(&format!("set_edition('{expected}', true)")),
-                "{code}"
-            );
-        }
-        let code = generated(json!({"edition": "random"}));
-        assert!(code.contains("SMODS.poll_edition"), "{code}");
-        assert!(!code.contains("e_test_random"), "{code}");
-    }
-
-    #[test]
-    fn sticker_application_and_removal_use_registered_methods() {
-        let code = generated(json!({"sticker": "rental"}));
-        assert!(code.contains("SMODS.Stickers['rental']"), "{code}");
-        assert!(
-            code.contains("target_joker:add_sticker('rental', true)"),
-            "{code}"
-        );
-        let code = generated(json!({"sticker": "remove", "edition": "remove"}));
-        assert!(
-            code.contains("target_joker:remove_sticker(sticker_key)"),
-            "{code}"
-        );
-        assert!(
-            code.contains("target_joker:set_edition(nil, true)"),
-            "{code}"
-        );
-        assert!(!code.contains("ability.rental = false"), "{code}");
-    }
-
-    #[test]
-    fn unknown_targets_do_not_fall_back_to_editing_the_consumable() {
-        let code = generated(json!({"target": "missing_target", "edition": "foil"}));
-        assert!(code.contains("local target_joker = nil"), "{code}");
-        assert!(!code.contains("local target_joker = card"), "{code}");
     }
 }

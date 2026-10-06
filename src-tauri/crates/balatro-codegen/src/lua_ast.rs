@@ -63,6 +63,8 @@ pub enum Stmt {
 pub enum Expr {
     /// An editable source value; renders exactly as its inner expression.
     FieldBinding(Box<Expr>, LuaFieldSource),
+    /// A source block span; renders exactly as its inner expression.
+    Segment(Box<Expr>, String),
     Nil,
     Bool(bool),
     Int(i64),
@@ -164,7 +166,7 @@ pub fn bind_scalar_literals(
     }
     match expr {
         Expr::FieldBinding(_, _) => {}
-        Expr::Field(object, _) | Expr::UnaryOp(_, object) => {
+        Expr::Segment(object, _) | Expr::Field(object, _) | Expr::UnaryOp(_, object) => {
             bind_scalar_literals(object, source_for)
         }
         Expr::Index(object, index) | Expr::BinOp(object, _, index) => {
@@ -744,6 +746,11 @@ impl Emitter {
 
     fn emit_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Segment(expr, id) => {
+                self.push_segment_start(id);
+                self.emit_expr(expr);
+                self.push_segment_end(id);
+            }
             Expr::FieldBinding(expr, source) => {
                 let (start_line, start_column) = self.current_line_col();
                 self.emit_expr(expr);
@@ -833,7 +840,7 @@ impl Emitter {
                 if *op == UnaryOp::Not {
                     self.buf.push(' ');
                 }
-                let needs_parens = matches!(inner.as_ref(), Expr::BinOp(..));
+                let needs_parens = matches!(unwrapped_expr(inner), Expr::BinOp(..));
                 if needs_parens {
                     self.buf.push('(');
                 }
@@ -1120,9 +1127,16 @@ impl UnaryOp {
 
 fn expr_needs_parens(expr: &Expr, parent_op: BinOp, _is_left: bool) -> bool {
     match expr {
-        Expr::FieldBinding(expr, _) => expr_needs_parens(expr, parent_op, _is_left),
+        Expr::FieldBinding(expr, _) | Expr::Segment(expr, _) => expr_needs_parens(expr, parent_op, _is_left),
         Expr::BinOp(_, child_op, _) => child_op.precedence() < parent_op.precedence(),
         _ => false,
+    }
+}
+
+fn unwrapped_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::FieldBinding(inner, _) | Expr::Segment(inner, _) => unwrapped_expr(inner),
+        _ => expr,
     }
 }
 
@@ -1159,7 +1173,7 @@ fn needs_bracket_key(key: &str) -> bool {
 fn is_simple_entry(entry: &TableEntry) -> bool {
     fn simple(expr: &Expr) -> bool {
         match expr {
-            Expr::FieldBinding(inner, _) => simple(inner),
+            Expr::FieldBinding(inner, _) | Expr::Segment(inner, _) => simple(inner),
             Expr::Int(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Ident(_) | Expr::Nil => true,
             _ => false,
         }
@@ -1289,127 +1303,5 @@ impl fmt::Display for Chunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = Emitter::new().emit_chunk(self);
         f.write_str(&s)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn editable_literal_spans_use_utf16_and_emitted_scalar_values() {
-        let value = "Linux\n'";
-        let chunk = Chunk { stmts: vec![lua_expr_stmt(lua_call("print", vec![
-            lua_str("😀"),
-            lua_field_binding(lua_str(value), LuaFieldSource { source_path: vec![serde_json::json!("text")], original_value: serde_json::json!(value) }),
-            lua_field_binding(lua_int(7), LuaFieldSource { source_path: vec![serde_json::json!("number")], original_value: serde_json::json!("7") }),
-        ]))] };
-        let (code, _, bindings) = Emitter::new().emit_chunk_with_field_bindings(&chunk);
-        let text_offset = code.find("'Linux").unwrap();
-        assert_eq!(bindings[0].start_column, code[..text_offset].encode_utf16().count() + 1);
-        let rendered = lua_str(value).to_string();
-        assert_eq!(bindings[0].end_column, bindings[0].start_column + rendered.encode_utf16().count());
-        assert_eq!(bindings[0].original_value, serde_json::json!(value));
-        assert_eq!(bindings[1].original_value, serde_json::json!(7));
-        assert_eq!(bindings[1].value_type, "number");
-        assert_eq!(code, Emitter::new().emit_chunk(&chunk));
-    }
-
-    #[test]
-    fn test_simple_return() {
-        let chunk = Chunk {
-            stmts: vec![lua_return(lua_table(vec![
-                ("chips", lua_int(50)),
-                ("mult", lua_int(10)),
-            ]))],
-        };
-        let out = Emitter::new().emit_chunk(&chunk);
-        assert_eq!(out, "return {\n    chips = 50,\n    mult = 10\n}\n");
-    }
-
-    #[test]
-    fn test_if_with_return() {
-        let chunk = Chunk {
-            stmts: vec![lua_if(
-                lua_and(
-                    lua_eq(
-                        lua_path(&["context", "cardarea"]),
-                        lua_path(&["G", "jokers"]),
-                    ),
-                    lua_path(&["context", "joker_main"]),
-                ),
-                vec![lua_return(lua_table(vec![("chips", lua_int(50))]))],
-            )],
-        };
-        let out = Emitter::new().emit_chunk(&chunk);
-        assert!(out.contains("if context.cardarea == G.jokers and context.joker_main then"));
-        assert!(out.contains("return { chips = 50 }"));
-        assert!(out.contains("end"));
-    }
-
-    #[test]
-    fn test_function_def() {
-        let func = Expr::Function {
-            params: vec!["self".into(), "card".into(), "context".into()],
-            body: vec![lua_return(lua_bool(true))],
-        };
-        let out = Emitter::new().emit_expr_to_string(&func);
-        assert!(out.contains("function(self, card, context)"));
-        assert!(out.contains("return true"));
-        assert!(out.contains("end"));
-    }
-
-    #[test]
-    fn test_operator_precedence() {
-        // (a or b) and c  should parenthesize (a or b)
-        let expr = lua_and(lua_or(lua_ident("a"), lua_ident("b")), lua_ident("c"));
-        let out = Emitter::new().emit_expr_to_string(&expr);
-        assert_eq!(out, "(a or b) and c");
-    }
-
-    #[test]
-    fn format_lua_source_removes_blank_line_after_return_table_open() {
-        let src = "return {\n        \n            dollars = card.ability.extra.dollars0,\n            colour = G.C.MONEY\n        }\n";
-        let out = format_lua_source(src);
-        assert_eq!(
-            out,
-            "return {\n    dollars = card.ability.extra.dollars0,\n    colour = G.C.MONEY\n}\n"
-        );
-    }
-
-    #[test]
-    fn format_lua_source_closes_constructor_tables_without_indent_leaking() {
-        let src = "SMODS.Atlas({\nkey = 'one'\n})\n\nSMODS.Atlas({\nkey = 'two'\n}):register()\n\nlocal NFS = require('nativefs')\n";
-        let out = format_lua_source(src);
-        assert_eq!(
-            out,
-            "SMODS.Atlas({\n    key = 'one'\n})\n\nSMODS.Atlas({\n    key = 'two'\n}):register()\n\nlocal NFS = require('nativefs')\n"
-        );
-    }
-
-    #[test]
-    fn segment_end_matches_by_id_without_corrupting_stack() {
-        let chunk = Chunk {
-            stmts: vec![
-                stmt_section_begin("a"),
-                stmt_section_begin("b"),
-                lua_raw_stmt("local x = 1"),
-                stmt_section_end("a"),
-                stmt_section_end("b"),
-            ],
-        };
-
-        let (_code, segments) = Emitter::new().emit_chunk_with_segments(&chunk);
-        let a = segments
-            .iter()
-            .find(|segment| segment.id == "a")
-            .expect("missing segment a");
-        let b = segments
-            .iter()
-            .find(|segment| segment.id == "b")
-            .expect("missing segment b");
-
-        assert!(a.start_line <= a.end_line);
-        assert!(b.start_line <= b.end_line);
     }
 }

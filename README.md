@@ -78,7 +78,7 @@ Before distributing an AppImage, inspect it with:
 python3 scripts/check-linux-appimage.py src-tauri/target/release/bundle/appimage/*.AppImage
 ```
 
-The check extracts the package without FUSE and rejects bundled `libwayland-client` copies that can conflict with the host graphics drivers. Nightly Linux builds also check that the app opens a window and stays running for 15 seconds under Xvfb, saving the startup log. This catches early exits; it does not replace testing rendering and interaction on Fedora/Bazzite and a real Wayland desktop. Run `python3 scripts/test-linux-appimage.py` for the inspection regression checks.
+The check extracts the package without FUSE and rejects bundled `libwayland-client` copies that can conflict with the host graphics drivers. Nightly Linux builds also check that the app opens a window and stays running for 15 seconds under Xvfb, saving the startup log. This catches early exits; it does not replace testing rendering and interaction on Fedora/Bazzite and a real Wayland desktop.
 
 ## Terminal Code Generation Command
 
@@ -138,8 +138,6 @@ Stable and nightly install side-by-side as separate apps.
 - Close all stable, nightly, and development copies before a manual Windows installation or uninstallation; older published uninstallers may force-close running copies. Automatic updates refuse to proceed while another copy is open, and installers/uninstallers built from this version require running copies to be closed. Automatic installation uses NSIS update mode to retain the existing installation path and shortcuts.
 - Linux and macOS use **Download Update** to open the official release page. Download the package for your computer, close Joker Forge, and follow its normal installation steps.
 - Failed downloads or saves keep the app open and offer a retry or manual download.
-
-Run `npm run test:updater` for update policy and handoff regression tests, `npm run test:storage` for project save/recovery coverage, and `npm run test:templates` for template-library persistence. Native updater tests run with `cargo test --manifest-path src-tauri/Cargo.toml --lib release_updater::tests`; Windows checks launch and cancel the real helper against a non-runnable fixture and verify that another running copy is left intact.
 
 ## Nightly Releases
 

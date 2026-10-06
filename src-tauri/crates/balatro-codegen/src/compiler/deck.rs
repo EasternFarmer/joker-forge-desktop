@@ -176,7 +176,6 @@ fn build_apply_function(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -> O
         // exit this hook before later setup rules or loop iterations execute.
         let stmts = discard_apply_returns(ro.effect_stmts.clone());
         let stmts = super::wrap_rule_segment(&ro.rule_id, stmts);
-        body.extend(super::build_rule_anchor_stmts(ro));
         if let Some(condition) = &ro.condition_expr {
             body.push(Stmt::If {
                 branches: vec![(condition.clone(), stmts)],

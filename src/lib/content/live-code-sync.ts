@@ -21,10 +21,24 @@ export interface CodeEdit {
   insert: string;
 }
 
-type Scalar = string | number | boolean;
+export type Scalar = string | number | boolean;
 type LuaToken = { from: number; to: number; key: string };
 
 const pathKey = (path: FieldBinding["sourcePath"]) => JSON.stringify(path);
+
+export const linkedFieldKey = (range: BoundFieldRange): string => JSON.stringify(
+  range.sourcePath.map((part, index) => typeof part === "number" && range.sourceIds?.[index]
+    ? { id: range.sourceIds[index] }
+    : part),
+);
+
+export interface BoundFieldAssessment {
+  key: string;
+  sourcePath: FieldBinding["sourcePath"];
+  range: BoundFieldRange;
+  status: "ready" | "unchanged" | "incomplete" | "wrong-type" | "repeated-conflict" | "custom";
+  value?: Scalar;
+}
 
 /** Parse data, never execute the user's Lua. Incomplete edits stay in the editor. */
 export function parseLuaScalar(source: string): Scalar | undefined {
@@ -266,21 +280,55 @@ export function updateBoundRanges(
   });
 }
 
-export function readBoundFieldEdits(code: string, ranges: BoundFieldRange[]) {
-  const fields = new Map<string, { sourcePath: FieldBinding["sourcePath"]; values: Set<Scalar>; changed: Set<Scalar> }>();
+function isIncompleteLuaScalar(source: string): boolean {
+  const text = source.trim();
+  if (!text || /^[+-]?(?:\.?|(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?|0[xX])$/.test(text)) return true;
+  if (["true", "false"].some((literal) => literal.startsWith(text) && literal !== text)) return true;
+  const long = text.match(/^\[(=*)\[/);
+  if (long) return !text.includes(`]${long[1]}]`, long[0].length);
+  if (text === "[" || /^\[=+$/.test(text)) return true;
+  const quote = text[0];
+  if (quote !== '"' && quote !== "'") return false;
+  for (let index = 1; index < text.length; index += 1) {
+    if (text[index] === "\\") index += 1;
+    else if (text[index] === quote) return false;
+  }
+  return true;
+}
+
+export function assessBoundFieldEdits(code: string, ranges: BoundFieldRange[]): BoundFieldAssessment[] {
+  const fields = new Map<string, Array<{ range: BoundFieldRange; value: Scalar | undefined; text: string }>>();
   for (const range of ranges) {
-    const value = parseLuaScalar(code.slice(range.from, range.to));
-    if (typeof value !== range.valueType) continue;
-    const key = pathKey(range.sourcePath);
-    const field = fields.get(key) ?? { sourcePath: range.sourcePath, values: new Set<Scalar>(), changed: new Set<Scalar>() };
-    field.values.add(value as Scalar);
-    if (value !== range.originalValue) field.changed.add(value as Scalar);
+    const text = code.slice(range.from, range.to);
+    const key = linkedFieldKey(range);
+    const field = fields.get(key) ?? [];
+    field.push({ range, text, value: parseLuaScalar(text) });
     fields.set(key, field);
   }
-  return [...fields.values()].flatMap((field) => {
-    const values = field.changed.size > 0 ? field.changed : field.values;
-    return values.size === 1 ? [{ sourcePath: field.sourcePath, value: [...values][0] }] : [];
+  return [...fields].map(([key, field]) => {
+    const incomplete = field.find((entry) => entry.value === undefined && isIncompleteLuaScalar(entry.text));
+    const wrongType = field.find((entry) => entry.value !== undefined && typeof entry.value !== entry.range.valueType);
+    const custom = field.find((entry) => entry.value === undefined);
+    const blocked = incomplete ?? wrongType ?? custom;
+    if (blocked) return {
+      key, sourcePath: blocked.range.sourcePath, range: blocked.range,
+      status: incomplete ? "incomplete" : wrongType ? "wrong-type" : "custom",
+    };
+    const changed = field.filter((entry) => !Object.is(entry.value, entry.range.originalValue));
+    const candidates = changed.length > 0 ? changed : field;
+    const values = new Set(candidates.map((entry) => entry.value));
+    const range = candidates[0].range;
+    if (values.size !== 1) return { key, sourcePath: range.sourcePath, range, status: "repeated-conflict" };
+    return { key, sourcePath: range.sourcePath, range,
+      status: changed.length > 0 ? "ready" : "unchanged", value: candidates[0].value };
   });
+}
+
+export function readBoundFieldEdits(code: string, ranges: BoundFieldRange[]) {
+  return assessBoundFieldEdits(code, ranges).flatMap((field) =>
+    field.status === "ready" || field.status === "unchanged"
+      ? [{ sourcePath: field.sourcePath, value: field.value as Scalar }]
+      : []);
 }
 
 /** GUI updates replace their linked literals while keeping custom Lua intact. */
@@ -299,6 +347,8 @@ export function rebaseLinkedCode(
     if (!next || next.originalValue === range.originalValue) continue;
     const currentValue = parseLuaScalar(currentCode.slice(range.from, range.to));
     if (typeof currentValue !== range.valueType) continue;
+    if (!Object.is(currentValue, range.originalValue)
+      && !Object.is(currentValue, next.originalValue)) continue;
     const insert = newGenerated.slice(next.from, next.to);
     if (currentCode.slice(range.from, range.to) !== insert) {
       replacements.push({ from: range.from, to: range.to, insert });
@@ -315,9 +365,7 @@ export function rebaseLinkedCode(
   for (const range of tracked) {
     const next = newByPath.get(pathKey(range.sourcePath));
     if (next) {
-      const currentValue = parseLuaScalar(code.slice(range.from, range.to));
-      ranges.push({ ...range, ...next, originalValue: currentValue === undefined ? range.originalValue : next.originalValue,
-        from: range.from, to: range.to });
+      ranges.push({ ...range, ...next, from: range.from, to: range.to });
       trackedPaths.add(pathKey(range.sourcePath));
     }
   }

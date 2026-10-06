@@ -18,6 +18,7 @@ import type {
 } from "./types";
 
 import BlockComponent from "./block-component";
+import { areRuleCardPropsEqual } from "./rule-card-memo";
 import {
   CaretDown,
   List,
@@ -1359,37 +1360,6 @@ const RuleCard: React.FC<RuleCardProps> = ({
       </motion.div>
     </div>
   );
-};
-
-const affectsRule = (selectedItem: SelectedItem, ruleId: string) => {
-  return selectedItem?.ruleId === ruleId;
-};
-
-const areRuleCardPropsEqual = (prev: RuleCardProps, next: RuleCardProps) => {
-  if (prev.rule !== next.rule) return false;
-  if (prev.ruleIndex !== next.ruleIndex) return false;
-  if (prev.isRuleSelected !== next.isRuleSelected) return false;
-  if (prev.selectedRuleCount !== next.selectedRuleCount) return false;
-  if (prev.item !== next.item) return false;
-  if (prev.itemType !== next.itemType) return false;
-  if (prev.scale !== next.scale) return false;
-  if (prev.isPaletteDragging !== next.isPaletteDragging) return false;
-
-  const prevSelectedAffectsRule = affectsRule(prev.selectedItem, prev.rule.id);
-  const nextSelectedAffectsRule = affectsRule(next.selectedItem, next.rule.id);
-  if (prevSelectedAffectsRule !== nextSelectedAffectsRule) return false;
-
-  if (prevSelectedAffectsRule && nextSelectedAffectsRule) {
-    if (prev.selectedItem?.type !== next.selectedItem?.type) return false;
-    if (prev.selectedItem?.itemId !== next.selectedItem?.itemId) return false;
-    if (prev.selectedItem?.groupId !== next.selectedItem?.groupId) return false;
-    if (prev.selectedItem?.randomGroupId !== next.selectedItem?.randomGroupId)
-      return false;
-    if (prev.selectedItem?.loopGroupId !== next.selectedItem?.loopGroupId)
-      return false;
-  }
-
-  return true;
 };
 
 export default React.memo(RuleCard, areRuleCardPropsEqual);

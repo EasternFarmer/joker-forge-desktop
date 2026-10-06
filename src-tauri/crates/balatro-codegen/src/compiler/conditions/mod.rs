@@ -135,6 +135,7 @@ pub fn compile_condition(
 /// where the toggle appears between group blocks.
 pub fn compile_condition_chain(
     groups: &[ConditionGroupDef],
+    rule_id: &str,
     object_type: ObjectType,
     ctx: &mut CompileContext,
 ) -> Option<Expr> {
@@ -146,7 +147,7 @@ pub fn compile_condition_chain(
         .iter()
         .enumerate()
         .filter_map(|(index, group)| {
-            compile_condition_group(index, group, object_type, ctx)
+            compile_condition_group(index, group, rule_id, object_type, ctx)
                 .map(|expr| (expr, group.logic_operator))
         })
         .collect();
@@ -172,6 +173,7 @@ pub fn compile_condition_chain(
 fn compile_condition_group(
     group_index: usize,
     group: &ConditionGroupDef,
+    rule_id: &str,
     object_type: ObjectType,
     ctx: &mut CompileContext,
 ) -> Option<Expr> {
@@ -183,6 +185,11 @@ fn compile_condition_group(
     for (index, condition) in group.conditions.iter().enumerate() {
         ctx.set_preview_node(vec![serde_json::json!("conditionGroups"), serde_json::json!(group_index), serde_json::json!("conditions"), serde_json::json!(index)], &condition.params);
         if let Some(expr) = compile_condition(condition, object_type, ctx) {
+            let expr = if condition.id.trim().is_empty() {
+                expr
+            } else {
+                Expr::Segment(Box::new(expr), format!("condition:{rule_id}:{}", condition.id))
+            };
             compiled.push((expr, condition.operator));
         }
     }

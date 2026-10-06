@@ -54,6 +54,7 @@ const indexToLineCol = (
 
 interface SegmentRange {
   id: string;
+  index: number;
   start: number;
   end: number;
 }
@@ -61,8 +62,9 @@ interface SegmentRange {
 const toRanges = (code: string, segments: CodeSegment[]): SegmentRange[] => {
   const offsets = lineOffsets(code);
   return segments
-    .map((segment) => ({
+    .map((segment, index) => ({
       id: segment.id,
+      index,
       start: lineColToIndex(offsets, segment.startLine, segment.startColumn, code.length),
       end: lineColToIndex(offsets, segment.endLine, segment.endColumn, code.length),
     }))
@@ -159,49 +161,60 @@ export function remapSegmentsToCode(
   generatedCode: string,
   generatedSegments: CodeSegment[],
 ): CodeSegment[] {
-  if (!displayCode || !generatedCode || generatedSegments.length === 0) {
-    return generatedSegments;
-  }
+  if (displayCode === generatedCode) return generatedSegments;
+  if (!displayCode || !generatedCode || generatedSegments.length === 0) return [];
 
   const generatedRanges = toRanges(generatedCode, generatedSegments);
   const displayOffsets = lineOffsets(displayCode);
-  const remapped: CodeSegment[] = [];
-  let searchFrom = 0;
-
-  for (let i = 0; i < generatedSegments.length; i += 1) {
-    const segment = generatedSegments[i];
-    const range = generatedRanges[i];
-    if (!range) {
-      remapped.push(segment);
-      continue;
+  const remappedByIndex = new Map<number, CodeSegment>();
+  const occurrencesBySnippet = new Map<string, { before: number[]; after: number[] }>();
+  const mappedSourceRegions = new Map<string, number>();
+  const occurrences = (code: string, snippet: string) => {
+    const positions: number[] = [];
+    let position = code.indexOf(snippet);
+    while (position >= 0) {
+      positions.push(position);
+      position = code.indexOf(snippet, position + snippet.length);
     }
+    return positions;
+  };
+
+  for (const range of generatedRanges) {
+    const segment = generatedSegments[range.index];
 
     const snippet = generatedCode.slice(range.start, range.end);
-    if (!snippet) {
-      remapped.push(segment);
-      continue;
+    if (!snippet) continue;
+    let matches = occurrencesBySnippet.get(snippet);
+    if (!matches) {
+      matches = { before: occurrences(generatedCode, snippet), after: occurrences(displayCode, snippet) };
+      occurrencesBySnippet.set(snippet, matches);
     }
+    if (matches.before.length !== matches.after.length) continue;
+    const occurrence = matches.before.indexOf(range.start);
+    if (occurrence < 0) continue;
 
-    const matchIndex = displayCode.indexOf(snippet, searchFrom);
-    if (matchIndex < 0) {
-      remapped.push(segment);
-      continue;
-    }
+    const sourceRegion = `${range.start}:${range.end}`;
+    const matchIndex = mappedSourceRegions.get(sourceRegion)
+      ?? matches.after[occurrence];
+    if (matchIndex < 0) continue;
 
     const start = indexToLineCol(displayOffsets, matchIndex);
     const end = indexToLineCol(
       displayOffsets,
-      Math.max(matchIndex, matchIndex + snippet.length - 1),
+      matchIndex + snippet.length,
     );
-    remapped.push({
+    remappedByIndex.set(range.index, {
       ...segment,
       startLine: start.line,
       startColumn: start.column,
       endLine: end.line,
       endColumn: end.column,
     });
-    searchFrom = matchIndex + snippet.length;
+    mappedSourceRegions.set(sourceRegion, matchIndex);
   }
 
-  return remapped;
+  return generatedSegments.flatMap((_segment, index) => {
+    const mapped = remappedByIndex.get(index);
+    return mapped ? [mapped] : [];
+  });
 }

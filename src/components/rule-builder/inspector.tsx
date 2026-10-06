@@ -117,6 +117,7 @@ interface InspectorProps {
   selectedGameVariable: GameVariable | null;
   onGameVariableApplied: () => void;
   selectedItem: SelectedItem;
+  linkedFieldRequest?: { parameterId: string; selectionKey: string; nonce: number; focus: boolean } | null;
   itemType: "joker" | "consumable" | "card" | "voucher" | "deck";
 }
 
@@ -1328,9 +1329,33 @@ const Inspector: React.FC<InspectorProps> = ({
   selectedGameVariable,
   onGameVariableApplied,
   selectedItem,
+  linkedFieldRequest,
   itemType,
 }) => {
   const { data } = useProjectData();
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const selectedItemKey = selectedItem ? JSON.stringify([
+    selectedItem.type, selectedItem.ruleId, selectedItem.itemId,
+    selectedItem.randomGroupId, selectedItem.loopGroupId,
+  ]) : undefined;
+  const requestedFieldId = linkedFieldRequest?.selectionKey === selectedItemKey
+    ? linkedFieldRequest?.parameterId : undefined;
+  React.useEffect(() => {
+    if (!linkedFieldRequest || !requestedFieldId) return;
+    const frame = requestAnimationFrame(() => {
+      const field = Array.from(contentRef.current?.querySelectorAll<HTMLElement>("[data-live-code-field]") ?? [])
+        .find((element) => element.dataset.liveCodeField === linkedFieldRequest.parameterId);
+      if (!field) return;
+      field.scrollIntoView({ block: "nearest", inline: "nearest" });
+      if (linkedFieldRequest.focus) {
+        const control = field.querySelector<HTMLElement>('input:not([type="hidden"]):not([disabled]), textarea:not([disabled])')
+          ?? field.querySelector<HTMLElement>('button[role="combobox"]:not([disabled])')
+          ?? field.querySelector<HTMLElement>('button:not([disabled])');
+        (control ?? field).focus({ preventScroll: true });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [linkedFieldRequest, requestedFieldId]);
   const [customMessageValidationError, setCustomMessageValidationError] =
     useState<string>("");
   const globalVariables = React.useMemo(
@@ -1547,6 +1572,7 @@ const Inspector: React.FC<InspectorProps> = ({
           <Tooltip>
             <TooltipTrigger asChild>
               <button
+                data-live-code-field="negate"
                 onClick={() =>
                   onUpdateCondition(selectedRule.id, selectedCondition.id, {
                     negate: !selectedCondition.negate,
@@ -1602,7 +1628,8 @@ const Inspector: React.FC<InspectorProps> = ({
             </h5>
             <div className="divide-y divide-border/70">
               {paramsToRender.map((param) => (
-                <div key={param.id} className="py-2.5 first:pt-1 last:pb-1">
+                <div key={param.id} data-live-code-field={param.id} tabIndex={-1}
+                  className={`py-2.5 first:pt-1 last:pb-1 rounded-md ${requestedFieldId === param.id ? "ring-2 ring-balatro-blue/60 px-2" : ""}`}>
                   {selectedCondition.type === "probability_succeeded" && param.id === "group_id" ? (
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-zinc-100">Chance Group</label>
@@ -1705,6 +1732,7 @@ const Inspector: React.FC<InspectorProps> = ({
           <div className="divide-y divide-border/70">
             <div className="py-2.5 first:pt-1 last:pb-1">
               <div className="max-w-60 mx-auto space-y-2">
+                <div data-live-code-field="chance_numerator" tabIndex={-1}>
                 <ChanceInput
                   key="numerator"
                   label="Numerator"
@@ -1725,7 +1753,9 @@ const Inspector: React.FC<InspectorProps> = ({
                   selectedGameVariable={selectedGameVariable}
                   onGameVariableApplied={onGameVariableApplied}
                 />
+                </div>
                 <div className="border-b border-border/80" />
+                <div data-live-code-field="chance_denominator" tabIndex={-1}>
                 <ChanceInput
                   key="denominator"
                   label="Denominator"
@@ -1746,6 +1776,7 @@ const Inspector: React.FC<InspectorProps> = ({
                   selectedGameVariable={selectedGameVariable}
                   onGameVariableApplied={onGameVariableApplied}
                 />
+                </div>
               </div>
             </div>
           </div>
@@ -1759,6 +1790,7 @@ const Inspector: React.FC<InspectorProps> = ({
             <div className="divide-y divide-border/70">
               <div className="py-2.5 first:pt-1 last:pb-1">
                 <div className="space-y-6 p-2">
+                  <div data-live-code-field="respect_probability_effects" tabIndex={-1}>
                   <Checkbox
                     id="respect_probability_effects"
                     label="Affected by Probability Effects"
@@ -1779,6 +1811,8 @@ const Inspector: React.FC<InspectorProps> = ({
                       );
                     }}
                   />
+                  </div>
+                  <div data-live-code-field="custom_key" tabIndex={-1}>
                   <InputField
                     key="custom_key"
                     value={selectedRandomGroup.custom_key}
@@ -1821,6 +1855,7 @@ const Inspector: React.FC<InspectorProps> = ({
                     type="text"
                     size="sm"
                   />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1863,6 +1898,7 @@ const Inspector: React.FC<InspectorProps> = ({
             <div className="py-2.5 first:pt-1 last:pb-1">
               <div className="flex flex-col items-start gap-4">
                 <span className="text-zinc-100 text-sm">Loop</span>
+                <div data-live-code-field="repetitions" tabIndex={-1}>
                 <ChanceInput
                   key="repetitions"
                   label=""
@@ -1879,6 +1915,7 @@ const Inspector: React.FC<InspectorProps> = ({
                   selectedGameVariable={selectedGameVariable}
                   onGameVariableApplied={onGameVariableApplied}
                 />
+                </div>
                 <span className="text-zinc-100 text-sm">Time(s)</span>
               </div>
             </div>
@@ -1983,7 +2020,7 @@ const Inspector: React.FC<InspectorProps> = ({
           </h5>
           <div className="divide-y divide-border/70">
             {hasMessageOptions && (
-              <div className="py-2.5 first:pt-1 last:pb-1">
+              <div data-live-code-field="messageMode" tabIndex={-1} className="py-2.5 first:pt-1 last:pb-1">
                 <Select
                   value={messageMode}
                   onValueChange={(value: "default" | "custom" | "none") => {
@@ -2005,7 +2042,7 @@ const Inspector: React.FC<InspectorProps> = ({
               </div>
             )}
             {(!hasMessageOptions || messageMode === "custom") && (
-              <div className="py-2.5 first:pt-1 last:pb-1">
+              <div data-live-code-field="customMessage" tabIndex={-1} className="py-2.5 first:pt-1 last:pb-1">
                 <InputField
                   label={hasMessageOptions ? "Custom message" : "Message"}
                   value={selectedEffect.customMessage || ""}
@@ -2055,7 +2092,8 @@ const Inspector: React.FC<InspectorProps> = ({
             </h5>
             <div className="divide-y divide-border/70">
               {paramsToRender.map((param) => (
-                <div key={param.id} className="py-2.5 first:pt-1 last:pb-1">
+                <div key={param.id} data-live-code-field={param.id} tabIndex={-1}
+                  className={`py-2.5 first:pt-1 last:pb-1 rounded-md ${requestedFieldId === param.id ? "ring-2 ring-balatro-green/60 px-2" : ""}`}>
                   <ParameterField
                     param={param}
                     item={selectedEffect.params[param.id]}
@@ -2126,7 +2164,7 @@ const Inspector: React.FC<InspectorProps> = ({
       headerClassName="p-3 border-b border-border/90"
       contentClassName="p-3 overflow-y-auto custom-scrollbar"
     >
-      <div>
+      <div ref={contentRef}>
         {!selectedRule && (
           <div className="flex items-center justify-center h-28 rounded-xl border border-dashed border-border/80 bg-background/50">
             <div className="text-center">

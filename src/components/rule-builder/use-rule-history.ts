@@ -3,13 +3,13 @@ import type { Rule } from "./types";
 
 const RULE_HISTORY_LIMIT = 64;
 
-type RuleHistory = {
+export type RuleHistory = {
   past: Rule[][];
   rules: Rule[];
   future: Rule[][];
 };
 
-type RuleHistoryAction =
+export type RuleHistoryAction =
   | { type: "reset"; rules: Rule[] }
   | { type: "update"; update: SetStateAction<Rule[]> }
   | { type: "undo" }
@@ -19,9 +19,20 @@ type RuleHistoryAction =
 const cloneRules = (rules: Rule[]): Rule[] =>
   JSON.parse(JSON.stringify(rules)) as Rule[];
 
+const retainUnchangedRules = (rules: Rule[], previousRules: Rule[]): Rule[] => {
+  const previousById = new Map(previousRules.map((rule) => [rule.id, rule]));
+  return rules.map((rule) => {
+    const previous = previousById.get(rule.id);
+    if (previous && (rule === previous || JSON.stringify(rule) === JSON.stringify(previous))) {
+      return previous;
+    }
+    return JSON.parse(JSON.stringify(rule)) as Rule;
+  });
+};
+
 // Keep blocks and their history in one state update. Loading or restoring rules
 // must never be mistaken for an edit by an effect from an earlier render.
-const reduceRuleHistory = (
+export const reduceRuleHistory = (
   state: RuleHistory,
   action: RuleHistoryAction,
 ): RuleHistory => {
@@ -37,7 +48,7 @@ const reduceRuleHistory = (
       }
       return {
         past: [...state.past, cloneRules(state.rules)].slice(-RULE_HISTORY_LIMIT),
-        rules: cloneRules(rules),
+        rules: retainUnchangedRules(rules, state.rules),
         future: [],
       };
     }

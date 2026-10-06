@@ -3,7 +3,9 @@ import type {
   CompletionContext,
   CompletionResult,
 } from "@codemirror/autocomplete";
-import type { EditorState } from "@codemirror/state";
+import { snippet } from "@codemirror/autocomplete";
+import { syntaxTree } from "@codemirror/language";
+import type { EditorState, Text } from "@codemirror/state";
 
 // Lua language keywords
 
@@ -717,54 +719,121 @@ const DOC_TOKEN_RE = /[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/g;
 const STATIC_LABELS = new Set(ALL_COMPLETIONS.map((c) => c.label));
 
 function dedupeCompletions(completions: Completion[]): Completion[] {
-  const seen = new Set<string>();
-  const deduped: Completion[] = [];
+  const merged = new Map<string, Completion>();
   for (const completion of completions) {
-    if (seen.has(completion.label)) continue;
-    seen.add(completion.label);
-    deduped.push(completion);
+    const previous = merged.get(completion.label);
+    if (!previous) {
+      merged.set(completion.label, completion);
+      continue;
+    }
+    merged.set(completion.label, {
+      ...completion,
+      ...previous,
+      detail: !previous.detail || previous.detail === "SMODS LSP" ? completion.detail ?? previous.detail : previous.detail,
+      info: previous.info ?? completion.info,
+    });
   }
-  return deduped;
+  return [...merged.values()];
 }
 
-function extractDocumentTokens(state: EditorState): Completion[] {
+interface DocumentCompletions {
+  tokens: Completion[];
+  textRanges: Array<[number, number]>;
+}
+
+const documentTokenCache = new WeakMap<Text, DocumentCompletions>();
+
+function textRanges(source: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const longBracket = (from: number): { after: number; closing: string } | undefined => {
+    if (source[from] !== "[") return undefined;
+    let after = from + 1;
+    while (source[after] === "=") after += 1;
+    return source[after] === "[" ? { after: after + 1, closing: `]${source.slice(from + 1, after)}]` } : undefined;
+  };
+  for (let index = 0; index < source.length;) {
+    const from = index;
+    const comment = source.startsWith("--", index);
+    const bracket = longBracket(comment ? index + 2 : index);
+    if (bracket) {
+      const end = source.indexOf(bracket.closing, bracket.after);
+      index = end < 0 ? source.length : end + bracket.closing.length;
+      ranges.push([from, index]);
+    } else if (comment) {
+      index += 2;
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index += 1;
+      ranges.push([from, index]);
+    } else if (source[index] === '"' || source[index] === "'") {
+      const quote = source[index++];
+      while (index < source.length) {
+        const character = source[index++];
+        if (character === quote) break;
+        if (character === "\n" || character === "\r") break;
+        if (character === "\\") {
+          if (source[index] === "z") {
+            index += 1;
+            while (index < source.length && /\s/.test(source[index])) index += 1;
+          } else if (source[index] === "\r" && source[index + 1] === "\n") index += 2;
+          else index = Math.min(source.length, index + 1);
+        }
+      }
+      ranges.push([from, index]);
+    } else index += 1;
+  }
+  return ranges;
+}
+
+function isTextPosition(ranges: Array<[number, number]>, pos: number): boolean {
+  let low = 0;
+  let high = ranges.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const [from, to] = ranges[middle];
+    if (pos <= from) high = middle - 1;
+    else if (pos > to) low = middle + 1;
+    else return true;
+  }
+  return false;
+}
+
+function getDocumentCompletions(state: EditorState): DocumentCompletions {
+  const cached = documentTokenCache.get(state.doc);
+  if (cached) return cached;
   const text = state.doc.toString();
+  const protectedRanges = textRanges(text);
   const seen = new Set<string>();
   const tokens: Completion[] = [];
+  const add = (label: string) => {
+    if (label.length < 3 || seen.has(label) || STATIC_LABELS.has(label)) return;
+    seen.add(label);
+    tokens.push({ label, type: "text", boost: -1 });
+  };
 
+  let protectedIndex = 0;
   for (const match of text.matchAll(DOC_TOKEN_RE)) {
+    const from = match.index ?? 0;
+    while (protectedIndex < protectedRanges.length && protectedRanges[protectedIndex][1] <= from) protectedIndex += 1;
+    const range = protectedRanges[protectedIndex];
+    if (range && range[0] <= from && from < range[1]) continue;
     const token = match[0];
     // Skip short tokens, duplicates, and tokens already in static list
     if (token.length < 3) continue;
     if (seen.has(token)) continue;
     if (STATIC_LABELS.has(token)) continue;
-    seen.add(token);
-
     // Also add dotted sub-paths (e.g. card.ability.extra.dollars0 ->
     // card.ability, card.ability.extra, card.ability.extra.dollars0)
     if (token.includes(".")) {
       const parts = token.split(".");
       for (let i = 2; i <= parts.length; i++) {
-        const sub = parts.slice(0, i).join(".");
-        if (sub.length >= 3 && !seen.has(sub) && !STATIC_LABELS.has(sub)) {
-          seen.add(sub);
-          tokens.push({
-            label: sub,
-            type: "text",
-            boost: -1, // rank below static completions
-          });
-        }
+        add(parts.slice(0, i).join("."));
       }
     } else {
-      tokens.push({
-        label: token,
-        type: "text",
-        boost: -1,
-      });
+      add(token);
     }
   }
-
-  return tokens;
+  const result = { tokens, textRanges: protectedRanges };
+  documentTokenCache.set(state.doc, result);
+  return result;
 }
 
 // CompletionSource for CodeMirror
@@ -772,12 +841,12 @@ function extractDocumentTokens(state: EditorState): Completion[] {
 // Match word characters and dots (for G.GAME.dollars, SMODS.Joker, etc.)
 const WORD_RE = /[\w.]+$/;
 
-const PARAM_SPLIT_RE = /\s*[,|]\s*/;
+const CALLBACK_LABELS = new Set(CALLBACK_NAMES.map((completion) => completion.label));
 
 function buildFunctionApplyText(detail?: string): string {
-  if (!detail || !detail.startsWith("(")) return "()";
+  if (!detail || !detail.startsWith("(")) return "(${1})${2}";
   const signaturePart = detail.split("→")[0]?.trim();
-  if (!signaturePart?.startsWith("(")) return "()";
+  if (!signaturePart?.startsWith("(")) return "(${1})${2}";
 
   const closeIdx = signaturePart.lastIndexOf(")");
   const inner =
@@ -785,45 +854,44 @@ function buildFunctionApplyText(detail?: string): string {
       ? signaturePart.slice(1, closeIdx).trim()
       : signaturePart.slice(1).trim();
 
-  if (!inner || inner === "..." || inner === "[]") return "()";
+  if (!inner || inner === "..." || inner === "[]") return "(${1})${2}";
 
   const params = inner
-    .split(PARAM_SPLIT_RE)
+    .replace(/[\[\]]/g, "")
+    .split(/\s*,\s*/)
     .map((param) =>
       param
-        .replace(/^\[|\]$/g, "")
         .replace(/\?$/g, "")
         .trim(),
     )
     .filter(Boolean);
 
-  if (params.length === 0) return "()";
-  return `(${params.join(", ")})`;
+  if (params.length === 0) return "(${1})${2}";
+  const fields = params.map((param, index) => {
+    const name = /^[A-Za-z_]\w*$/.test(param) ? param : "";
+    return `\${${index + 1}:${name}}`;
+  });
+  return `(${fields.join(", ")})\${${fields.length + 1}}`;
 }
 
 function withFunctionApply(completion: Completion): Completion {
   if (completion.type !== "function") return completion;
+  if (CALLBACK_LABELS.has(completion.label)) return { ...completion, apply: completion.label };
   const applySuffix = buildFunctionApplyText(completion.detail);
   return {
     ...completion,
-    apply: (view, _completion, from, to) => {
-      const insertText = `${completion.label}${applySuffix}`;
-      const cursorOffset = completion.detail ? 0 : -1;
-      const anchor = from + insertText.length + cursorOffset;
-      view.dispatch({
-        changes: { from, to, insert: insertText },
-        selection: { anchor },
-        scrollIntoView: true,
-        userEvent: "input.complete",
-      });
-    },
+    apply: snippet(`${completion.label}${applySuffix}`),
   };
 }
+
+let preparedStaticCompletions: Completion[] | null = null;
 
 export async function luaSmodsCompletions(
   context: CompletionContext,
 ): Promise<CompletionResult | null> {
-  const word = context.matchBefore(WORD_RE);
+  const token = syntaxTree(context.state).resolveInner(context.pos, -1);
+  if (token.name === "string" || token.name === "comment") return null;
+  const word = context.matchBefore(WORD_RE) ?? (context.explicit ? { from: context.pos, to: context.pos, text: "" } : null);
   if (!word) return null;
   // Only activate after at least 2 characters or explicit request
   if (word.from === word.to && !context.explicit) return null;
@@ -832,13 +900,12 @@ export async function luaSmodsCompletions(
   const prefix = word.text.toLowerCase();
 
   // Combine static + dynamic document completions
-  const docTokens = extractDocumentTokens(context.state);
+  const document = getDocumentCompletions(context.state);
+  if (isTextPosition(document.textRanges, context.pos)) return null;
+  const docTokens = document.tokens.filter(({ label }) => label !== word.text);
   const lspTokens = await loadSmodsLspCompletions();
-  // Prefer official SMODS LSP defs when available; keep static data as fallback.
-  const hasLspTokens = lspTokens.length > 0;
-  let candidates = hasLspTokens
-    ? dedupeCompletions([...lspTokens, ...ALL_COMPLETIONS, ...docTokens])
-    : dedupeCompletions([...ALL_COMPLETIONS, ...docTokens]);
+  preparedStaticCompletions ??= dedupeCompletions([...lspTokens, ...ALL_COMPLETIONS]).map(withFunctionApply);
+  let candidates = dedupeCompletions([...preparedStaticCompletions, ...docTokens]);
 
   // If typing after a dot, narrow to relevant property completions
   if (prefix.includes(".")) {
@@ -854,7 +921,7 @@ export async function luaSmodsCompletions(
 
   return {
     from: word.from,
-    options: candidates.map(withFunctionApply),
-    validFor: WORD_RE,
+    options: candidates,
+    validFor: /^[\w.]*$/,
   };
 }

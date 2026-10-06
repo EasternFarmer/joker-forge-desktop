@@ -79,7 +79,11 @@ const Panel: React.FC<PanelProps> = ({
           </h3>
           {titleAccessory}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div
+          className="flex items-center gap-2 shrink-0"
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
           {headerActions}
           {onClose ? (
             <Tooltip>

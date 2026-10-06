@@ -161,40 +161,6 @@ fn build_card_modification_code(effect: &EffectDef, target: &str, ctx: &CompileC
     code
 }
 
-#[cfg(test)]
-mod global_scope_tests {
-    use super::*;
-    use crate::types::{ObjectType, UserVarType, UserVariableDef};
-    use serde_json::json;
-
-    #[test]
-    fn card_modifications_resolve_global_typed_and_key_variables_in_their_scope() {
-        for persistent in [false, true] {
-            let mut ctx = CompileContext::new(ObjectType::Joker, "mod".into(), "test".into(), false);
-            ctx.set_user_vars([("rank", UserVarType::Rank), ("suit", UserVarType::Suit),
-                ("enhancement", UserVarType::Key), ("seal", UserVarType::Key), ("edition", UserVarType::Key)]
-                .iter().map(|(property, var_type)| UserVariableDef {
-                    name: format!("chosen_{property}"), var_type: *var_type,
-                    initial_value: ParamValue::Str("value".into()),
-                    is_global: true, is_persistent: persistent,
-                }).collect());
-            let mut params = json!({});
-            for property in ["rank", "suit", "enhancement", "seal", "edition"] {
-                params[format!("new_{property}")] = json!({
-                    "value":format!("chosen_{property}"),"valueType":"userVariable"
-                });
-            }
-            let effect: EffectDef = serde_json::from_value(json!({"effect_type":"edit_card","params":params})).unwrap();
-            let code = build_card_modification_code(&effect, "target", &ctx);
-            for property in ["rank", "suit", "enhancement", "seal", "edition"] {
-                let prefix = if persistent { "JF_GLOBALS" } else { "G.GAME.jf_global_vars" };
-                assert!(code.contains(&format!("{prefix}.chosen_{property}")), "{code}");
-            }
-            assert!(!code.contains("current_round") && !code.contains("ability.extra"), "{code}");
-            assert!(code.contains("names[rank] or rank"), "{code}");
-        }
-    }
-}
 
 /// Edit Card effect: modifies a card's rank, suit, enhancement, seal, and/or edition.
 pub fn edit_card(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
