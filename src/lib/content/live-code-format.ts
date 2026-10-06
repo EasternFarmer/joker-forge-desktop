@@ -26,7 +26,7 @@ interface SourceLine {
 
 const parserOptions = {
   luaVersion: "LuaJIT" as const,
-  extendedIdentifiers: true as unknown as false,
+  extendedIdentifiers: true,
   encodingMode: "none" as const,
 };
 

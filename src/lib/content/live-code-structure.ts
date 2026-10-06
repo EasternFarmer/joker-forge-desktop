@@ -1,7 +1,7 @@
 import { foldService } from "@codemirror/language";
 import { StateEffect, StateField, Text, type Extension } from "@codemirror/state";
 import { ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
-import { parse, type Options, type Token } from "luaparse";
+import { parse, type LuaParserOptions, type Token } from "luaparse";
 import type { CodeSegment } from "./code-sections";
 import { getCodeSegmentRanges } from "./live-code-navigation";
 
@@ -35,7 +35,7 @@ interface SyntaxNode {
   [key: string]: unknown;
 }
 
-const parserOptions: Partial<Options> = {
+const parserOptions: LuaParserOptions = {
   luaVersion: "LuaJIT",
   extendedIdentifiers: true,
   encodingMode: "none",
