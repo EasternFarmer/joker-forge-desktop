@@ -27,21 +27,29 @@ import NotFoundPage from "@/pages/not-found-page";
 import { EntityBridgeListener } from "@/components/bridge/entity-bridge-listener";
 import { FileAssociationListener } from "@/components/bridge/file-association-listener";
 import { CustomContextMenu } from "@/components/ui/custom-context-menu";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { checkForReleaseUpdateOnLaunch } from "@/lib/services/release-updater";
 import { UpdateDialog } from "@/components/bridge/update-dialog";
 import { GithubStarDialog } from "@/components/bridge/github-star-dialog";
+import { WelcomeDialog, shouldShowWelcome } from "@/components/bridge/welcome-dialog";
 import { Toaster } from "sonner";
 
 function App() {
+  const [isWelcomeOpen, setIsWelcomeOpen] = useState(shouldShowWelcome);
+
   useEffect(() => {
-    void checkForReleaseUpdateOnLaunch();
-  }, []);
+    if (!isWelcomeOpen) void checkForReleaseUpdateOnLaunch();
+  }, [isWelcomeOpen]);
 
   return (
     <Router>
-      <UpdateDialog />
-      <GithubStarDialog />
+      <WelcomeDialog open={isWelcomeOpen} onDismiss={() => setIsWelcomeOpen(false)} />
+      {!isWelcomeOpen && (
+        <>
+          <UpdateDialog />
+          <GithubStarDialog />
+        </>
+      )}
       <EntityBridgeListener />
       <FileAssociationListener />
       <Toaster position="bottom-right" richColors closeButton />
