@@ -10,6 +10,19 @@ use crate::types::{EffectDef, ObjectType, ParamValue};
 
 /// Resolve a value param to a Lua expression string: registering a config var
 /// for literal numbers.
+fn deck_state_change(edit_code: &str, message: &str, colour: &str) -> EffectOutput {
+    EffectOutput {
+        pre_return: vec![lua_raw_stmt(format!(
+            "{edit_code}\n\
+            local jf_status_card = G.deck and G.deck.cards and G.deck.cards[1]\n\
+            if jf_status_card and type(jf_status_card.juice_up) == 'function' then\n\
+                card_eval_status_text(jf_status_card, 'extra', nil, nil, nil, {{message = {message}, colour = {colour}}})\n\
+            end"
+        ))],
+        return_fields: vec![("effect".into(), lua_bool(true))],
+        ..Default::default()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // edit_joker_slots  (modifies G.jokers.config.card_limit)
@@ -18,7 +31,11 @@ use crate::types::{EffectDef, ObjectType, ParamValue};
 /// Edit Joker Slots effect: changes the joker card limit.
 ///
 /// For joker context: returns `func = function() ... end` in the return table.
-pub fn edit_joker_slots(effect: &EffectDef, ctx: &mut CompileContext) -> EffectOutput {
+pub fn edit_joker_slots(
+    effect: &EffectDef,
+    ctx: &mut CompileContext,
+    trigger: &str,
+) -> EffectOutput {
     let operation = get_str_default(effect, "operation", "add");
     let custom_message = get_str(effect, "customMessage");
     let value_str = value_to_lua_str(effect, "value", ctx, "joker_slots");
@@ -54,6 +71,10 @@ pub fn edit_joker_slots(effect: &EffectDef, ctx: &mut CompileContext) -> EffectO
             "set" => format!("\"Joker Slots set to \"..tostring({})", value_str),
             _ => format!("\"+\"..tostring({})..' Joker Slot'", value_str),
         });
+
+    if ctx.object_type == ObjectType::Deck && trigger != "card_used" {
+        return deck_state_change(&slots_code, &msg_lua, colour_str);
+    }
 
     let func_body = vec![
         lua_raw_stmt(format!(
@@ -312,6 +333,10 @@ pub fn edit_consumable_slots(effect: &EffectDef, ctx: &mut CompileContext) -> Ef
             "set" => format!("\"Set to \"..tostring({})..' Consumable Slots'", value_str),
             _ => format!("\"+\"..tostring({})..' Consumable Slot'", value_str),
         });
+
+    if ctx.object_type == ObjectType::Deck {
+        return deck_state_change(&slots_code, &msg_lua, colour_str);
+    }
 
     let func_body = vec![
         lua_raw_stmt(format!(
@@ -698,6 +723,10 @@ pub fn edit_round_counter_typed(
     let msg_lua = custom_message
         .map(|m| format!("\"{}\"", m))
         .unwrap_or(default_message);
+
+    if ctx.object_type == ObjectType::Deck {
+        return deck_state_change(&edit_code, &msg_lua, colour);
+    }
 
     let func_body = vec![lua_raw_stmt(format!(
         "card_eval_status_text(context.blueprint_card or card, 'extra', nil, nil, nil, {{message = {}, colour = {}}})\n\

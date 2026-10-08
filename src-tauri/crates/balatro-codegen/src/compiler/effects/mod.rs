@@ -99,7 +99,7 @@ pub fn compile_effect(
         "convert_left_to_right" => card_transform::convert_left_to_right(effect, ctx),
 
         // --------------- Slot Management ---------------
-        "edit_joker_slots" => slot_management::edit_joker_slots(effect, ctx),
+        "edit_joker_slots" => slot_management::edit_joker_slots(effect, ctx, trigger),
         "edit_joker_size" => slot_management::edit_joker_size(effect, ctx, trigger),
         "edit_consumable_slots" if deck_start => {
             deck_setup::edit_starting_counter(effect, ctx, "consumable_slots")

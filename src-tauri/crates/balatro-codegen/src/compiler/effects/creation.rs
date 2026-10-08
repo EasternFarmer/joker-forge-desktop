@@ -9,6 +9,8 @@ use crate::types::{EffectDef, ObjectType, ParamValue};
 /// This is one of the more complex effects: it needs pre-return code for
 /// the event manager, handles slot limits, editions: and stickers.
 pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str) -> EffectOutput {
+    let creation_index = ctx.next_effect_count("created_joker");
+    let created_joker = ctx.unique_var_name("created_joker", creation_index);
     let joker_type = get_str_param_any(effect, &["joker_type", "jokerType"]).unwrap_or("random");
     let rarity = get_str_param(effect, "rarity").unwrap_or("random");
     let edition = get_str_param(effect, "edition");
@@ -64,9 +66,9 @@ pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str)
     let payload = card_params.join(", ");
     let slot_guard = "G.jokers and G.jokers.cards and G.jokers.config and #G.jokers.cards + (G.GAME.joker_buffer or 0) < G.jokers.config.card_limit";
     let slot_open = if bypass_slot_check {
-        "local created_joker = true".to_string()
+        format!("local {created_joker} = true")
     } else {
-        format!("local created_joker = false\nif {slot_guard} then\n    created_joker = true\n    G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1")
+        format!("local {created_joker} = false\nif {slot_guard} then\n    {created_joker} = true\n    G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1")
     };
     let slot_close = if bypass_slot_check {
         String::new()
@@ -84,11 +86,11 @@ pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str)
         && !bypass_slot_check
     {
         format!(
-            "local created_joker = false\n\
+            "local {created_joker} = false\n\
             G.E_MANAGER:add_event(Event({{\n\
                 func = function()\n\
                     if {slot_guard} then\n\
-                        created_joker = true\n\
+                        {created_joker} = true\n\
                         G.GAME.joker_buffer = (G.GAME.joker_buffer or 0) + 1\n\
                         local joker_card = SMODS.add_card({{ {payload} }})\n\
                         G.GAME.joker_buffer = math.max(0, (G.GAME.joker_buffer or 1) - 1)\n\
@@ -112,7 +114,7 @@ pub fn create_joker(effect: &EffectDef, ctx: &mut CompileContext, trigger: &str)
 
     // Message for the return
     let message = Some(lua_and(
-        lua_ident("created_joker"),
+        lua_ident(&created_joker),
         lua_call("localize", vec![lua_str("k_plus_joker")]),
     ));
 
