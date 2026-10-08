@@ -13,6 +13,7 @@ import {
   getRarityDropdownOptions,
 } from "@/lib/balatro/balatro-utils";
 import { processBalatroCardImage } from "@/lib/media/image-processing-utils";
+import { useProjectData } from "@/lib/services/storage";
 import type { JokerData } from "@/lib/core/types";
 import { jokerUnlockOptions, unlockTriggerOptions } from "@/lib/items/unlock-utils";
 import {
@@ -39,9 +40,13 @@ export function EditJokerDialog({
   onSave,
   modPrefix = "",
 }: EditJokerDialogProps) {
+  const { data } = useProjectData();
   const processJokerImage = processBalatroCardImage;
   const automaticPool = `${modPrefix.trim()}${modPrefix.trim() ? "_" : ""}jokers`;
-  const rarityOptions = useMemo(() => getRarityDropdownOptions(), []);
+  const rarityOptions = useMemo(
+    () => getRarityDropdownOptions(data.rarities),
+    [data.rarities],
+  );
   const unlockOperatorOptions = useMemo(
     () =>
       COMPARISON_OPERATORS.map((op) => ({

@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   ReactNode,
   useRef,
   useCallback,
@@ -58,6 +59,7 @@ import {
 import { LocalizationEditor } from "@/components/pages/localization-editor";
 import {
   PlaceholderCategory,
+  PlaceholderEntry,
 } from "@/lib/content/placeholder-assets.ts";
 import { PlaceholderPickerDialog } from "@/components/pages/placeholder-picker-dialog";
 import {
@@ -201,6 +203,8 @@ const MemoizedField = memo(
     showPlaceholderPicker,
     onOpenPlaceholderPicker,
     onOpenImageCropper,
+    onUploadImage,
+    isProcessingImage,
     rerenderKey,
   }: {
     field: DialogField<any>;
@@ -212,6 +216,11 @@ const MemoizedField = memo(
     showPlaceholderPicker?: boolean;
     onOpenPlaceholderPicker?: () => void;
     onOpenImageCropper?: (fieldId: string, src: string) => void;
+    onUploadImage: (
+      field: DialogField<any>,
+      input: HTMLInputElement,
+    ) => Promise<void>;
+    isProcessingImage?: boolean;
     rerenderKey?: string;
   }) => {
     void rerenderKey;
@@ -346,22 +355,42 @@ const MemoizedField = memo(
         case "select":
           if (field.id === "rarity") {
             return (
-              <ItemBadgeSelect
-                kind="rarity"
-                value={String(safeValue || "")}
-                onChange={(val) =>
-                  onChange(field.id, isNaN(Number(val)) ? val : Number(val))
-                }
-              />
+              <div>
+                <ItemBadgeSelect
+                  kind="rarity"
+                  value={String(safeValue || "")}
+                  onChange={(val) =>
+                    onChange(field.id, isNaN(Number(val)) ? val : Number(val))
+                  }
+                />
+                {error && (
+                  <p
+                    role="alert"
+                    className="text-xs text-destructive dark:text-red-400 mt-1"
+                  >
+                    {error}
+                  </p>
+                )}
+              </div>
             );
           }
           if (field.id === "set") {
             return (
-              <ItemBadgeSelect
-                kind="set"
-                value={String(safeValue || "")}
-                onChange={(val) => onChange(field.id, val)}
-              />
+              <div>
+                <ItemBadgeSelect
+                  kind="set"
+                  value={String(safeValue || "")}
+                  onChange={(val) => onChange(field.id, val)}
+                />
+                {error && (
+                  <p
+                    role="alert"
+                    className="text-xs text-destructive dark:text-red-400 mt-1"
+                  >
+                    {error}
+                  </p>
+                )}
+              </div>
             );
           }
           const hasEmptyOption =
@@ -384,7 +413,7 @@ const MemoizedField = memo(
                     val === EMPTY_SELECT_SENTINEL ? "" : val;
                   onChange(
                     field.id,
-                    isNaN(Number(normalizedVal))
+                    normalizedVal === "" || isNaN(Number(normalizedVal))
                       ? normalizedVal
                       : Number(normalizedVal),
                   );
@@ -454,7 +483,7 @@ const MemoizedField = memo(
           };
 
           return (
-            <div className="group/image-field flex justify-center p-3 transition-colors hover:bg-muted/5">
+            <div className="group/image-field flex flex-col items-center gap-2 p-3 transition-colors hover:bg-muted/5">
               <div className="relative flex h-80 w-60 shrink-0 items-center justify-center overflow-hidden">
                 {safeValue ? (
                   <img
@@ -470,7 +499,7 @@ const MemoizedField = memo(
 
                 <div className="absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all group-hover/image-field:bg-black/55 group-hover/image-field:opacity-100">
                   <div className="flex flex-col gap-2 px-4">
-                    <Button asChild>
+                    <Button asChild disabled={isProcessingImage}>
                       <Label
                         htmlFor={`upload-${field.id}`}
                         className="cursor-pointer"
@@ -485,6 +514,7 @@ const MemoizedField = memo(
                         variant="secondary"
                         size="sm"
                         className="cursor-pointer"
+                        disabled={isProcessingImage}
                         onClick={onOpenPlaceholderPicker}
                       >
                         <ImageIcon className="mr-2 h-4 w-4" />
@@ -498,6 +528,7 @@ const MemoizedField = memo(
                           variant="secondary"
                           size="sm"
                           className="cursor-pointer"
+                          disabled={isProcessingImage}
                           onClick={() =>
                             onOpenImageCropper?.(field.id, String(safeValue))
                           }
@@ -509,6 +540,7 @@ const MemoizedField = memo(
                           variant="destructive"
                           size="sm"
                           className="cursor-pointer"
+                          disabled={isProcessingImage}
                           onClick={() => {
                             onChange(field.id, "");
                             clearPlaceholderMetadata();
@@ -528,37 +560,29 @@ const MemoizedField = memo(
                   type="file"
                   accept="image/*"
                   className="hidden"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      try {
-                        const src = await readFileAsDataUrl(file);
-                        const dimensions = await getImageDimensions(src);
-                        if (!isBalatroCardImageSize(dimensions)) {
-                          onOpenImageCropper?.(field.id, src);
-                          e.currentTarget.value = "";
-                          return;
-                        }
-
-                        if (field.processFile) {
-                          const result = await field.processFile(file);
-                          onChange(field.id, result);
-                        } else {
-                          const result =
-                            await normalizeBalatroCardImageSource(src);
-                          onChange(field.id, result);
-                        }
-                        clearPlaceholderMetadata();
-                        clearImageLayers();
-                      } catch (err) {
-                        console.error("Image processing failed", err);
-                      } finally {
-                        e.currentTarget.value = "";
-                      }
-                    }
-                  }}
+                  disabled={isProcessingImage}
+                  onChange={(e) => void onUploadImage(field, e.currentTarget)}
                 />
               </div>
+              {isProcessingImage && (
+                <p role="status" className="text-xs text-muted-foreground">
+                  Preparing image…
+                </p>
+              )}
+              {error && (
+                <div className="space-y-2 text-center">
+                  <p role="alert" className="text-xs text-destructive dark:text-red-400">
+                    {error}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onChange(field.id, safeValue || "")}
+                  >
+                    Discard failed upload
+                  </Button>
+                </div>
+              )}
             </div>
           );
         case "custom":
@@ -654,6 +678,12 @@ const MemoizedField = memo(
     if (prev.field.id !== next.field.id) return false;
     if (prev.inGrid !== next.inGrid) return false;
     if (prev.error !== next.error) return false;
+    if (prev.field !== next.field) return false;
+    if (prev.onChange !== next.onChange) return false;
+    if (prev.field.type === "image" && prev.onUploadImage !== next.onUploadImage) {
+      return false;
+    }
+    if (prev.isProcessingImage !== next.isProcessingImage) return false;
 
     const prevHidden = prev.field.hidden
       ? prev.field.hidden(prev.fullItem)
@@ -879,6 +909,11 @@ function GenericItemDialogInternal<T extends { id: string }>({
   const [activeTab, setActiveTab] = useState<string>("");
   const [panelSize, setPanelSize] = useState<number>(70);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [imageErrors, setImageErrors] = useState<Record<string, string>>({});
+  const [processingImageFields, setProcessingImageFields] = useState<string[]>([]);
+  const imageUploadSessionRef = useRef(0);
+  const imageUploadOwnerRef = useRef<string | null>(null);
+  const imageUploadRequestsRef = useRef(new Map<string, symbol>());
   const [defaultLocalizationLanguage, setDefaultLocalizationLanguage] =
     useState<string>(DEFAULT_LOCALIZATION_LANGUAGE);
   const [activeLocalizationLanguage, setActiveLocalizationLanguage] =
@@ -889,6 +924,59 @@ function GenericItemDialogInternal<T extends { id: string }>({
   const modalRef = useRef<HTMLDivElement>(null);
   const handleSaveRef = useRef<() => void>(() => {});
   const isMini = variant === "mini";
+
+  useLayoutEffect(() => {
+    imageUploadSessionRef.current += 1;
+    imageUploadOwnerRef.current = open ? item?.id ?? null : null;
+    imageUploadRequestsRef.current.clear();
+    setProcessingImageFields([]);
+    setImageErrors({});
+    return () => {
+      imageUploadSessionRef.current += 1;
+      imageUploadOwnerRef.current = null;
+      imageUploadRequestsRef.current.clear();
+    };
+  }, [open, item?.id]);
+
+  const cancelImageRequest = useCallback((fieldId: string) => {
+    imageUploadRequestsRef.current.delete(fieldId);
+    setProcessingImageFields([...imageUploadRequestsRef.current.keys()]);
+    setImageErrors((prev) => {
+      if (!(fieldId in prev)) return prev;
+      const next = { ...prev };
+      delete next[fieldId];
+      return next;
+    });
+    setErrors((prev) => {
+      if (!(fieldId in prev)) return prev;
+      const next = { ...prev };
+      delete next[fieldId];
+      return next;
+    });
+  }, []);
+
+  const beginImageRequest = useCallback(
+    (fieldId: string, ownerId: string) => {
+      if (imageUploadOwnerRef.current !== ownerId) return null;
+      const session = imageUploadSessionRef.current;
+      const token = Symbol(fieldId);
+      cancelImageRequest(fieldId);
+      imageUploadRequestsRef.current.set(fieldId, token);
+      setProcessingImageFields([...imageUploadRequestsRef.current.keys()]);
+      const isCurrent = () =>
+        session === imageUploadSessionRef.current &&
+        imageUploadRequestsRef.current.get(fieldId) === token;
+      return {
+        isCurrent,
+        finish: () => {
+          if (!isCurrent()) return;
+          imageUploadRequestsRef.current.delete(fieldId);
+          setProcessingImageFields([...imageUploadRequestsRef.current.keys()]);
+        },
+      };
+    },
+    [cancelImageRequest],
+  );
 
   const resolvedTabs = useMemo(() => {
     const baseTabs = tabs && tabs.length > 0 ? [...tabs] : [];
@@ -1042,6 +1130,7 @@ function GenericItemDialogInternal<T extends { id: string }>({
   const handleChange = useCallback(
     (path: string, value: any) => {
       const fieldConfig = fieldConfigById.get(path);
+      if (fieldConfig?.type === "image") cancelImageRequest(path);
       const nextValue = fieldConfig
         ? sanitizeFieldValue(fieldConfig.type, path, value)
         : value;
@@ -1150,7 +1239,7 @@ function GenericItemDialogInternal<T extends { id: string }>({
         return prev;
       });
     },
-    [defaultLocalizationLanguage, fieldConfigById],
+    [cancelImageRequest, defaultLocalizationLanguage, fieldConfigById],
   );
 
   const clearImagePlaceholderMetadata = useCallback(() => {
@@ -1170,9 +1259,81 @@ function GenericItemDialogInternal<T extends { id: string }>({
     }
   }, [formData, handleChange]);
 
-  const handleOpenImageCropper = useCallback((fieldId: string, imageSrc: string) => {
-    setImageCropperState({ fieldId, imageSrc });
-  }, []);
+  const handleOpenImageCropper = useCallback(
+    (fieldId: string, imageSrc: string) => {
+      cancelImageRequest(fieldId);
+      setImageCropperState({ fieldId, imageSrc });
+    },
+    [cancelImageRequest],
+  );
+
+  const handleUploadImage = useCallback(
+    async (field: DialogField<T>, input: HTMLInputElement) => {
+      const file = input.files?.[0];
+      input.value = "";
+      if (!file || !open || !item) return;
+      const request = beginImageRequest(field.id, item.id);
+      if (!request) return;
+      try {
+        const src = await readFileAsDataUrl(file);
+        const dimensions = await getImageDimensions(src);
+        if (!request.isCurrent()) return;
+        if (!isBalatroCardImageSize(dimensions)) {
+          handleOpenImageCropper(field.id, src);
+          return;
+        }
+        const result = field.processFile
+          ? await field.processFile(file)
+          : await normalizeBalatroCardImageSource(src);
+        if (!request.isCurrent()) return;
+        handleChange(field.id, result);
+        clearImagePlaceholderMetadata();
+        if (field.id === "image") clearImageLayers();
+      } catch (error) {
+        if (!request.isCurrent()) return;
+        console.error("Image processing failed", error);
+        setImageErrors((prev) => ({
+          ...prev,
+          [field.id]: "This image could not be opened. Try another PNG, JPEG, or WebP image.",
+        }));
+      } finally {
+        request.finish();
+      }
+    },
+    [
+      beginImageRequest,
+      clearImageLayers,
+      clearImagePlaceholderMetadata,
+      handleChange,
+      handleOpenImageCropper,
+      item,
+      open,
+    ],
+  );
+
+  const handleSelectPlaceholder = useCallback(
+    async (entry: PlaceholderEntry) => {
+      if (!open || !item) return;
+      const request = beginImageRequest("image", item.id);
+      if (!request) return;
+      try {
+        let image = entry.src;
+        try {
+          image = await normalizeBalatroCardImageSource(entry.src);
+        } catch (error) {
+          console.error("Placeholder image normalization failed", error);
+        }
+        if (!request.isCurrent()) return;
+        handleChange("image", image);
+        clearImageLayers();
+        handleChange("placeholderCreditIndex", entry.index);
+        handleChange("placeholderCategory", entry.category);
+      } finally {
+        request.finish();
+      }
+    },
+    [beginImageRequest, clearImageLayers, handleChange, item, open],
+  );
 
   const handleApplyImageCrop = useCallback(
     (dataUrl: string) => {
@@ -1194,10 +1355,11 @@ function GenericItemDialogInternal<T extends { id: string }>({
 
   const handleSave = useCallback(() => {
     if (!formData || !formData.id) return;
+    if (imageUploadRequestsRef.current.size > 0 || imageCropperState) return;
 
     let nextFormData = formData;
-    const newErrors: Record<string, string> = {};
-    let hasError = false;
+    const newErrors: Record<string, string> = { ...imageErrors };
+    let hasError = Object.keys(imageErrors).length > 0;
 
     const validationGroups = hasTabs
       ? resolvedTabs.flatMap((tab) => tab.groups)
@@ -1262,7 +1424,16 @@ function GenericItemDialogInternal<T extends { id: string }>({
         }
       }
     }
-  }, [formData, onSave, onOpenChange, hasTabs, resolvedTabs, resolvedGroups]);
+  }, [
+    formData,
+    onSave,
+    onOpenChange,
+    hasTabs,
+    resolvedTabs,
+    resolvedGroups,
+    imageErrors,
+    imageCropperState,
+  ]);
 
   useEffect(() => {
     handleSaveRef.current = handleSave;
@@ -1327,6 +1498,16 @@ function GenericItemDialogInternal<T extends { id: string }>({
     "px-6 py-8 max-w-4xl mx-auto w-full",
     isMini && "max-w-3xl",
   );
+  const visibleErrors = { ...errors, ...imageErrors };
+  const errorEntries = Object.entries(visibleErrors);
+  const firstError = errorEntries[0];
+  const firstErrorTab = firstError && resolvedTabs.find((tab) =>
+    tab.groups.some((group) =>
+      group.fields.some((field) => field.id === firstError[0]),
+    ),
+  );
+  const firstErrorLabel = firstError &&
+    (fieldConfigById.get(firstError[0])?.label || firstError[0]);
 
   const renderGroups = (groupList: FieldGroup<T>[]) => (
     <div className={contentContainerClass}>
@@ -1379,12 +1560,14 @@ function GenericItemDialogInternal<T extends { id: string }>({
                   onChange={handleChange}
                   fullItem={formData}
                   inGrid={!!group.className?.includes("grid")}
-                  error={errors[field.id]}
+                  error={visibleErrors[field.id]}
                   showPlaceholderPicker={showPlaceholderPicker}
                   onOpenPlaceholderPicker={() =>
                     setIsPlaceholderDialogOpen(true)
                   }
                   onOpenImageCropper={handleOpenImageCropper}
+                  onUploadImage={handleUploadImage}
+                  isProcessingImage={processingImageFields.includes(field.id)}
                   rerenderKey={
                     field.id === "localizations"
                       ? activeLocalizationLanguage
@@ -1441,13 +1624,22 @@ function GenericItemDialogInternal<T extends { id: string }>({
               </Button>
               <Button
                 onClick={handleSave}
+                disabled={processingImageFields.length > 0 || !!imageCropperState}
                 size="lg"
                 className="cursor-pointer px-8"
               >
-                Save Changes
+                {processingImageFields.length > 0 ? "Preparing Image…" : "Save Changes"}
               </Button>
             </div>
           </div>
+          {firstError && (
+            <p role="alert" className="mt-3 text-sm text-destructive dark:text-red-400">
+              Changes haven’t been saved. {firstErrorLabel}
+              {firstErrorTab ? ` (${firstErrorTab.label})` : ""}: {firstError[1]}
+              {errorEntries.length > 1 &&
+                ` (${errorEntries.length - 1} more ${errorEntries.length === 2 ? "field needs" : "fields need"} attention.)`}
+            </p>
+          )}
         </DialogHeader>
 
         {hasTabs ? (
@@ -1480,18 +1672,34 @@ function GenericItemDialogInternal<T extends { id: string }>({
                   >
                     <ScrollArea className="flex-1">
                       <TabsList className="flex flex-col w-full bg-transparent p-2 gap-1 h-auto">
-                        {resolvedTabs.map((tab) => (
-                          <TabsTrigger
-                            key={tab.id}
-                            value={tab.id}
-                            className="w-full justify-start gap-3 px-3 py-2.5 text-sm font-medium border-transparent border-l-4 transition-all cursor-pointer rounded-r-md rounded-l-none data-[state=active]:bg-primary/10 data-[state=active]:text-primary data-[state=active]:border-primary hover:bg-primary/5 hover:text-primary"
-                          >
-                            {tab.icon && (
-                              <tab.icon className="h-4 w-4 opacity-70" />
-                            )}
-                            {tab.label}
-                          </TabsTrigger>
-                        ))}
+                        {resolvedTabs.map((tab) => {
+                          const errorCount = tab.groups.reduce(
+                            (count, group) => count + group.fields.filter(
+                              (field) => visibleErrors[field.id],
+                            ).length,
+                            0,
+                          );
+                          return (
+                            <TabsTrigger
+                              key={tab.id}
+                              value={tab.id}
+                              className="w-full justify-start gap-3 px-3 py-2.5 text-sm font-medium border-transparent border-l-4 transition-all cursor-pointer rounded-r-md rounded-l-none data-[state=active]:bg-primary/10 data-[state=active]:text-primary data-[state=active]:border-primary hover:bg-primary/5 hover:text-primary"
+                            >
+                              {tab.icon && (
+                                <tab.icon className="h-4 w-4 opacity-70" />
+                              )}
+                              {tab.label}
+                              {errorCount > 0 && (
+                                <span
+                                  className="ml-auto text-xs text-destructive dark:text-red-400"
+                                  aria-label={`${errorCount} ${errorCount === 1 ? "error" : "errors"}`}
+                                >
+                                  {errorCount}
+                                </span>
+                              )}
+                            </TabsTrigger>
+                          );
+                        })}
                       </TabsList>
                     </ScrollArea>
                   </div>
@@ -1544,19 +1752,7 @@ function GenericItemDialogInternal<T extends { id: string }>({
           open={isPlaceholderDialogOpen}
           onOpenChange={setIsPlaceholderDialogOpen}
           initialCategory={placeholderCategory}
-          onSelect={async (entry) => {
-            try {
-              const normalizedImage =
-                await normalizeBalatroCardImageSource(entry.src);
-              handleChange("image", normalizedImage);
-            } catch (error) {
-              console.error("Placeholder image normalization failed", error);
-              handleChange("image", entry.src);
-            }
-            clearImageLayers();
-            handleChange("placeholderCreditIndex", entry.index);
-            handleChange("placeholderCategory", entry.category);
-          }}
+          onSelect={handleSelectPlaceholder}
         />
       )}
 
