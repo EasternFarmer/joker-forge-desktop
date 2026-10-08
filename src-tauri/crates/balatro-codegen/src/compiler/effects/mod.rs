@@ -137,6 +137,9 @@ pub fn compile_effect(
         "free_rerolls" => misc::free_rerolls(effect, ctx),
 
         // --------------- Economy (dollars) ---------------
+        "blind_reward" if crate::compiler::payout::is_reward(effect, ctx, trigger) => {
+            crate::compiler::payout::compile_grouped_reward(effect, ctx)
+        }
         "set_dollars" => misc::set_dollars(effect, ctx),
         "set_sell_value" => misc::set_sell_value(effect, ctx),
 
@@ -208,7 +211,9 @@ pub fn compile_effect(
 
     ctx.record_effect_config_names(&effect.id, config_start);
     for (_, value) in &mut result.return_fields { ctx.bind_preview_expr(value); }
-    for stmt in &mut result.pre_return { ctx.bind_preview_stmt(stmt); }
+    if effect.effect_type != "blind_reward" {
+        for stmt in &mut result.pre_return { ctx.bind_preview_stmt(stmt); }
+    }
     if let Some(message) = &mut result.message { ctx.bind_preview_expr(message); }
     Some(result)
 }

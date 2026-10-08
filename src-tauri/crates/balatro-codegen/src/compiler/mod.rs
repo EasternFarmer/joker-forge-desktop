@@ -2,6 +2,7 @@ pub mod colors;
 pub mod conditions;
 pub mod context;
 mod description;
+mod payout;
 pub mod effects;
 pub mod triggers;
 pub mod values;
@@ -132,7 +133,8 @@ pub fn compile_node_snippet(
                 "preview".to_string(),
                 false,
             );
-            match effects::compile_effect(&effect, &mut ctx, "hand_played") {
+            let trigger = if specific == "blind_reward" { "round_end" } else { "hand_played" };
+            match effects::compile_effect(&effect, &mut ctx, trigger) {
                 Some(output) => {
                     let stmts = effects::build_return_block(&[output]);
                     crate::lua_ast::format_lua_source(&Emitter::new().emit_stmts(&stmts))
@@ -159,12 +161,15 @@ pub(crate) struct RuleOutput {
     pub(crate) has_retrigger: bool,
     pub(crate) has_destroy: bool,
     pub(crate) blind_rewards: Vec<BlindRewardOutput>,
+    pub(crate) has_grouped_payout: bool,
+    pub(crate) grouped_payout_stmts: Vec<Stmt>,
 }
 
 pub(crate) struct BlindRewardOutput {
     pub(crate) condition_expr: Option<Expr>,
     pub(crate) amount_expr: Expr,
     pub(crate) boss_only: bool,
+    pub(crate) segment_id: Option<String>,
 }
 
 fn param_value_user_var_name(value: &ParamValue) -> Option<String> {
@@ -365,11 +370,14 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
             if effect.effect_type == "blind_reward"
                 && (trigger == "round_end" || trigger == "boss_defeated")
             {
+                let config_start = ctx.config_vars().len();
                 blind_rewards.push(BlindRewardOutput {
                     condition_expr: condition_expr.clone(),
                     amount_expr: compile_blind_reward_amount(effect, ctx),
                     boss_only: trigger == "boss_defeated",
+                    segment_id: effect_segment_id(&rule.id, effect),
                 });
+                ctx.record_effect_config_names(&effect.id, config_start);
                 continue;
             }
 
@@ -380,15 +388,21 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
         }
     }
 
+    let mut has_regular_effects = !effect_outputs.is_empty();
+    let has_grouped_payout = rule.random_groups.iter().flat_map(|g| &g.effects)
+        .chain(rule.loop_groups.iter().flat_map(|g| &g.effects))
+        .any(|effect| effect_matches_phase(effect, repetition_phase)
+            && payout::is_reward(effect, ctx, &trigger));
+
     // Compile random groups
     for (index, rg) in rule.random_groups.iter().enumerate() {
-        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger, repetition_phase);
+        let rg_effects = compile_random_group(&rule.id, index, rg, ctx, &trigger, repetition_phase, &mut has_regular_effects);
         effect_outputs.extend(rg_effects);
     }
 
     // Compile loop groups
     for (index, lg) in rule.loop_groups.iter().enumerate() {
-        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger, repetition_phase);
+        let lg_effects = compile_loop_group(&rule.id, index, lg, ctx, &trigger, repetition_phase, &mut has_regular_effects);
         effect_outputs.extend(lg_effects);
     }
 
@@ -396,7 +410,7 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
     let collect_groups = (!rule.random_groups.is_empty() || !rule.loop_groups.is_empty())
         && !(matches!(ctx.object_type, ObjectType::Consumable | ObjectType::Deck)
             && trigger == "card_used");
-    let effect_stmts = if collect_groups {
+    let mut effect_stmts = if collect_groups {
         // Group effects must not return out of the calculate hook mid-loop or
         // before sibling effects. Consumable use resolves each table, and deck
         // apply performs setup statements without returning calculation effects.
@@ -407,6 +421,12 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
         effects::collect_group_effects(stmts)
     } else {
         effects::build_return_block(&effect_outputs)
+    };
+
+    let grouped_payout_stmts = if has_grouped_payout && !has_regular_effects && !rule.destroy {
+        std::mem::take(&mut effect_stmts)
+    } else {
+        vec![]
     };
 
     RuleOutput {
@@ -420,6 +440,8 @@ fn compile_single_rule(rule: &RuleDef, ctx: &mut CompileContext, repetition_phas
         has_retrigger: repetition_phase == Some(true),
         has_destroy: rule.destroy && repetition_phase != Some(true),
         blind_rewards,
+        has_grouped_payout,
+        grouped_payout_stmts,
     }
 }
 
@@ -438,9 +460,11 @@ fn compile_random_group(
     ctx: &mut CompileContext,
     trigger: &str,
     repetition_phase: Option<bool>,
+    has_regular_effects: &mut bool,
 ) -> Vec<effects::EffectOutput> {
     let publishes_result = ctx.object_type == ObjectType::Joker
         && ctx.probability_group_is_referenced(&rg.id);
+    *has_regular_effects |= publishes_result;
     if repetition_phase.is_some() && !rg.effects.is_empty()
         && !rg.effects.iter().any(|effect| effect_matches_phase(effect, repetition_phase))
     {
@@ -461,6 +485,7 @@ fn compile_random_group(
         }
         ctx.set_preview_node(vec![serde_json::json!("randomGroups"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
+            *has_regular_effects |= !payout::is_reward(effect, ctx, trigger);
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
         }
@@ -616,6 +641,7 @@ fn compile_loop_group(
     ctx: &mut CompileContext,
     trigger: &str,
     repetition_phase: Option<bool>,
+    has_regular_effects: &mut bool,
 ) -> Vec<effects::EffectOutput> {
     let mut inner_outputs = Vec::new();
     for (index, effect) in lg.effects.iter().enumerate() {
@@ -624,6 +650,7 @@ fn compile_loop_group(
         }
         ctx.set_preview_node(vec![serde_json::json!("loops"), serde_json::json!(group_index), serde_json::json!("effects"), serde_json::json!(index)], &effect.params);
         if let Some(mut eo) = effects::compile_effect(effect, ctx, trigger) {
+            *has_regular_effects |= !payout::is_reward(effect, ctx, trigger);
             eo.segment_id = effect_segment_id(rule_id, effect);
             inner_outputs.push(eo);
         }
@@ -883,13 +910,27 @@ fn build_calculate_function(rule_outputs: &[RuleOutput], ctx: &CompileContext) -
                 .iter()
                 .any(|po| !po.calculate_stmts.is_empty())
     });
+    let has_grouped_payout = rule_outputs.iter().any(|r| r.has_grouped_payout);
 
-    if non_passive.is_empty() && !has_passive_calculate {
+    if non_passive.is_empty() && !has_passive_calculate && !has_grouped_payout {
         return None;
     }
 
     // Group rules by trigger
     let mut body: Vec<Stmt> = Vec::new();
+    if has_grouped_payout {
+        body.push(payout::begin_round());
+        for ro in rule_outputs.iter().filter(|r| !r.grouped_payout_stmts.is_empty()) {
+            let mut condition = lua_and(lua_ident("jf_payout_evaluate"),
+                triggers::trigger_context(ctx.object_type, &ro.trigger, false));
+            if let Some(rule_condition) = &ro.condition_expr {
+                condition = lua_and(condition, rule_condition.clone());
+            }
+            let stmt = lua_if(condition,
+                wrap_rule_segment(&ro.rule_id, ro.grouped_payout_stmts.clone()));
+            body.extend(wrap_trigger_stmt_for_rules(&[ro], stmt));
+        }
+    }
     let has_any_destroy = non_passive.iter().any(|r| r.has_destroy);
 
     if has_any_destroy {
@@ -1602,41 +1643,52 @@ fn rank_to_id(rank: &str) -> i64 {
 }
 
 fn build_calc_dollar_bonus(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -> Option<Expr> {
-    let mut regular: Vec<&BlindRewardOutput> = Vec::new();
-    let mut boss: Vec<&BlindRewardOutput> = Vec::new();
+    fn reward_stmts(rule: &RuleOutput, reward: &BlindRewardOutput) -> Vec<Stmt> {
+        let add_stmt = lua_assign(lua_ident("blind_reward"), lua_add(
+            lua_ident("blind_reward"),
+            lua_call("math.max", vec![reward.amount_expr.clone(), lua_int(0)]),
+        ));
+        let mut statements = if let Some(id) = &reward.segment_id {
+            vec![stmt_section_begin(id), add_stmt, stmt_section_end(id)]
+        } else {
+            vec![add_stmt]
+        };
+        if let Some(condition) = &reward.condition_expr {
+            statements = vec![lua_if(condition.clone(), statements)];
+        }
+        wrap_trigger_stmt_for_rules(&[rule], Stmt::DoBlock(
+            wrap_rule_segment(&rule.rule_id, statements)))
+    }
+
+    let mut regular = Vec::new();
+    let mut boss = Vec::new();
 
     for ro in rule_outputs {
         for reward in &ro.blind_rewards {
             if reward.boss_only {
-                boss.push(reward);
+                boss.push((ro, reward));
             } else {
-                regular.push(reward);
+                regular.push((ro, reward));
             }
         }
     }
 
-    if regular.is_empty() && boss.is_empty() {
+    let has_grouped_payout = rule_outputs.iter().any(|r| r.has_grouped_payout);
+    if regular.is_empty() && boss.is_empty() && !has_grouped_payout {
         return None;
     }
 
-    let mut body: Vec<Stmt> = Vec::new();
-    body.push(lua_local("blind_reward", lua_int(0)));
+    let mut body = vec![payout::cashout_context()];
+    body.push(lua_local("blind_reward", if has_grouped_payout {
+        payout::read_total()
+    } else {
+        lua_int(0)
+    }));
 
     if !boss.is_empty() {
         let mut boss_body: Vec<Stmt> = Vec::new();
-        for reward in &boss {
-            let add_stmt = lua_assign(
-                lua_ident("blind_reward"),
-                lua_add(
-                    lua_ident("blind_reward"),
-                    lua_call("math.max", vec![reward.amount_expr.clone(), lua_int(0)]),
-                ),
-            );
-            if let Some(cond) = &reward.condition_expr {
-                boss_body.push(lua_if(cond.clone(), vec![add_stmt]));
-            } else {
-                boss_body.push(add_stmt);
-            }
+        for (rule, reward) in &boss {
+            boss_body.extend(reward_stmts(rule, reward));
         }
         body.push(lua_if(
             lua_raw_expr("G.GAME.blind and G.GAME.blind.boss"),
@@ -1644,19 +1696,8 @@ fn build_calc_dollar_bonus(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -
         ));
     }
 
-    for reward in &regular {
-        let add_stmt = lua_assign(
-            lua_ident("blind_reward"),
-            lua_add(
-                lua_ident("blind_reward"),
-                lua_call("math.max", vec![reward.amount_expr.clone(), lua_int(0)]),
-            ),
-        );
-        if let Some(cond) = &reward.condition_expr {
-            body.push(lua_if(cond.clone(), vec![add_stmt]));
-        } else {
-            body.push(add_stmt);
-        }
+    for (rule, reward) in &regular {
+        body.extend(reward_stmts(rule, reward));
     }
 
     body.push(lua_if(
@@ -1665,7 +1706,7 @@ fn build_calc_dollar_bonus(rule_outputs: &[RuleOutput], _ctx: &CompileContext) -
     ));
 
     Some(Expr::Function {
-        params: vec!["card".into()],
+        params: vec!["self".into(), "card".into()],
         body,
     })
 }
